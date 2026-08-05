@@ -1,0 +1,60 @@
+schema_version = 1
+
+[run]
+name = "discovery"
+suite = "discovery"
+artifact_root = "runs"
+seed = 42
+
+[training]
+seconds = 300.0
+tokens = 0
+depth = 6
+head_dim = 128
+sequence_length = 1024
+device_batch_size = 8
+total_batch_size = 32768
+window_pattern = "L"
+sliding_window = 256
+force_final_full = true
+eval_tokens = 1048576
+precision = "bfloat16"
+
+[memory_probe]
+enabled = true
+training_tokens = 1048576
+vocab_size = 256
+depth = 4
+width = 256
+head_dim = 128
+batch_size = 16
+train_sequence_length = 1024
+window_size = 256
+learning_rate = 0.0003
+examples_per_cell = 128
+lengths = [256, 512, 1024, 2048]
+loads = [4, 16, 64]
+updates = [1, 2, 4, 8]
+distractor_ratios = [0, 1, 4]
+
+[decision]
+bpb_floor = 0.002
+accuracy_floor = 0.01
+throughput_floor_fraction = 0.03
+memory_floor_fraction = 0.02
+baseline_seeds = [11, 23, 37, 53, 71]
+internal_promotion_seeds = [101, 211, 307]
+confirmation_seed_count = 5
+
+[protection]
+allowed_paths = ["nanochat/gpt.py", "nanochat/mixers/", "configs/candidates/"]
+protected_paths = [
+  "nanochat/research/",
+  "configs/research/",
+  "scripts/base_eval.py",
+  "nanochat/core_eval.py",
+  "nanochat/loss_eval.py",
+  "nanochat/dataloader.py",
+  "nanochat/dataset.py",
+  "nanochat/tokenizer.py",
+]

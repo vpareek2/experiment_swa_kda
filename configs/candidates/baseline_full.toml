@@ -1,0 +1,5 @@
+[candidate]
+name = "baseline-full"
+window_pattern = "L"
+sliding_window = 256
+force_final_full = true

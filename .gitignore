@@ -1,0 +1,63 @@
+# Python / uv environments
+.venv/
+venv/
+.uv-cache/
+*.egg-info/
+build/
+dist/
+
+# Python caches and test output
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.hypothesis/
+.ipynb_checkpoints/
+.cache/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+AGENTS.md.local
+.codex/
+
+# Editors and operating systems
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Generated research artifacts. Keep recipes under recipes/, not here.
+runs/
+wandb/
+report.md
+eval_bundle/
+*.log
+
+# Model, optimizer, and profiler output
+checkpoints/
+base_checkpoints/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.trace.json
+*.nsys-rep
+*.sqlite
+
+# Native extension build products
+*.so
+*.dylib
+*.dll
+
+# Large external references are intentionally local-only.
+ref/
