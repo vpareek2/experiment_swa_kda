@@ -675,6 +675,7 @@ if master_process:
         "sequence_length": args.max_seq_len,
         "total_batch_size": total_batch_size,
         "window_sizes": orig_model.window_sizes,
+        "triton_ptxas_path": os.environ.get("TRITON_PTXAS_PATH"),
     }
     print0("RESEARCH_TRAIN_RESULT " + json.dumps(summary, sort_keys=True))
 

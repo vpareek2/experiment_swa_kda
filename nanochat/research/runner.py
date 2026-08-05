@@ -19,6 +19,7 @@ from nanochat.research.artifacts import (
     git_provenance,
     make_run_id,
     protected_fingerprint,
+    select_triton_ptxas,
 )
 from nanochat.research.config import ResearchConfig
 from nanochat.research.decision import classify_candidate, objectives_from_config
@@ -37,6 +38,8 @@ def doctor(root: str | Path, config: ResearchConfig) -> dict[str, Any]:
     parquet = sorted(data_dir.glob("*.parquet")) if data_dir.exists() else []
     environment = environment_provenance()
     provenance = git_provenance(repo)
+    ptxas = select_triton_ptxas()
+    capability = tuple(environment.get("compute_capability", (0, 0)))
     checks = {
         "git_repository": (repo / ".git").exists(),
         "uv": shutil.which("uv") is not None,
@@ -45,6 +48,7 @@ def doctor(root: str | Path, config: ResearchConfig) -> dict[str, Any]:
         "cuda": environment["cuda_available"],
         "bfloat16": not environment["cuda_available"] or tuple(environment.get("compute_capability", (0, 0))) >= (8, 0),
         "clean_commit": provenance["commit"] is not None and not provenance["dirty"],
+        "triton_ptxas": capability < (12, 1) or ptxas is not None,
     }
     environment_valid = all(value for key, value in checks.items() if key not in {"dataset_shards", "clean_commit"}) and checks["dataset_shards"] >= 1
     return {
@@ -167,6 +171,9 @@ def run_experiment(
         "git": provenance,
         "environment": environment_provenance(),
         "protected_files": protected_fingerprint(repo, config.protection.protected_paths),
+        "runtime_environment_overrides": {
+            "TRITON_PTXAS_PATH": select_triton_ptxas(),
+        },
     }
     atomic_write_json(run_dir / "manifest.json", manifest)
 
@@ -187,6 +194,9 @@ def run_experiment(
         log_path = run_dir / "train.log"
         environment = os.environ.copy()
         environment["NANOCHAT_DTYPE"] = config.training.precision
+        triton_ptxas = select_triton_ptxas()
+        if triton_ptxas:
+            environment["TRITON_PTXAS_PATH"] = triton_ptxas
         with log_path.open("w", encoding="utf-8") as log:
             completed = subprocess.run(
                 _trainer_command(config, run_id), cwd=repo, env=environment,

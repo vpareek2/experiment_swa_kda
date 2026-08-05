@@ -6,7 +6,12 @@ import pytest
 import torch
 
 from nanochat.gpt import GPT, GPTConfig
-from nanochat.research.artifacts import atomic_write_json, canonical_json_bytes, protected_fingerprint
+from nanochat.research.artifacts import (
+    atomic_write_json,
+    canonical_json_bytes,
+    protected_fingerprint,
+    select_triton_ptxas,
+)
 from nanochat.research.config import ConfigError, MemoryProbeConfig, apply_candidate, load_config
 from nanochat.research.decision import (
     aggregate_objectives,
@@ -171,6 +176,13 @@ def test_artifacts_are_canonical_atomic_and_fingerprinted(tmp_path):
     fingerprint = protected_fingerprint(tmp_path, ["nested/"])
     assert fingerprint["nested/result.json"]
     assert "nested/__pycache__/ignored.pyc" not in fingerprint
+
+
+def test_gb10_selects_an_assembler_with_sm121a_support():
+    if not torch.cuda.is_available() or torch.cuda.get_device_capability(0) < (12, 1):
+        pytest.skip("SM 12.1 compatibility check")
+    selected = select_triton_ptxas()
+    assert selected is not None
 
 
 def test_structured_training_log_is_extracted(tmp_path):

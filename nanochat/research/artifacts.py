@@ -5,6 +5,7 @@ import json
 import os
 import platform
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -13,6 +14,25 @@ from pathlib import Path
 from typing import Any, Iterable
 
 import torch
+
+
+def _tool_output(path: str, flag: str) -> str:
+    result = subprocess.run([path, flag], text=True, capture_output=True, check=False)
+    return (result.stdout + result.stderr).strip()
+
+
+def select_triton_ptxas() -> str | None:
+    """Select a system assembler when Triton's bundled one lacks the GPU target."""
+    explicit = os.environ.get("TRITON_PTXAS_PATH")
+    if explicit:
+        return explicit
+    if not torch.cuda.is_available() or torch.cuda.get_device_capability(0) < (12, 1):
+        return None
+    candidates = ["/usr/local/cuda/bin/ptxas", shutil.which("ptxas")]
+    for candidate in dict.fromkeys(path for path in candidates if path):
+        if "sm_121a" in _tool_output(candidate, "--help"):
+            return candidate
+    return None
 
 
 def sha256_file(path: str | Path) -> str:
@@ -87,11 +107,14 @@ def environment_provenance() -> dict[str, Any]:
         "cuda_available": cuda,
     }
     if cuda:
+        selected_ptxas = select_triton_ptxas()
         result.update({
             "device_name": torch.cuda.get_device_name(0),
             "compute_capability": list(torch.cuda.get_device_capability(0)),
             "device_count": torch.cuda.device_count(),
             "compiled_architectures": torch.cuda.get_arch_list(),
+            "triton_ptxas_path": selected_ptxas,
+            "triton_ptxas_version": _tool_output(selected_ptxas, "--version") if selected_ptxas else None,
         })
     return result
 
