@@ -65,7 +65,7 @@ def _default_probe_stages() -> tuple[ProbeStageConfig, ...]:
 
 @dataclass(frozen=True)
 class MemoryProbeConfig:
-    enabled: bool = True
+    enabled: bool = False
     protocol_version: str = "associative_recall_v2"
     vocab_size: int = 256
     depth: int = 4
@@ -95,9 +95,23 @@ class MemoryProbeConfig:
 
 
 @dataclass(frozen=True)
+class GeneralEvaluationConfig:
+    """Frozen, architecture-neutral evaluation on natural language and CORE."""
+    enabled: bool = True
+    protocol: str = "general_lm"
+    context_lengths: tuple[int, ...] = (128, 256, 512, 1024)
+    target_tokens: int = 64
+    max_documents: int = 128
+    core_enabled: bool = True
+    core_max_per_task: int = 100
+    ruler_enabled: bool = False
+    ruler_manifest: str = ""
+    ruler_manifest_sha256: str = ""
+
+
+@dataclass(frozen=True)
 class DecisionConfig:
     bpb_floor: float = 0.002
-    accuracy_floor: float = 0.01
     throughput_floor_fraction: float = 0.03
     memory_floor_fraction: float = 0.02
     baseline_seeds: tuple[int, ...] = (11, 23, 37, 53, 71)
@@ -129,7 +143,9 @@ class ResearchConfig:
     schema_version: int = 2
     run: RunConfig = field(default_factory=RunConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
+    # Retained only to read historical artifacts; it is disabled in the current plan.
     memory_probe: MemoryProbeConfig = field(default_factory=MemoryProbeConfig)
+    evaluation: GeneralEvaluationConfig = field(default_factory=GeneralEvaluationConfig)
     decision: DecisionConfig = field(default_factory=DecisionConfig)
     protection: ProtectionConfig = field(default_factory=ProtectionConfig)
 
@@ -146,7 +162,7 @@ def _section(cls, raw: dict[str, Any], name: str):
     if unknown:
         raise ConfigError(f"Unknown [{name}] keys: {sorted(unknown)}")
     for key, value in list(values.items()):
-        if key in {"lengths", "loads", "updates", "distractor_ratios", "calibration_seeds", "baseline_seeds", "internal_promotion_seeds", "allowed_paths", "protected_paths"}:
+        if key in {"lengths", "loads", "updates", "distractor_ratios", "calibration_seeds", "context_lengths", "baseline_seeds", "internal_promotion_seeds", "allowed_paths", "protected_paths"}:
             values[key] = tuple(value)
     if cls is MemoryProbeConfig and "stages" in values:
         stages = []
@@ -171,8 +187,8 @@ def load_config(path: str | Path) -> ResearchConfig:
         raw = tomllib.load(handle)
     schema_version = raw.get("schema_version", 1)
     if schema_version != 2:
-        raise ConfigError(f"Unsupported schema_version={schema_version}; expected 2 (memory probe v2)")
-    known = {"schema_version", "run", "training", "memory_probe", "decision", "protection"}
+        raise ConfigError(f"Unsupported schema_version={schema_version}; expected 2")
+    known = {"schema_version", "run", "training", "memory_probe", "evaluation", "decision", "protection"}
     unknown = set(raw) - known
     if unknown:
         raise ConfigError(f"Unknown top-level keys: {sorted(unknown)}")
@@ -181,6 +197,7 @@ def load_config(path: str | Path) -> ResearchConfig:
         run=_section(RunConfig, raw, "run"),
         training=_section(TrainingConfig, raw, "training"),
         memory_probe=_section(MemoryProbeConfig, raw, "memory_probe"),
+        evaluation=_section(GeneralEvaluationConfig, raw, "evaluation"),
         decision=_section(DecisionConfig, raw, "decision"),
         protection=_section(ProtectionConfig, raw, "protection"),
     )
@@ -233,6 +250,24 @@ def validate_config(config: ResearchConfig) -> None:
         raise ConfigError("window_pattern must contain only L, S, and K")
     if train.sliding_window <= 0 or train.sliding_window > train.sequence_length:
         raise ConfigError("sliding_window must be positive and no larger than sequence_length")
+    evaluation = config.evaluation
+    if evaluation.enabled:
+        if evaluation.protocol != "general_lm":
+            raise ConfigError("Unsupported general evaluation protocol")
+        if not evaluation.context_lengths or min(evaluation.context_lengths) <= 0:
+            raise ConfigError("evaluation context_lengths must be non-empty and positive")
+        if tuple(sorted(set(evaluation.context_lengths))) != evaluation.context_lengths:
+            raise ConfigError("evaluation context_lengths must be unique and ascending")
+        if max(evaluation.context_lengths) > train.sequence_length:
+            raise ConfigError("evaluation context_lengths must not exceed the trained sequence length")
+        if evaluation.target_tokens <= 0 or evaluation.target_tokens >= min(evaluation.context_lengths):
+            raise ConfigError("evaluation target_tokens must be positive and smaller than every context length")
+        if evaluation.max_documents <= 0:
+            raise ConfigError("evaluation max_documents must be positive")
+        if evaluation.core_max_per_task == 0 or evaluation.core_max_per_task < -1:
+            raise ConfigError("evaluation core_max_per_task must be -1 or positive")
+        if evaluation.ruler_enabled and (not evaluation.ruler_manifest or len(evaluation.ruler_manifest_sha256) != 64):
+            raise ConfigError("enabled RULER evaluation requires a manifest path and SHA-256")
     if probe.enabled:
         if probe.protocol_version != "associative_recall_v2":
             raise ConfigError(f"Unsupported memory probe protocol: {probe.protocol_version}")

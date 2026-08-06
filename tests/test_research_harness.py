@@ -64,8 +64,8 @@ def test_research_configs_load_and_use_distinct_budget_lanes():
     assert discovery.schema_version == promotion.schema_version == 2
     assert discovery.training.kda_backend == promotion.training.kda_backend == "fla_triton"
     assert importlib.metadata.version("fla-core") == "0.5.2"
-    assert sum(stage.answer_budget for stage in discovery.memory_probe.stages) == 544_768
-    assert probe_protocol_hash(discovery.memory_probe) == probe_protocol_hash(promotion.memory_probe)
+    assert discovery.memory_probe.enabled is False
+    assert discovery.evaluation.protocol == promotion.evaluation.protocol == "general_lm"
 
 
 def test_config_rejects_unknown_keys(tmp_path):
@@ -158,8 +158,7 @@ def test_wilson_interval_contains_observed_accuracy():
 def _objectives(**overrides):
     values = {
         "val_bpb": 2.0,
-        "memory_auc": 0.5,
-        "update_accuracy": 0.5,
+        "context_bpb": 2.0,
         "tokens_per_second": 100.0,
         "peak_memory_mb": 1000.0,
         "state_bytes": 1000.0,
@@ -183,7 +182,7 @@ def test_pareto_decision_distinguishes_dominated_frontier_and_retest():
 
 def test_seed_aggregation_and_noise_calibration():
     summaries = [
-        {"status": "complete", "memory_probe_protocol_version": "associative_recall_v2",
+        {"status": "complete", "evaluation_protocol": "general_lm",
          "objectives": _objectives(val_bpb=value)}
         for value in (1.99, 2.00, 2.01, 2.02, 1.98)
     ]
@@ -295,15 +294,15 @@ def test_calibration_requires_learning_and_swa_boundary_discrimination():
     assert next(item for item in checks if item["name"].endswith("full_easy"))["passed"] is False
 
 
-def test_legacy_probe_runs_are_excluded_from_frontier_and_report(tmp_path):
-    legacy = {"run_id": "v1", "status": "complete", "decision": {"status": "frontier"},
-              "objectives": _objectives(memory_auc=0.99)}
-    current = {"run_id": "v2", "status": "complete", "decision": {"status": "frontier"},
-               "memory_probe_protocol_version": "associative_recall_v2", "objectives": _objectives()}
-    for item in (legacy, current):
+def test_historical_runs_are_excluded_from_general_lm_frontier_and_report(tmp_path):
+    historical = {"run_id": "historical", "status": "complete", "decision": {"status": "frontier"},
+                  "objectives": {"val_bpb": 2.0}}
+    current = {"run_id": "current", "status": "complete", "decision": {"status": "frontier"},
+               "evaluation_protocol": "general_lm", "objectives": _objectives()}
+    for item in (historical, current):
         atomic_write_json(tmp_path / item["run_id"] / "summary.json", item)
-    assert [item["run_id"] for item in _frontier_summaries(tmp_path, "new", "associative_recall_v2")] == ["v2"]
-    report = render_report([legacy, current])
+    assert [item["run_id"] for item in _frontier_summaries(tmp_path, "new", "general_lm")] == ["current"]
+    report = render_report([historical, current])
     assert "legacy/ineligible" in report
 
 

@@ -22,8 +22,7 @@ class Objective:
 
 DEFAULT_OBJECTIVES = (
     Objective("val_bpb", "min", 0.002),
-    Objective("memory_auc", "max", 0.01),
-    Objective("update_accuracy", "max", 0.01),
+    Objective("context_bpb", "min", 0.002),
     Objective("tokens_per_second", "max", 0.03, relative=True),
     Objective("peak_memory_mb", "min", 0.02, relative=True),
     Objective("state_bytes", "min", 0.02, relative=True),
@@ -34,8 +33,7 @@ def objectives_from_config(config) -> tuple[Objective, ...]:
     """Build the frozen decision contract from a ResearchConfig decision table."""
     return (
         Objective("val_bpb", "min", config.bpb_floor),
-        Objective("memory_auc", "max", config.accuracy_floor),
-        Objective("update_accuracy", "max", config.accuracy_floor),
+        Objective("context_bpb", "min", config.bpb_floor),
         Objective("tokens_per_second", "max", config.throughput_floor_fraction, relative=True),
         Objective("peak_memory_mb", "min", config.memory_floor_fraction, relative=True),
         Objective("state_bytes", "min", config.memory_floor_fraction, relative=True),
@@ -46,9 +44,9 @@ def aggregate_objectives(summaries: Sequence[Mapping[str, Any]]) -> dict[str, An
     complete = [item for item in summaries if item.get("status") == "complete" and item.get("objectives")]
     if len(complete) < 2:
         raise ValueError("aggregation requires at least two complete runs")
-    protocols = {item.get("memory_probe_protocol_version") for item in complete}
-    if protocols != {"associative_recall_v2"}:
-        raise ValueError("aggregation requires memory probe protocol associative_recall_v2 for every run")
+    protocols = {item.get("evaluation_protocol") for item in complete}
+    if protocols != {"general_lm"}:
+        raise ValueError("aggregation requires general_lm evaluation for every run")
     names = tuple(complete[0]["objectives"])
     if any(set(item["objectives"]) != set(names) for item in complete):
         raise ValueError("all runs must contain the same objectives")
@@ -64,7 +62,7 @@ def aggregate_objectives(summaries: Sequence[Mapping[str, Any]]) -> dict[str, An
             "stdev": stdev,
             "ci95": [mean - half_width, mean + half_width],
         }
-    return {"schema_version": 2, "memory_probe_protocol_version": "associative_recall_v2",
+    return {"schema_version": 2, "evaluation_protocol": "general_lm",
             "runs": len(complete), "metrics": metrics}
 
 

@@ -21,77 +21,21 @@ eval_tokens = 4194304
 precision = "bfloat16"
 kda_backend = "fla_triton"
 
-[memory_probe]
+
+[evaluation]
 enabled = true
-protocol_version = "associative_recall_v2"
-vocab_size = 256
-depth = 4
-width = 256
-head_dim = 128
-window_size = 256
-learning_rate = 0.0003
-initialization_seed = 11
-training_seed = 11
-examples_per_cell = 512
-easy_control_examples = 512
-evaluation_batch_size = 16
-lengths = [256, 512, 1024, 2048]
-loads = [4, 16, 64]
-updates = [1, 2, 4, 8]
-distractor_ratios = [0, 1, 4]
-calibration_seeds = [11, 23, 37]
-overfit_max_steps = 100
-full_easy_min_accuracy = 0.95
-full_memory_auc_min = 0.85
-full_update_accuracy_min = 0.60
-full_long_accuracy_min = 0.90
-swa_local_accuracy_min = 0.80
-discrimination_margin_min = 0.50
-max_probe_seconds = 90.0
-
-[[memory_probe.stages]]
-name = "easy-32"
-answer_budget = 128000
-batch_size = 64
-sequence_length = 32
-loads = [4]
-num_queries = 4
-updates = [1]
-distractor_ratios = [0]
-
-[[memory_probe.stages]]
-name = "easy-64"
-answer_budget = 128000
-batch_size = 64
-sequence_length = 64
-loads = [4]
-num_queries = 4
-updates = [1]
-distractor_ratios = [0]
-
-[[memory_probe.stages]]
-name = "easy-128"
-answer_budget = 256000
-batch_size = 64
-sequence_length = 128
-loads = [4]
-num_queries = 4
-updates = [1]
-distractor_ratios = [0]
-
-[[memory_probe.stages]]
-name = "mixed-1024"
-answer_budget = 32768
-batch_size = 16
-sequence_length = 1024
-loads = [4, 16, 32]
-num_queries = 4
-updates = [1, 2, 4]
-distractor_ratios = [0, 1]
+protocol = "general_lm"
+context_lengths = [128, 256, 512, 1024]
+target_tokens = 64
+max_documents = 512
+core_enabled = true
+ruler_enabled = false
+ruler_manifest = ""
+ruler_manifest_sha256 = ""
+core_max_per_task = -1
 
 [decision]
 bpb_floor = 0.002
-accuracy_floor = 0.01
 throughput_floor_fraction = 0.03
 memory_floor_fraction = 0.02
 baseline_seeds = [11, 23, 37, 53, 71]

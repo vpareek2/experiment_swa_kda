@@ -164,3 +164,58 @@ uv run --no-sync research run --config configs/research/discovery.toml \
   a mechanism isolation, not the target architecture.
 - Run at least three diagnostic seeds for full, KDA-only, and SWA+KDA before
   treating overwrite and distractor deltas as stable.
+
+## 2026-08-06 [agent] implement the current general-LM evaluation foundation
+
+**Context**
+
+- The prior evaluation approaches are not suitable as architecture-selection
+  evidence for a general language model. The approved direction is natural-text
+  LM quality first, with standardized mechanical benchmarks reported separately.
+- No training campaign was requested or launched.
+
+**Commands**
+
+```bash
+uv run --no-sync python -m pytest -q
+uv run --no-sync research doctor --config configs/research/discovery.toml
+```
+
+**Artifacts**
+
+- `nanochat/research/general_eval.py`
+- `nanochat/research/{config,decision,runner}.py`
+- `configs/research/{discovery,promotion}.toml`
+- `tests/test_general_eval.py`
+
+**Result**
+
+- The protected runner now evaluates an immutable final checkpoint on a
+  deterministic natural-text context curve: every requested context length
+  scores the same held-out document suffix, so added prefix is the only
+  intervention. The longest-context BPB is a decision objective alongside
+  validation BPB and matched resource metrics; associative-recall objectives
+  are no longer in the active frontier contract.
+- The inherited CORE evaluator is integrated behind an offline preflight: a
+  missing prepared bundle invalidates evaluation instead of downloading data.
+  A hash-pinned local RULER manifest adapter is available for prepared official
+  exports, validates every task file and context limit, and records per-task
+  accuracy. It is disabled until a human selects, prepares, and pins the exact
+  official RULER material.
+- Config validation rejects context extrapolation, ambiguous context ladders,
+  candidate evaluation overrides, and unpinned enabled RULER inputs. Historical
+  summaries cannot enter the general-LM frontier.
+- Full validation passed: 125 passed, 10 skipped; the known GB10 capability
+  warning remains. `research doctor` is correctly not ready in this dirty
+  worktree and reports `core_bundle=false`: the required offline CORE bundle is
+  not prepared. No architecture-quality, speed, or memory conclusion follows
+  from these code changes.
+
+**Next**
+
+- Select and license-review the exact RULER release/export, prepare it locally,
+  record its manifest and SHA-256 in the frozen promotion configuration, and
+  add scorer fixtures from that official material.
+- Prepare and hash the offline CORE bundle, then run clean baseline calibration
+  before any candidate comparison. Add provenance-pinned natural long-context
+  evaluation only after its base-LM prompt/scoring contract is validated.

@@ -22,10 +22,12 @@ from nanochat.research.artifacts import (
     protected_fingerprint,
     select_triton_ptxas,
     sha256_json,
+    sha256_file,
 )
 from nanochat.research.config import ResearchConfig
 from nanochat.research.decision import classify_candidate, objectives_from_config
 from nanochat.research.probe import probe_protocol_hash, run_memory_probe, run_probe_calibration
+from nanochat.research.general_eval import run_general_evaluation
 
 
 TRAIN_RESULT_PREFIX = "RESEARCH_TRAIN_RESULT "
@@ -42,10 +44,19 @@ def doctor(root: str | Path, config: ResearchConfig) -> dict[str, Any]:
     provenance = git_provenance(repo)
     ptxas = select_triton_ptxas()
     capability = tuple(environment.get("compute_capability", (0, 0)))
+    core_bundle = base_dir / "eval_bundle"
+    ruler_manifest = base_dir / config.evaluation.ruler_manifest if config.evaluation.ruler_enabled else None
     checks = {
         "git_repository": (repo / ".git").exists(),
         "uv": shutil.which("uv") is not None,
         "tokenizer": all(path.exists() for path in tokenizer_files),
+        "core_bundle": (not config.evaluation.core_enabled) or all(
+            (core_bundle / name).exists() for name in ("core.yaml", "eval_data", "eval_meta_data.csv")
+        ),
+        "ruler_bundle": (not config.evaluation.ruler_enabled) or (
+            ruler_manifest is not None and ruler_manifest.is_file()
+            and sha256_file(ruler_manifest) == config.evaluation.ruler_manifest_sha256
+        ),
         "dataset_shards": len(parquet),
         "cuda": environment["cuda_available"],
         "bfloat16": not environment["cuda_available"] or tuple(environment.get("compute_capability", (0, 0))) >= (8, 0),
@@ -150,7 +161,7 @@ def _state_bytes(config: ResearchConfig) -> int:
     return int(total)
 
 
-def _frontier_summaries(artifact_root: Path, exclude_run_id: str, probe_protocol_version: str) -> list[dict[str, Any]]:
+def _frontier_summaries(artifact_root: Path, exclude_run_id: str, evaluation_protocol: str) -> list[dict[str, Any]]:
     frontier = []
     if not artifact_root.exists():
         return frontier
@@ -160,7 +171,7 @@ def _frontier_summaries(artifact_root: Path, exclude_run_id: str, probe_protocol
         except (OSError, json.JSONDecodeError):
             continue
         if (summary.get("run_id") != exclude_run_id
-                and summary.get("memory_probe_protocol_version") == probe_protocol_version
+                and summary.get("evaluation_protocol") == evaluation_protocol
                 and summary.get("decision", {}).get("status") in {"frontier", "confirmed"}):
             frontier.append(summary)
     return frontier
@@ -311,6 +322,37 @@ def run_experiment(
         training = _parse_training_result(log_path)
         training["metric_records"] = _extract_training_metrics(log_path, run_dir / "train-metrics.jsonl")
 
+    evaluation: dict[str, Any] = {}
+    if config.evaluation.enabled and not skip_training:
+        try:
+            from nanochat.checkpoint_manager import load_model
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            model, tokenizer, checkpoint_meta = load_model(
+                "base", device, "eval", model_tag=training["model_tag"], step=training["step"],
+            )
+            evaluation = run_general_evaluation(model, tokenizer, config.evaluation, device)
+            checkpoint_dir = Path(get_base_dir()) / "base_checkpoints" / training["model_tag"]
+            checkpoint_path = checkpoint_dir / f"model_{training['step']:06d}.pt"
+            evaluation["checkpoint"] = {
+                "path": str(checkpoint_path),
+                "sha256": sha256_file(checkpoint_path),
+                "step": training["step"],
+                "model_config": checkpoint_meta["model_config"],
+            }
+            atomic_write_json(run_dir / "general-evaluation.json", evaluation)
+            del model
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except (OSError, RuntimeError, ValueError, KeyError) as error:
+            summary = {
+                "schema_version": 2, "run_id": run_id, "status": "invalid",
+                "failure_reason": f"general evaluation failed: {error}",
+                "manifest": str(run_dir / "manifest.json"),
+            }
+            atomic_write_json(run_dir / "summary.json", summary)
+            append_jsonl(artifact_root / "index.jsonl", summary)
+            return summary
+
     probe: dict[str, Any] = {}
     if config.memory_probe.enabled and not skip_probe:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -344,13 +386,12 @@ def run_experiment(
 
     objectives = {
         "val_bpb": float(training.get("val_bpb", float("inf"))),
-        "memory_auc": float(probe.get("evaluation", {}).get("memory_auc", 0.0)),
-        "update_accuracy": float(probe.get("evaluation", {}).get("update_accuracy", 0.0)),
+        "context_bpb": float(evaluation.get("natural_context", {}).get("context_bpb", float("inf"))),
         "tokens_per_second": float(training.get("median_tokens_per_second", 0.0)),
         "peak_memory_mb": float(training.get("peak_memory_mb", float("inf"))),
         "state_bytes": float(_state_bytes(config)),
     }
-    frontier = _frontier_summaries(artifact_root, run_id, config.memory_probe.protocol_version)
+    frontier = _frontier_summaries(artifact_root, run_id, config.evaluation.protocol)
     candidate = {"status": "complete", "run_id": run_id, "objectives": objectives}
     decision = classify_candidate(candidate, frontier, objectives_from_config(config.decision))
     summary = {
@@ -360,14 +401,8 @@ def run_experiment(
         "suite": config.run.suite,
         "objectives": objectives,
         "training": training,
-        "memory_probe": probe.get("evaluation", {}),
-        "memory_probe_easy_control": probe.get("easy_control", {}),
-        "memory_probe_protocol_version": config.memory_probe.protocol_version,
-        "memory_probe_protocol_hash": probe.get("protocol_hash"),
-        "memory_probe_calibration": (
-            {"path": calibration["path"], "protected_hash": calibration["protected_hash"]}
-            if calibration is not None else None
-        ),
+        "general_evaluation": evaluation,
+        "evaluation_protocol": config.evaluation.protocol,
         "decision": decision,
         "manifest": str(run_dir / "manifest.json"),
     }
@@ -379,18 +414,16 @@ def run_experiment(
 def render_report(summaries: list[dict[str, Any]]) -> str:
     lines = [
         "# Research comparison", "",
-        "| Run | Decision | Probe | BPB ↓ | Memory AUC ↑ | Update ↑ | tok/s ↑ | Peak MB ↓ | State MB ↓ |",
-        "|---|---|---|---:|---:|---:|---:|---:|---:|",
+        "| Run | Decision | Evaluation | Validation BPB ↓ | Context BPB ↓ | tok/s ↑ | Peak MB ↓ | State MB ↓ |",
+        "|---|---|---|---:|---:|---:|---:|---:|",
     ]
     for summary in summaries:
         obj = summary.get("objectives", {})
-        protocol = summary.get("memory_probe_protocol_version")
-        memory_auc = obj.get("memory_auc", float("nan")) if protocol == "associative_recall_v2" else float("nan")
-        update_accuracy = obj.get("update_accuracy", float("nan")) if protocol == "associative_recall_v2" else float("nan")
+        protocol = summary.get("evaluation_protocol", "legacy/ineligible")
         lines.append(
             f"| {summary.get('run_id', '?')} | {summary.get('decision', {}).get('status', summary.get('status', '?'))} "
-            f"| {protocol or 'legacy/ineligible'} | {obj.get('val_bpb', float('nan')):.6f} | {memory_auc:.4f} "
-            f"| {update_accuracy:.4f} | {obj.get('tokens_per_second', float('nan')):.0f} "
+            f"| {protocol} | {obj.get('val_bpb', float('nan')):.6f} | {obj.get('context_bpb', float('nan')):.6f} "
+            f"| {obj.get('tokens_per_second', float('nan')):.0f} "
             f"| {obj.get('peak_memory_mb', float('nan')):.1f} | {obj.get('state_bytes', 0) / 2**20:.2f} |"
         )
     return "\n".join(lines) + "\n"
