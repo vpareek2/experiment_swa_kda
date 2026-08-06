@@ -79,9 +79,14 @@ def test_config_rejects_unknown_keys(tmp_path):
 def test_candidate_config_can_only_change_architecture(tmp_path):
     protocol = load_config(ROOT / "configs/research/discovery.toml")
     swa = apply_candidate(ROOT / "configs/candidates/baseline_swa.toml", protocol)
+    kda = apply_candidate(ROOT / "configs/candidates/kda_only.toml", protocol)
     assert swa.run.name == "baseline-swa"
     assert swa.training.window_pattern == "S"
     assert swa.training.seconds == protocol.training.seconds
+    assert kda.run.name == "kda-only"
+    assert kda.training.window_pattern == "K"
+    assert kda.training.force_final_full is False
+    assert kda.training.kda_backend == "fla_triton"
     bad = tmp_path / "bad-candidate.toml"
     bad.write_text('[candidate]\nname="cheat"\nseconds=1\n', encoding="utf-8")
     with pytest.raises(ConfigError, match="seconds"):

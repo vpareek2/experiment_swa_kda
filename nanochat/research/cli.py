@@ -116,6 +116,7 @@ def main(argv=None) -> int:
                 torch.device("cuda" if torch.cuda.is_available() else "cpu"),
                 config.training.force_final_full,
                 progress,
+                config.training.kda_backend,
             )
             if args.output:
                 atomic_write_json(args.output, result)

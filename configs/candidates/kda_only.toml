@@ -1,0 +1,5 @@
+[candidate]
+name = "kda-only"
+window_pattern = "K"
+sliding_window = 256
+force_final_full = false
