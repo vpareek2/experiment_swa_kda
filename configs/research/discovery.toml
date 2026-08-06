@@ -19,6 +19,7 @@ sliding_window = 256
 force_final_full = true
 eval_tokens = 1048576
 precision = "bfloat16"
+kda_backend = "fla_triton"
 
 [memory_probe]
 enabled = true

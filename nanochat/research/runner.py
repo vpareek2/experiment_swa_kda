@@ -51,6 +51,7 @@ def doctor(root: str | Path, config: ResearchConfig) -> dict[str, Any]:
         "bfloat16": not environment["cuda_available"] or tuple(environment.get("compute_capability", (0, 0))) >= (8, 0),
         "clean_commit": provenance["commit"] is not None and not provenance["dirty"],
         "triton_ptxas": capability < (12, 1) or ptxas is not None,
+        "fla_core": config.training.kda_backend != "fla_triton" or environment.get("fla_core") == "0.5.2",
     }
     environment_valid = all(value for key, value in checks.items() if key not in {"dataset_shards", "clean_commit"}) and checks["dataset_shards"] >= 1
     return {
@@ -84,6 +85,7 @@ def _trainer_command(config: ResearchConfig, run_id: str) -> list[str]:
         "--depth", str(train.depth),
         "--head-dim", str(train.head_dim),
         "--window-pattern", train.window_pattern,
+        "--kda-backend", train.kda_backend,
         "--sliding-window", str(train.sliding_window),
         "--force-final-full" if train.force_final_full else "--no-force-final-full",
         "--max-seq-len", str(train.sequence_length),
@@ -128,13 +130,24 @@ def _state_bytes(config: ResearchConfig) -> int:
     model_dim = math.ceil((train.depth * 64) / train.head_dim) * train.head_dim
     heads = model_dim // train.head_dim
     pattern = train.window_pattern.upper()
-    lengths = []
+    mixer_types = []
     for layer in range(train.depth):
-        char = pattern[layer % len(pattern)]
-        lengths.append(train.sequence_length if char == "L" else train.sliding_window)
+        mixer_types.append(pattern[layer % len(pattern)])
     if train.force_final_full:
-        lengths[-1] = train.sequence_length
-    return int(sum(2 * heads * train.head_dim * 2 * length for length in lengths))
+        mixer_types[-1] = "L"
+
+    activation_bytes = 4 if train.precision == "float32" else 2
+    total = 0
+    for mixer_type in mixer_types:
+        if mixer_type == "K":
+            # Recurrent memory is always FP32 [H,V,K]. Three convolution
+            # caches hold kernel_size=4 projected activations in compute dtype.
+            total += heads * train.head_dim * train.head_dim * 4
+            total += 3 * model_dim * 4 * activation_bytes
+        else:
+            length = train.sequence_length if mixer_type == "L" else train.sliding_window
+            total += 2 * heads * train.head_dim * activation_bytes * length
+    return int(total)
 
 
 def _frontier_summaries(artifact_root: Path, exclude_run_id: str, probe_protocol_version: str) -> list[dict[str, Any]]:
@@ -240,6 +253,8 @@ def run_experiment(
         "protected_files": protected_fingerprint(repo, config.protection.protected_paths),
         "runtime_environment_overrides": {
             "TRITON_PTXAS_PATH": select_triton_ptxas(),
+            "FLA_FLASH_KDA": "0",
+            "FLA_TILELANG": "0",
         },
     }
     atomic_write_json(run_dir / "manifest.json", manifest)
@@ -281,6 +296,8 @@ def run_experiment(
         triton_ptxas = select_triton_ptxas()
         if triton_ptxas:
             environment["TRITON_PTXAS_PATH"] = triton_ptxas
+        environment["FLA_FLASH_KDA"] = "0"
+        environment["FLA_TILELANG"] = "0"
         returncode = _run_trainer_with_heartbeats(_trainer_command(config, run_id), repo, environment, log_path, run_id)
         if returncode != 0:
             summary = {
@@ -308,7 +325,7 @@ def run_experiment(
                       f"accuracy={event['accuracy']:.4f}", flush=True)
         probe = run_memory_probe(
             config.memory_probe, config.training.window_pattern, config.run.seed, device,
-            config.training.force_final_full, probe_progress,
+            config.training.force_final_full, probe_progress, config.training.kda_backend,
         )
         atomic_write_json(run_dir / "memory-probe.json", probe)
 

@@ -39,6 +39,7 @@ class TrainingConfig:
     force_final_full: bool = True
     eval_tokens: int = 1 << 20
     precision: str = "bfloat16"
+    kda_backend: str = "fla_triton"
 
 
 @dataclass(frozen=True)
@@ -226,8 +227,10 @@ def validate_config(config: ResearchConfig) -> None:
         raise ConfigError("total_batch_size must divide evenly into device_batch_size * sequence_length")
     if train.precision not in {"bfloat16", "float32", "float16"}:
         raise ConfigError(f"Unsupported precision: {train.precision}")
-    if not train.window_pattern or any(char not in "LS" for char in train.window_pattern.upper()):
-        raise ConfigError("window_pattern must contain only L and S")
+    if train.kda_backend not in {"reference", "fla_triton"}:
+        raise ConfigError(f"Unsupported KDA backend: {train.kda_backend}")
+    if not train.window_pattern or any(char not in "LSK" for char in train.window_pattern.upper()):
+        raise ConfigError("window_pattern must contain only L, S, and K")
     if train.sliding_window <= 0 or train.sliding_window > train.sequence_length:
         raise ConfigError("sliding_window must be positive and no larger than sequence_length")
     if probe.enabled:

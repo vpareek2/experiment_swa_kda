@@ -14,6 +14,7 @@ Notable features:
 
 from functools import partial
 from dataclasses import dataclass
+import math
 
 import torch
 import torch.nn as nn
@@ -21,6 +22,7 @@ import torch.nn.functional as F
 
 from nanochat.common import get_dist_info, print0, COMPUTE_DTYPE
 from nanochat.optim import MuonAdamW
+from nanochat.mixers.kda import KimiDeltaAttention
 
 # Our custom Flash Attention module that automatically uses FA3 when compatible and SDPA fallback otherwise
 from nanochat.flash_attention import flash_attn
@@ -39,6 +41,9 @@ class GPTConfig:
     window_pattern: str = "SSSL"
     sliding_window: int | None = None
     force_final_full: bool = True
+    # KDA execution backend. Existing checkpoints default to reference when
+    # this field is absent; new research runs set fla_triton explicitly.
+    kda_backend: str = "reference"
 
 
 def norm(x):
@@ -55,6 +60,18 @@ class Linear(nn.Linear):
 def has_ve(layer_idx, n_layer):
     """Returns True if GPT layer should have Value Embedding (alternating, last layer always included)."""
     return layer_idx % 2 == (n_layer - 1) % 2
+
+
+def compute_mixer_types(config):
+    """Resolve and tile the explicit L/S/K mixer pattern across model depth."""
+    pattern = config.window_pattern.upper()
+    assert pattern and all(c in "LSK" for c in pattern), (
+        f"Invalid window_pattern: {pattern}. Use only L, S, and K."
+    )
+    mixer_types = [pattern[index % len(pattern)] for index in range(config.n_layer)]
+    if getattr(config, "force_final_full", True):
+        mixer_types[-1] = "L"
+    return mixer_types
 
 def apply_rotary_emb(x, cos, sin):
     # note: this rotates by -theta, the transpose of the textbook convention. Functionally
@@ -120,10 +137,6 @@ class CausalSelfAttention(nn.Module):
                 causal=True,
                 window_size=window_size,
             )
-            # Advance position after last layer processes
-            if self.layer_idx == kv_cache.n_layers - 1:
-                kv_cache.advance(T)
-
         # Re-assemble the heads and project back to residual stream
         y = y.contiguous().view(B, T, -1)
         y = self.c_proj(y)
@@ -146,11 +159,44 @@ class MLP(nn.Module):
 class Block(nn.Module):
     def __init__(self, config, layer_idx):
         super().__init__()
-        self.attn = CausalSelfAttention(config, layer_idx)
+        self.mixer_type = compute_mixer_types(config)[layer_idx]
+        self.kda_backend = getattr(config, "kda_backend", "reference")
+        if self.kda_backend not in {"reference", "fla_triton"}:
+            raise ValueError(f"unknown KDA backend: {self.kda_backend}")
+        if self.mixer_type == "K":
+            self.attn = KimiDeltaAttention(
+                hidden_size=config.n_embd,
+                num_heads=config.n_head,
+                head_dim=config.n_embd // config.n_head,
+                conv_size=4,
+                layer_idx=layer_idx,
+                mode="chunk" if self.kda_backend == "fla_triton" else "reference",
+                allow_fallback=False,
+            )
+        else:
+            self.attn = CausalSelfAttention(config, layer_idx)
         self.mlp = MLP(config)
 
     def forward(self, x, ve, cos_sin, window_size, kv_cache):
-        x = x + self.attn(norm(x), ve, cos_sin, window_size, kv_cache)
+        if self.mixer_type == "K":
+            state = None if kv_cache is None else kv_cache.get_kda_state(self.attn.layer_idx)
+            optimized = self.kda_backend == "fla_triton" and x.is_cuda
+            if not optimized:
+                mode = "reference"
+            else:
+                mode = "recurrent" if kv_cache is not None and x.shape[1] == 1 else "chunk"
+            mixed, state = self.attn(
+                norm(x),
+                state=state,
+                output_final_state=kv_cache is not None,
+                mode=mode,
+                allow_fallback=False,
+            )
+            if kv_cache is not None:
+                kv_cache.set_kda_state(self.attn.layer_idx, state)
+        else:
+            mixed = self.attn(norm(x), ve, cos_sin, window_size, kv_cache)
+        x = x + mixed
         x = x + self.mlp(norm(x))
         return x
 
@@ -164,6 +210,7 @@ class GPT(nn.Module):
         """
         super().__init__()
         self.config = config
+        self.mixer_types = compute_mixer_types(config)
         # Compute per-layer window sizes for sliding window attention
         # window_size is (left, right) tuple: (-1, 0) for full context, (N, 0) for sliding window
         self.window_sizes = self._compute_window_sizes(config)
@@ -191,7 +238,11 @@ class GPT(nn.Module):
         # Value embeddings (ResFormer-style): alternating layers, last layer always included
         head_dim = config.n_embd // config.n_head
         kv_dim = config.n_kv_head * head_dim
-        self.value_embeds = nn.ModuleDict({str(i): nn.Embedding(padded_vocab_size, kv_dim) for i in range(config.n_layer) if has_ve(i, config.n_layer)})
+        self.value_embeds = nn.ModuleDict({
+            str(i): nn.Embedding(padded_vocab_size, kv_dim)
+            for i in range(config.n_layer)
+            if self.mixer_types[i] != "K" and has_ve(i, config.n_layer)
+        })
         # To support meta device initialization, we init the rotary embeddings here, but it's just "fake" meta tensors only.
         # As for rotary_seq_len, these rotary embeddings are pretty small/cheap in memory,
         # so let's just over-compute them by 10X, but assert fail if we ever reach that amount.
@@ -226,10 +277,28 @@ class GPT(nn.Module):
         n_embd = self.config.n_embd
         s = 3**0.5 * n_embd**-0.5 # sqrt(3) multiplier makes sure Uniform achieves the same std as Normal
         for block in self.transformer.h:
-            torch.nn.init.uniform_(block.attn.c_q.weight, -s, s) # weights use Uniform to avoid outliers
-            torch.nn.init.uniform_(block.attn.c_k.weight, -s, s)
-            torch.nn.init.uniform_(block.attn.c_v.weight, -s, s)
-            torch.nn.init.zeros_(block.attn.c_proj.weight) # projections are zero
+            if block.mixer_type == "K":
+                mixer = block.attn
+                for projection in (
+                    mixer.q_proj, mixer.k_proj, mixer.v_proj,
+                    mixer.f_a_proj, mixer.f_b_proj, mixer.b_proj, mixer.g_proj,
+                ):
+                    torch.nn.init.uniform_(projection.weight, -s, s)
+                for convolution in (mixer.q_conv1d, mixer.k_conv1d, mixer.v_conv1d):
+                    torch.nn.init.uniform_(convolution.weight, -s, s)
+                torch.nn.init.zeros_(mixer.A_log)
+                dt = torch.exp(
+                    torch.rand_like(mixer.dt_bias) * (math.log(0.1) - math.log(0.001))
+                    + math.log(0.001)
+                ).clamp(min=1e-4)
+                mixer.dt_bias.copy_(dt + torch.log(-torch.expm1(-dt)))
+                torch.nn.init.ones_(mixer.o_norm.weight)
+                torch.nn.init.zeros_(mixer.o_proj.weight)
+            else:
+                torch.nn.init.uniform_(block.attn.c_q.weight, -s, s) # weights use Uniform to avoid outliers
+                torch.nn.init.uniform_(block.attn.c_k.weight, -s, s)
+                torch.nn.init.uniform_(block.attn.c_v.weight, -s, s)
+                torch.nn.init.zeros_(block.attn.c_proj.weight) # projections are zero
             torch.nn.init.uniform_(block.mlp.c_fc.weight, -s * 0.4, s * 0.4)  # 0.4x init scale for c_fc
             torch.nn.init.zeros_(block.mlp.c_proj.weight)
 
@@ -253,7 +322,7 @@ class GPT(nn.Module):
 
         # Gate weights init with small positive values so gates start slightly above neutral
         for block in self.transformer.h:
-            if block.attn.ve_gate is not None:
+            if block.mixer_type != "K" and block.attn.ve_gate is not None:
                 torch.nn.init.uniform_(block.attn.ve_gate.weight, 0.0, 0.02)
 
         # Rotary embeddings
@@ -298,8 +367,7 @@ class GPT(nn.Module):
         the historical quarter-context window and final global layer; experiments
         can specify both choices explicitly.
         """
-        pattern = config.window_pattern.upper()
-        assert all(c in "SL" for c in pattern), f"Invalid window_pattern: {pattern}. Use only S and L."
+        mixer_types = compute_mixer_types(config)
         # Map characters to window sizes
         long_window = config.sequence_len
         configured_window = getattr(config, "sliding_window", None)
@@ -308,15 +376,9 @@ class GPT(nn.Module):
         char_to_window = {
             "L": (long_window, 0),
             "S": (short_window, 0),
+            "K": None,
         }
-        # Tile pattern across layers
-        window_sizes = []
-        for layer_idx in range(config.n_layer):
-            char = pattern[layer_idx % len(pattern)]
-            window_sizes.append(char_to_window[char])
-        if getattr(config, "force_final_full", True):
-            window_sizes[-1] = (long_window, 0)
-        return window_sizes
+        return [char_to_window[mixer_type] for mixer_type in mixer_types]
 
     def get_device(self):
         return self.transformer.wte.weight.device
@@ -336,11 +398,15 @@ class GPT(nn.Module):
         h, q, t = self.config.n_head, self.config.n_embd // self.config.n_head, self.config.sequence_len
         # Sum attention FLOPs per layer, accounting for sliding window
         attn_flops = 0
-        for window_size in self.window_sizes:
+        kda_flops = 0
+        for mixer_type, window_size in zip(self.mixer_types, self.window_sizes):
+            if mixer_type == "K":
+                kda_flops += 24 * h * q * q
+                continue
             window = window_size[0]  # (left, right) tuple, we use left
             effective_seq = t if window < 0 else min(window, t)
             attn_flops += 12 * h * q * effective_seq
-        num_flops_per_token = 6 * self.num_matmul_params() + attn_flops
+        num_flops_per_token = 6 * self.num_matmul_params() + attn_flops + kda_flops
         return num_flops_per_token
 
     def num_matmul_params(self):
@@ -350,7 +416,7 @@ class GPT(nn.Module):
         matmul in this model goes through the Linear class, while non-matmul params
         (embeddings = lookups, per-layer scalars) are nn.Embedding or raw Parameters.
         """
-        matmul_params = sum(m.weight.numel() for m in self.modules() if isinstance(m, Linear))
+        matmul_params = sum(m.weight.numel() for m in self.modules() if isinstance(m, nn.Linear))
         return matmul_params
 
     def estimate_decode_flops(self, context_len):
@@ -360,8 +426,13 @@ class GPT(nn.Module):
         """
         h = self.config.n_head
         q = self.config.n_embd // self.config.n_head
-        attn_flops = sum(4 * h * q * min(context_len, window) for window, _ in self.window_sizes)
-        decode_flops = 2 * self.num_matmul_params() + attn_flops
+        mixer_flops = 0
+        for mixer_type, window_size in zip(self.mixer_types, self.window_sizes):
+            if mixer_type == "K":
+                mixer_flops += 8 * h * q * q
+            else:
+                mixer_flops += 4 * h * q * min(context_len, window_size[0])
+        decode_flops = 2 * self.num_matmul_params() + mixer_flops
         return decode_flops
 
     def estimate_prefill_flops(self, num_tokens):
@@ -369,7 +440,11 @@ class GPT(nn.Module):
         h = self.config.n_head
         q = self.config.n_embd // self.config.n_head
         attn_flops = 0
-        for window, _ in self.window_sizes:
+        for mixer_type, window_size in zip(self.mixer_types, self.window_sizes):
+            if mixer_type == "K":
+                attn_flops += num_tokens * 8 * h * q * q
+                continue
+            window = window_size[0]
             w = min(window, num_tokens)
             attended_tokens = w * (w + 1) // 2 + (num_tokens - w) * w # ramp up to w, then flat
             attn_flops += 4 * h * q * attended_tokens
@@ -380,7 +455,8 @@ class GPT(nn.Module):
         """Bytes to *store* one token of KV cache during inference, per row (all layers)."""
         head_dim = self.config.n_embd // self.config.n_head
         kv_dtype_bytes = COMPUTE_DTYPE.itemsize # the KV cache is kept in the compute dtype
-        return self.config.n_layer * 2 * self.config.n_kv_head * head_dim * kv_dtype_bytes
+        attention_layers = sum(mixer_type != "K" for mixer_type in self.mixer_types)
+        return attention_layers * 2 * self.config.n_kv_head * head_dim * kv_dtype_bytes
 
     def kv_read_bytes(self, context_len):
         """Bytes of KV cache *read* by one decode step at a given context length, per row.
@@ -388,8 +464,9 @@ class GPT(nn.Module):
         head_dim = self.config.n_embd // self.config.n_head
         kv_dtype_bytes = COMPUTE_DTYPE.itemsize
         total = 0
-        for window, _ in self.window_sizes:
-            total += 2 * self.config.n_kv_head * head_dim * kv_dtype_bytes * min(context_len, window)
+        for mixer_type, window_size in zip(self.mixer_types, self.window_sizes):
+            if mixer_type != "K":
+                total += 2 * self.config.n_kv_head * head_dim * kv_dtype_bytes * min(context_len, window_size[0])
         return total
 
     def num_scaling_params(self):
@@ -425,14 +502,16 @@ class GPT(nn.Module):
         model_dim = self.config.n_embd
 
         # Separate out all parameters into groups
-        matrix_params = list(self.transformer.h.parameters())
+        transformer_params = list(self.transformer.h.parameters())
+        matrix_params = [parameter for parameter in transformer_params if parameter.ndim == 2]
+        mixer_adamw_params = [parameter for parameter in transformer_params if parameter.ndim != 2]
         value_embeds_params = list(self.value_embeds.parameters())
         embedding_params = list(self.transformer.wte.parameters())
         lm_head_params = list(self.lm_head.parameters())
         resid_params = [self.resid_lambdas]
         x0_params = [self.x0_lambdas]
         smear_params = [self.smear_gate.weight, self.smear_lambda, self.backout_lambda]
-        assert len(list(self.parameters())) == len(matrix_params) + len(embedding_params) + len(lm_head_params) + len(value_embeds_params) + len(resid_params) + len(x0_params) + len(smear_params)
+        assert len(list(self.parameters())) == len(matrix_params) + len(mixer_adamw_params) + len(embedding_params) + len(lm_head_params) + len(value_embeds_params) + len(resid_params) + len(x0_params) + len(smear_params)
 
         # Scale the LR for the AdamW parameters by ∝1/√dmodel (tuned for 768 dim model)
         dmodel_lr_scale = (model_dim / 768) ** -0.5
@@ -447,6 +526,7 @@ class GPT(nn.Module):
             dict(kind='adamw', params=resid_params, lr=scalar_lr * 0.01, betas=(0.8, 0.95), eps=1e-10, weight_decay=0.05),
             dict(kind='adamw', params=x0_params, lr=scalar_lr, betas=(0.96, 0.95), eps=1e-10, weight_decay=0.0),  # higher beta1 for x0
             dict(kind='adamw', params=smear_params, lr=0.2, betas=(0.8, 0.95), eps=1e-10, weight_decay=0.0),
+            dict(kind='adamw', params=mixer_adamw_params, lr=matrix_lr * dmodel_lr_scale, betas=(0.9, 0.95), eps=1e-8, weight_decay=0.0),
         ]
         # Muon groups (matrix params, grouped by shape for stacking)
         for shape in sorted({p.shape for p in matrix_params}):
@@ -507,6 +587,8 @@ class GPT(nn.Module):
             x = block(x, ve, cos_sin, self.window_sizes[i], kv_cache)
             if i == backout_layer:
                 x_backout = x
+        if kv_cache is not None:
+            kv_cache.advance(T)
         # Subtract mid-layer residual to remove low-level features before logit projection
         if x_backout is not None:
             x = x - self.backout_lambda.to(x.dtype) * x_backout

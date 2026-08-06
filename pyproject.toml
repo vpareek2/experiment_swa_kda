@@ -37,6 +37,7 @@ dev = [
 
 [tool.pytest.ini_options]
 markers = [
+    "cuda: marks tests requiring CUDA and an optimized GPU backend",
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
 ]
 testpaths = ["tests"]
@@ -67,6 +68,7 @@ cpu = [
     "torch==2.9.1",
 ]
 gpu = [
+    "fla-core==0.5.2",
     "torch==2.9.1",
 ]
 

@@ -18,6 +18,7 @@ import json
 import time
 import math
 import argparse
+import importlib.metadata
 from dataclasses import asdict
 from contextlib import contextmanager
 
@@ -33,6 +34,8 @@ from nanochat.checkpoint_manager import save_checkpoint, load_checkpoint
 from nanochat.loss_eval import evaluate_bpb
 from nanochat.engine import Engine
 from nanochat.flash_attention import HAS_FA3
+from nanochat.cuda_compat import configure_triton_ptxas
+from nanochat.mixers.kda import prepare_kda_backend
 from scripts.base_eval import evaluate_core
 print_banner()
 
@@ -55,6 +58,7 @@ parser.add_argument("--max-seq-len", type=int, default=2048, help="max context l
 parser.add_argument("--window-pattern", type=str, default="SSSL", help="sliding window pattern tiled across layers: L=full, S=half context (e.g. 'SSL')")
 parser.add_argument("--sliding-window", type=int, default=None, help="explicit left-context size for S layers (default preserves legacy quarter-context rule)")
 parser.add_argument("--force-final-full", action=argparse.BooleanOptionalAction, default=True, help="force the final layer to use full attention")
+parser.add_argument("--kda-backend", choices=["reference", "fla_triton"], default="fla_triton", help="KDA execution backend for K layers")
 # Training horizon (only one used, in order of precedence)
 parser.add_argument("--num-iterations", type=int, default=-1, help="explicit number of optimization steps (-1 = disable)")
 parser.add_argument("--target-flops", type=float, default=-1.0, help="calculate num_iterations to reach target_flops (-1 = disable)")
@@ -98,6 +102,10 @@ if device_type == "cuda":
 else:
     gpu_peak_flops = float('inf')  # MFU not meaningful for CPU/MPS
 print0(f"COMPUTE_DTYPE: {COMPUTE_DTYPE} ({COMPUTE_DTYPE_REASON})")
+if "K" in args.window_pattern.upper() and args.kda_backend == "fla_triton" and device_type == "cuda":
+    selected_ptxas = configure_triton_ptxas(required=True)
+    prepare_kda_backend()
+    print0(f"KDA backend: fla_triton | Triton ptxas: {selected_ptxas}")
 
 # wandb logging init
 use_dummy_wandb = args.run == "dummy" or not master_process
@@ -115,7 +123,7 @@ else:
     else:
         print0("WARNING: Flash Attention 3 not available, using PyTorch SDPA fallback")
     print0("WARNING: Training will be less efficient without FA3")
-    if args.window_pattern != "L":
+    if "S" in args.window_pattern.upper():
         print0(f"WARNING: SDPA has no support for sliding window attention (window_pattern='{args.window_pattern}'). Your GPU utilization will be terrible.")
         print0("WARNING: Recommend using --window-pattern L for full context attention without alternating sliding window patterns.")
     print0("!" * 80)
@@ -142,6 +150,7 @@ def build_model_meta(depth):
         n_layer=depth, n_head=num_heads, n_kv_head=num_heads, n_embd=model_dim,
         window_pattern=args.window_pattern, sliding_window=args.sliding_window,
         force_final_full=args.force_final_full,
+        kda_backend=args.kda_backend,
     )
     with torch.device("meta"):
         model_meta = GPT(config)
@@ -676,6 +685,18 @@ if master_process:
         "total_batch_size": total_batch_size,
         "window_sizes": orig_model.window_sizes,
         "triton_ptxas_path": os.environ.get("TRITON_PTXAS_PATH"),
+        "kda_backend_requested": args.kda_backend,
+        "kda_backend_resolved": (
+            "unused" if "K" not in orig_model.mixer_types else
+            ("fla_triton" if args.kda_backend == "fla_triton" and device_type == "cuda" else "reference")
+        ),
+        "kda_fallback_allowed": False,
+        "kda_layer_count": orig_model.mixer_types.count("K"),
+        "fla_core_version": (
+            importlib.metadata.version("fla-core")
+            if "K" in orig_model.mixer_types and args.kda_backend == "fla_triton"
+            else None
+        ),
     }
     print0("RESEARCH_TRAIN_RESULT " + json.dumps(summary, sort_keys=True))
 

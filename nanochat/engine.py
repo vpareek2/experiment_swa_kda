@@ -19,6 +19,7 @@ from contextlib import contextmanager
 from collections import deque
 from nanochat.common import compute_init, autodetect_device_type, COMPUTE_DTYPE
 from nanochat.checkpoint_manager import load_model
+from nanochat.mixers.kda import KDAState
 
 # -----------------------------------------------------------------------------
 # Calculator tool helpers
@@ -89,15 +90,51 @@ class KVCache:
     - Position tracked per batch element via cache_seqlens tensor
     """
 
-    def __init__(self, batch_size, num_heads, seq_len, head_dim, num_layers, device, dtype):
+    def __init__(
+        self,
+        batch_size,
+        num_heads,
+        seq_len,
+        head_dim,
+        num_layers,
+        device,
+        dtype,
+        mixer_types=None,
+        conv_size=4,
+    ):
         self.batch_size = batch_size
         self.max_seq_len = seq_len
         self.n_layers = num_layers
         self.n_heads = num_heads
         self.head_dim = head_dim
-        # Pre-allocate cache tensors: (n_layers, B, T, H, D)
-        self.k_cache = torch.zeros(num_layers, batch_size, seq_len, num_heads, head_dim, device=device, dtype=dtype)
-        self.v_cache = torch.zeros(num_layers, batch_size, seq_len, num_heads, head_dim, device=device, dtype=dtype)
+        self.conv_size = conv_size
+        self._hybrid_layout = mixer_types is not None
+        self.mixer_types = tuple(mixer_types or ("L",) * num_layers)
+        if len(self.mixer_types) != num_layers or any(kind not in "LSK" for kind in self.mixer_types):
+            raise ValueError("mixer_types must contain one L/S/K entry per layer")
+        self.allocated_kv_layers = tuple(
+            index for index, kind in enumerate(self.mixer_types) if kind != "K"
+        )
+        self.allocated_kda_layers = tuple(
+            index for index, kind in enumerate(self.mixer_types) if kind == "K"
+        )
+
+        # Retain the historical dense tensor representation when no explicit
+        # topology is supplied. Hybrid caches allocate KV only for attention
+        # layers, so a KDA layer never silently carries sequence-length state.
+        if self._hybrid_layout:
+            self.k_cache = {
+                index: torch.zeros(batch_size, seq_len, num_heads, head_dim, device=device, dtype=dtype)
+                for index in self.allocated_kv_layers
+            }
+            self.v_cache = {
+                index: torch.zeros(batch_size, seq_len, num_heads, head_dim, device=device, dtype=dtype)
+                for index in self.allocated_kv_layers
+            }
+        else:
+            self.k_cache = torch.zeros(num_layers, batch_size, seq_len, num_heads, head_dim, device=device, dtype=dtype)
+            self.v_cache = torch.zeros(num_layers, batch_size, seq_len, num_heads, head_dim, device=device, dtype=dtype)
+        self._kda_states = {index: None for index in self.allocated_kda_layers}
         # Current sequence length per batch element (FA3 needs int32)
         self.cache_seqlens = torch.zeros(batch_size, dtype=torch.int32, device=device)
         # Previous token's normalized embedding for smear (set by model forward pass)
@@ -107,6 +144,8 @@ class KVCache:
         """Reset cache to empty state."""
         self.cache_seqlens.zero_()
         self.prev_embedding = None
+        for index in self.allocated_kda_layers:
+            self._kda_states[index] = None
 
     def get_pos(self):
         """Get current position (assumes all batch elements at same position)."""
@@ -114,7 +153,21 @@ class KVCache:
 
     def get_layer_cache(self, layer_idx):
         """Return (k_cache, v_cache) views for a specific layer."""
+        if layer_idx not in self.allocated_kv_layers:
+            raise ValueError(f"layer {layer_idx} is KDA and has no KV cache")
         return self.k_cache[layer_idx], self.v_cache[layer_idx]
+
+    def get_kda_state(self, layer_idx):
+        if layer_idx not in self.allocated_kda_layers:
+            raise ValueError(f"layer {layer_idx} is attention and has no KDA state")
+        return self._kda_states[layer_idx]
+
+    def set_kda_state(self, layer_idx, state):
+        if layer_idx not in self.allocated_kda_layers:
+            raise ValueError(f"layer {layer_idx} is attention and has no KDA state")
+        if state is not None and not isinstance(state, KDAState):
+            raise TypeError("KDA state must be a KDAState instance")
+        self._kda_states[layer_idx] = state
 
     def advance(self, num_tokens):
         """Advance the cache position by num_tokens."""
@@ -127,14 +180,50 @@ class KVCache:
         """
         assert self.get_pos() == 0, "Cannot prefill a non-empty KV cache"
         assert self.n_layers == other.n_layers and self.n_heads == other.n_heads and self.head_dim == other.head_dim
+        assert self.mixer_types == other.mixer_types
         assert self.max_seq_len >= other.max_seq_len
         other_pos = other.get_pos()
-        self.k_cache[:, :, :other_pos, :, :] = other.k_cache[:, :, :other_pos, :, :]
-        self.v_cache[:, :, :other_pos, :, :] = other.v_cache[:, :, :other_pos, :, :]
+        if self._hybrid_layout:
+            for index in self.allocated_kv_layers:
+                self.k_cache[index][:, :other_pos] = other.k_cache[index][:, :other_pos]
+                self.v_cache[index][:, :other_pos] = other.v_cache[index][:, :other_pos]
+        else:
+            self.k_cache[:, :, :other_pos, :, :] = other.k_cache[:, :, :other_pos, :, :]
+            self.v_cache[:, :, :other_pos, :, :] = other.v_cache[:, :, :other_pos, :, :]
+        for index in self.allocated_kda_layers:
+            state = other.get_kda_state(index)
+            if state is None:
+                self._kda_states[index] = None
+                continue
+
+            def expand(tensor):
+                if tensor.shape[0] not in {1, self.batch_size}:
+                    raise ValueError("source KDA state batch cannot be expanded to destination")
+                return tensor.expand(self.batch_size, *tensor.shape[1:]).clone()
+
+            self._kda_states[index] = KDAState(
+                memory=expand(state.memory),
+                q_conv=expand(state.q_conv),
+                k_conv=expand(state.k_conv),
+                v_conv=expand(state.v_conv),
+            )
         self.cache_seqlens.fill_(other_pos)
         # Copy smear state: expand batch=1 prev_embedding to num_samples
         if other.prev_embedding is not None:
             self.prev_embedding = other.prev_embedding.expand(self.batch_size, -1, -1).clone()
+
+    def state_nbytes(self):
+        """Return bytes currently allocated for KV, KDA, and smear state."""
+        if self._hybrid_layout:
+            tensors = list(self.k_cache.values()) + list(self.v_cache.values())
+        else:
+            tensors = [self.k_cache, self.v_cache]
+        for state in self._kda_states.values():
+            if state is not None:
+                tensors.extend((state.memory, state.q_conv, state.k_conv, state.v_conv))
+        if self.prev_embedding is not None:
+            tensors.append(self.prev_embedding)
+        return sum(tensor.numel() * tensor.element_size() for tensor in tensors)
 
 # -----------------------------------------------------------------------------
 @torch.inference_mode()
@@ -193,7 +282,13 @@ class Engine:
 
         # 1) Run a batch 1 prefill of the prompt tokens
         m = self.model.config
-        kv_model_kwargs = {"num_heads": m.n_kv_head, "head_dim": m.n_embd // m.n_head, "num_layers": m.n_layer}
+        kv_model_kwargs = {
+            "num_heads": m.n_kv_head,
+            "head_dim": m.n_embd // m.n_head,
+            "num_layers": m.n_layer,
+            "mixer_types": getattr(self.model, "mixer_types", None),
+            "conv_size": 4,
+        }
         kv_cache_prefill = KVCache(
             batch_size=1,
             seq_len=len(tokens),

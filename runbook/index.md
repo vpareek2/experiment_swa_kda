@@ -1,8 +1,10 @@
 # SWA + Linear Attention Runbook
 
 Shared project memory for humans and research agents. The implementation is now
-a PyTorch nanochat fork; SWA means sliding-window attention. KDA remains the next
-architecture milestone, not a completed result.
+a PyTorch nanochat fork; SWA means sliding-window attention. The correctness-first
+K3 KDA mixer and its FLA Triton backend are integrated on GB10/SM121. Controlled
+memory-probe and discovery experiments remain outstanding, so no architecture
+quality or end-to-end efficiency result is claimed yet.
 
 ## Active streams
 

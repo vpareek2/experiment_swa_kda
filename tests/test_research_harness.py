@@ -1,4 +1,5 @@
 from dataclasses import replace
+import importlib.metadata
 import json
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from nanochat.research.artifacts import (
     protected_fingerprint,
     select_triton_ptxas,
 )
+from nanochat.cuda_compat import ptxas_supports
 from nanochat.research.config import ConfigError, MemoryProbeConfig, ProbeStageConfig, apply_candidate, load_config
 from nanochat.research.decision import (
     aggregate_objectives,
@@ -60,6 +62,8 @@ def test_research_configs_load_and_use_distinct_budget_lanes():
     assert promotion.training.tokens == 100_663_296
     assert promotion.training.tokens % promotion.training.total_batch_size == 0
     assert discovery.schema_version == promotion.schema_version == 2
+    assert discovery.training.kda_backend == promotion.training.kda_backend == "fla_triton"
+    assert importlib.metadata.version("fla-core") == "0.5.2"
     assert sum(stage.answer_budget for stage in discovery.memory_probe.stages) == 544_768
     assert probe_protocol_hash(discovery.memory_probe) == probe_protocol_hash(promotion.memory_probe)
 
@@ -203,6 +207,7 @@ def test_gb10_selects_an_assembler_with_sm121a_support():
         pytest.skip("SM 12.1 compatibility check")
     selected = select_triton_ptxas()
     assert selected is not None
+    assert ptxas_supports(selected)
 
 
 def test_structured_training_log_is_extracted(tmp_path):

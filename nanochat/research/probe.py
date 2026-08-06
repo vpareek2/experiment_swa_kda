@@ -55,10 +55,16 @@ def wilson_interval(correct: int, total: int, z: float = 1.96) -> list[float]:
 class CanonicalProbeModel(nn.Module):
     """Protected shell in which only the configured sequence mixer varies."""
 
-    def __init__(self, config: MemoryProbeConfig, window_pattern: str, force_final_full: bool = True):
+    def __init__(
+        self,
+        config: MemoryProbeConfig,
+        window_pattern: str,
+        force_final_full: bool = True,
+        kda_backend: str = "reference",
+    ):
         super().__init__()
-        if any(char not in "LS" for char in window_pattern.upper()):
-            raise ValueError("memory probe v2 supports full and sliding-window mixers; KDA registers later")
+        if any(char not in "LSK" for char in window_pattern.upper()):
+            raise ValueError("memory probe v2 mixer pattern must contain only L, S, and K")
         n_head = config.width // config.head_dim
         maximum_length = max((*config.lengths, *(stage.sequence_length for stage in config.stages)))
         model_config = GPTConfig(
@@ -69,18 +75,25 @@ class CanonicalProbeModel(nn.Module):
             n_kv_head=n_head,
             n_embd=config.width,
             window_pattern=window_pattern,
+            sliding_window=config.window_size,
+            force_final_full=force_final_full,
+            kda_backend=kda_backend,
         )
         self.config = config
         self.model_config = model_config
         self.embedding = nn.Embedding(config.vocab_size, config.width)
         self.blocks = nn.ModuleList([Block(model_config, index) for index in range(config.depth)])
         self.lm_head = Linear(config.width, config.vocab_size, bias=False)
-        self.window_sizes = [
-            (-1, 0) if window_pattern[index % len(window_pattern)].upper() == "L" else (config.window_size, 0)
+        mixer_types = [
+            window_pattern[index % len(window_pattern)].upper()
             for index in range(config.depth)
         ]
         if force_final_full:
-            self.window_sizes[-1] = (-1, 0)
+            mixer_types[-1] = "L"
+        self.window_sizes = [
+            (-1, 0) if mixer_type == "L" else ((config.window_size, 0) if mixer_type == "S" else None)
+            for mixer_type in mixer_types
+        ]
         channel_range = torch.arange(0, config.head_dim, 2, dtype=torch.float32)
         inv_freq = 1.0 / (100000 ** (channel_range / config.head_dim))
         positions = torch.arange(maximum_length, dtype=torch.float32)
@@ -94,13 +107,31 @@ class CanonicalProbeModel(nn.Module):
         nn.init.normal_(self.lm_head.weight, std=0.02)
         scale = math.sqrt(3) * self.config.width ** -0.5
         for block in self.blocks:
-            nn.init.uniform_(block.attn.c_q.weight, -scale, scale)
-            nn.init.uniform_(block.attn.c_k.weight, -scale, scale)
-            nn.init.uniform_(block.attn.c_v.weight, -scale, scale)
-            nn.init.zeros_(block.attn.c_proj.weight)
+            if block.mixer_type == "K":
+                mixer = block.attn
+                for projection in (
+                    mixer.q_proj, mixer.k_proj, mixer.v_proj,
+                    mixer.f_a_proj, mixer.f_b_proj, mixer.b_proj, mixer.g_proj,
+                ):
+                    nn.init.uniform_(projection.weight, -scale, scale)
+                for convolution in (mixer.q_conv1d, mixer.k_conv1d, mixer.v_conv1d):
+                    nn.init.uniform_(convolution.weight, -scale, scale)
+                nn.init.zeros_(mixer.A_log)
+                dt = torch.exp(
+                    torch.rand_like(mixer.dt_bias) * (math.log(0.1) - math.log(0.001))
+                    + math.log(0.001)
+                ).clamp(min=1e-4)
+                mixer.dt_bias.data.copy_(dt + torch.log(-torch.expm1(-dt)))
+                nn.init.ones_(mixer.o_norm.weight)
+                nn.init.zeros_(mixer.o_proj.weight)
+            else:
+                nn.init.uniform_(block.attn.c_q.weight, -scale, scale)
+                nn.init.uniform_(block.attn.c_k.weight, -scale, scale)
+                nn.init.uniform_(block.attn.c_v.weight, -scale, scale)
+                nn.init.zeros_(block.attn.c_proj.weight)
             nn.init.uniform_(block.mlp.c_fc.weight, -0.4 * scale, 0.4 * scale)
             nn.init.zeros_(block.mlp.c_proj.weight)
-            if block.attn.ve_gate is not None:
+            if block.mixer_type != "K" and block.attn.ve_gate is not None:
                 nn.init.zeros_(block.attn.ve_gate.weight)
 
     def forward(self, token_ids: torch.Tensor) -> torch.Tensor:
@@ -151,13 +182,14 @@ def train_probe(
     device: torch.device,
     force_final_full: bool = True,
     progress: ProgressCallback | None = None,
+    kda_backend: str = "reference",
 ) -> tuple[CanonicalProbeModel, dict[str, Any]]:
     # Initialization is fixed so this diagnostic varies the mixer and task
     # stream, not an unrelated optimization lottery.
     torch.manual_seed(config.initialization_seed)
     if device.type == "cuda":
         torch.cuda.manual_seed(config.initialization_seed)
-    model = CanonicalProbeModel(config, window_pattern, force_final_full).to(device)
+    model = CanonicalProbeModel(config, window_pattern, force_final_full, kda_backend).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate, weight_decay=0.01)
     start = time.perf_counter()
     total_answers = 0
@@ -335,7 +367,8 @@ def _probe_result(config, model, training, window_pattern, seed, device, force_f
         "evaluation_seed": seed,
         "training_seed": config.training_seed,
         "topology": {"window_pattern": window_pattern, "window_sizes": model.window_sizes,
-                     "force_final_full": force_final_full},
+                     "force_final_full": force_final_full,
+                     "kda_backend": model.model_config.kda_backend},
         "training": training,
         "easy_control": easy_control,
         "evaluation": evaluation,
@@ -343,9 +376,17 @@ def _probe_result(config, model, training, window_pattern, seed, device, force_f
     }
 
 
-def run_memory_probe(config, window_pattern, seed, device, force_final_full=True, progress=None):
+def run_memory_probe(
+    config,
+    window_pattern,
+    seed,
+    device,
+    force_final_full=True,
+    progress=None,
+    kda_backend="reference",
+):
     model, training = train_probe(
-        config, window_pattern, config.training_seed, device, force_final_full, progress,
+        config, window_pattern, config.training_seed, device, force_final_full, progress, kda_backend,
     )
     return _probe_result(
         config, model, training, window_pattern, seed, device, force_final_full, progress,
