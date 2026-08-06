@@ -52,6 +52,7 @@ state resets, finite gradients, and decode/chunk equivalence where applicable.
 ```bash
 uv run --no-sync python -m pytest -q
 uv run --no-sync research doctor --config configs/research/discovery.toml
+uv run --no-sync research probe --config configs/research/discovery.toml --calibrate
 uv run --no-sync research probe --config configs/research/discovery.toml
 uv run --no-sync research run --config configs/research/discovery.toml
 uv run --no-sync research run --config configs/research/discovery.toml --candidate configs/candidates/baseline_swa.toml
@@ -60,7 +61,9 @@ uv run --no-sync research report runs/*/summary.json
 
 - Discovery uses a five-minute steady-state training budget.
 - Promotion uses exactly 100,663,296 training tokens per seed.
-- Every candidate runs the canonical associative-memory probe.
+- After protected probe/config changes, commit them and register a clean-worktree
+  calibration before conclusion-bearing runs. Every candidate then runs that
+  calibrated canonical associative-memory protocol.
 - Decisions are tolerance-aware Pareto classifications over BPB, memory recall,
   update recall, throughput, peak memory, and inference state bytes.
 - Full CORE evaluation remains available through `scripts.base_eval`; it is a

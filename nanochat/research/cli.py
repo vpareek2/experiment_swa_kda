@@ -11,7 +11,7 @@ from nanochat.research.config import ConfigError, apply_candidate, load_config
 from nanochat.research.decision import aggregate_objectives, calibrate_objectives
 from nanochat.research.probe import run_memory_probe
 from nanochat.research.protected import initialize_supervisor, verify_protected
-from nanochat.research.runner import doctor, prepare_data, render_report, run_experiment
+from nanochat.research.runner import calibrate_memory_probe, doctor, prepare_data, render_report, run_experiment
 from nanochat.research.supervisor import format_command, sandbox_command, sign_result, verify_candidate
 
 
@@ -36,6 +36,9 @@ def build_parser() -> argparse.ArgumentParser:
     probe_parser = sub.add_parser("probe", help="run only the controlled memory probe")
     probe_parser.add_argument("--config", default="configs/research/discovery.toml")
     probe_parser.add_argument("--output")
+    probe_parser.add_argument("--calibrate", action="store_true", help="validate and register probe v2")
+    probe_parser.add_argument("--seeds", help="comma-separated calibration seeds (at least three)")
+    probe_parser.add_argument("--artifact-root")
 
     run_parser = sub.add_parser("run", help="run training, memory evaluation, and frontier classification")
     run_parser.add_argument("--config", default="configs/research/discovery.toml")
@@ -90,11 +93,29 @@ def main(argv=None) -> int:
             return 0
         if args.command == "probe":
             config = load_config(args.config)
+            def progress(event):
+                if event["event"] == "calibration":
+                    print(f"[research] calibration topology={event['topology']} seed={event['seed']}", flush=True)
+                elif event["event"] == "probe_train":
+                    print(f"[research] probe stage={event['stage']} step={event['stage_step']}/{event['stage_steps']} "
+                          f"answers={event['supervised_answers']} loss={event['loss']:.4f}", flush=True)
+                elif event["event"] == "probe_eval":
+                    print(f"[research] probe-eval group={event['group']} cell={event['cell']} "
+                          f"accuracy={event['accuracy']:.4f}", flush=True)
+            if args.calibrate:
+                seeds = ([int(value) for value in args.seeds.split(",") if value.strip()]
+                         if args.seeds else list(config.memory_probe.calibration_seeds))
+                result = calibrate_memory_probe(root, config, args.artifact_root, seeds, progress)
+                if args.output:
+                    atomic_write_json(args.output, result)
+                _json(result)
+                return 0 if result["status"] == "valid" else 1
             import torch
             result = run_memory_probe(
                 config.memory_probe, config.training.window_pattern, config.run.seed,
                 torch.device("cuda" if torch.cuda.is_available() else "cpu"),
                 config.training.force_final_full,
+                progress,
             )
             if args.output:
                 atomic_write_json(args.output, result)
@@ -162,7 +183,7 @@ def main(argv=None) -> int:
                 )
                 print(format_command(command))
                 return 0
-    except (ConfigError, FileNotFoundError, RuntimeError, ValueError) as error:
+    except (ArithmeticError, ConfigError, FileNotFoundError, RuntimeError, ValueError) as error:
         print(f"research error: {error}", file=sys.stderr)
         return 2
     return 2

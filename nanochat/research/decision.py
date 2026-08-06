@@ -46,6 +46,9 @@ def aggregate_objectives(summaries: Sequence[Mapping[str, Any]]) -> dict[str, An
     complete = [item for item in summaries if item.get("status") == "complete" and item.get("objectives")]
     if len(complete) < 2:
         raise ValueError("aggregation requires at least two complete runs")
+    protocols = {item.get("memory_probe_protocol_version") for item in complete}
+    if protocols != {"associative_recall_v2"}:
+        raise ValueError("aggregation requires memory probe protocol associative_recall_v2 for every run")
     names = tuple(complete[0]["objectives"])
     if any(set(item["objectives"]) != set(names) for item in complete):
         raise ValueError("all runs must contain the same objectives")
@@ -61,7 +64,8 @@ def aggregate_objectives(summaries: Sequence[Mapping[str, Any]]) -> dict[str, An
             "stdev": stdev,
             "ci95": [mean - half_width, mean + half_width],
         }
-    return {"schema_version": 1, "runs": len(complete), "metrics": metrics}
+    return {"schema_version": 2, "memory_probe_protocol_version": "associative_recall_v2",
+            "runs": len(complete), "metrics": metrics}
 
 
 def calibrate_objectives(summaries: Sequence[Mapping[str, Any]], config) -> dict[str, Any]:

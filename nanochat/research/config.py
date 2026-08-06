@@ -14,6 +14,9 @@ class ConfigError(ValueError):
     pass
 
 
+PROBE_KEY_COUNT = 64
+
+
 @dataclass(frozen=True)
 class RunConfig:
     name: str = "discovery"
@@ -39,22 +42,55 @@ class TrainingConfig:
 
 
 @dataclass(frozen=True)
+class ProbeStageConfig:
+    name: str
+    answer_budget: int
+    batch_size: int
+    sequence_length: int
+    loads: tuple[int, ...]
+    num_queries: int = 4
+    updates: tuple[int, ...] = (1,)
+    distractor_ratios: tuple[int, ...] = (0,)
+
+
+def _default_probe_stages() -> tuple[ProbeStageConfig, ...]:
+    return (
+        ProbeStageConfig("easy-32", 128_000, 64, 32, (4,)),
+        ProbeStageConfig("easy-64", 128_000, 64, 64, (4,)),
+        ProbeStageConfig("easy-128", 256_000, 64, 128, (4,)),
+        ProbeStageConfig("mixed-1024", 32_768, 16, 1024, (4, 16, 32), 4, (1, 2, 4), (0, 1)),
+    )
+
+
+@dataclass(frozen=True)
 class MemoryProbeConfig:
     enabled: bool = True
-    training_tokens: int = 1 << 21
+    protocol_version: str = "associative_recall_v2"
     vocab_size: int = 256
     depth: int = 4
     width: int = 256
     head_dim: int = 128
-    batch_size: int = 16
-    train_sequence_length: int = 1024
     window_size: int = 256
     learning_rate: float = 3e-4
+    initialization_seed: int = 11
+    training_seed: int = 11
     examples_per_cell: int = 512
+    easy_control_examples: int = 512
+    evaluation_batch_size: int = 16
     lengths: tuple[int, ...] = (256, 512, 1024, 2048)
     loads: tuple[int, ...] = (4, 16, 64)
     updates: tuple[int, ...] = (1, 2, 4, 8)
     distractor_ratios: tuple[int, ...] = (0, 1, 4)
+    stages: tuple[ProbeStageConfig, ...] = field(default_factory=_default_probe_stages)
+    calibration_seeds: tuple[int, ...] = (11, 23, 37)
+    overfit_max_steps: int = 100
+    full_easy_min_accuracy: float = 0.95
+    full_memory_auc_min: float = 0.85
+    full_update_accuracy_min: float = 0.60
+    full_long_accuracy_min: float = 0.90
+    swa_local_accuracy_min: float = 0.80
+    discrimination_margin_min: float = 0.50
+    max_probe_seconds: float = 90.0
 
 
 @dataclass(frozen=True)
@@ -89,7 +125,7 @@ class ProtectionConfig:
 
 @dataclass(frozen=True)
 class ResearchConfig:
-    schema_version: int = 1
+    schema_version: int = 2
     run: RunConfig = field(default_factory=RunConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
     memory_probe: MemoryProbeConfig = field(default_factory=MemoryProbeConfig)
@@ -109,8 +145,22 @@ def _section(cls, raw: dict[str, Any], name: str):
     if unknown:
         raise ConfigError(f"Unknown [{name}] keys: {sorted(unknown)}")
     for key, value in list(values.items()):
-        if key in {"lengths", "loads", "updates", "distractor_ratios", "baseline_seeds", "internal_promotion_seeds", "allowed_paths", "protected_paths"}:
+        if key in {"lengths", "loads", "updates", "distractor_ratios", "calibration_seeds", "baseline_seeds", "internal_promotion_seeds", "allowed_paths", "protected_paths"}:
             values[key] = tuple(value)
+    if cls is MemoryProbeConfig and "stages" in values:
+        stages = []
+        for index, stage in enumerate(values["stages"]):
+            if not isinstance(stage, dict):
+                raise ConfigError(f"[[memory_probe.stages]] entry {index} must be a table")
+            unknown_stage = set(stage) - set(ProbeStageConfig.__dataclass_fields__)
+            if unknown_stage:
+                raise ConfigError(f"Unknown memory probe stage keys: {sorted(unknown_stage)}")
+            stage = dict(stage)
+            for stage_key in ("loads", "updates", "distractor_ratios"):
+                if stage_key in stage:
+                    stage[stage_key] = tuple(stage[stage_key])
+            stages.append(ProbeStageConfig(**stage))
+        values["stages"] = tuple(stages)
     return cls(**values)
 
 
@@ -119,8 +169,8 @@ def load_config(path: str | Path) -> ResearchConfig:
     with config_path.open("rb") as handle:
         raw = tomllib.load(handle)
     schema_version = raw.get("schema_version", 1)
-    if schema_version != 1:
-        raise ConfigError(f"Unsupported schema_version={schema_version}; expected 1")
+    if schema_version != 2:
+        raise ConfigError(f"Unsupported schema_version={schema_version}; expected 2 (memory probe v2)")
     known = {"schema_version", "run", "training", "memory_probe", "decision", "protection"}
     unknown = set(raw) - known
     if unknown:
@@ -181,13 +231,42 @@ def validate_config(config: ResearchConfig) -> None:
     if train.sliding_window <= 0 or train.sliding_window > train.sequence_length:
         raise ConfigError("sliding_window must be positive and no larger than sequence_length")
     if probe.enabled:
+        if probe.protocol_version != "associative_recall_v2":
+            raise ConfigError(f"Unsupported memory probe protocol: {probe.protocol_version}")
         if probe.vocab_size < 192:
             raise ConfigError("memory probe vocab_size must be at least 192")
         if probe.width % probe.head_dim != 0:
             raise ConfigError("memory probe width must be divisible by head_dim")
-        if probe.training_tokens < probe.batch_size * probe.train_sequence_length:
-            raise ConfigError("memory probe training_tokens must cover at least one batch")
+        if min(probe.initialization_seed, probe.training_seed) < 0:
+            raise ConfigError("memory probe initialization_seed and training_seed must be non-negative")
+        if not all((probe.lengths, probe.loads, probe.updates, probe.distractor_ratios)):
+            raise ConfigError("memory probe evaluation grids must be non-empty")
         if probe.window_size <= 0 or probe.window_size > max(probe.lengths):
             raise ConfigError("memory probe window_size must be positive and fit an evaluation length")
         if any(length < 32 for length in probe.lengths):
             raise ConfigError("memory probe lengths must be at least 32")
+        if not probe.stages:
+            raise ConfigError("memory probe requires at least one curriculum stage")
+        stage_names = [stage.name for stage in probe.stages]
+        if len(stage_names) != len(set(stage_names)):
+            raise ConfigError("memory probe stage names must be unique")
+        for stage in probe.stages:
+            answers_per_step = stage.batch_size * stage.num_queries
+            if min(stage.answer_budget, stage.batch_size, stage.sequence_length, stage.num_queries) <= 0:
+                raise ConfigError(f"memory probe stage {stage.name} values must be positive")
+            if stage.answer_budget % answers_per_step:
+                raise ConfigError(f"memory probe stage {stage.name} answer_budget must divide by batch_size * num_queries")
+            if not stage.loads or any(load < stage.num_queries or load > PROBE_KEY_COUNT for load in stage.loads):
+                raise ConfigError(f"memory probe stage {stage.name} loads must fit query count and key vocabulary")
+            if not stage.updates or min(stage.updates) < 1:
+                raise ConfigError(f"memory probe stage {stage.name} updates must be positive")
+            if not stage.distractor_ratios or min(stage.distractor_ratios) < 0:
+                raise ConfigError(f"memory probe stage {stage.name} distractor ratios must be non-negative")
+        thresholds = (
+            probe.full_easy_min_accuracy, probe.full_memory_auc_min, probe.full_update_accuracy_min,
+            probe.full_long_accuracy_min, probe.swa_local_accuracy_min, probe.discrimination_margin_min,
+        )
+        if any(value < 0 or value > 1 for value in thresholds):
+            raise ConfigError("memory probe accuracy thresholds must be in [0, 1]")
+        if len(probe.calibration_seeds) < 3:
+            raise ConfigError("memory probe calibration requires at least three seeds")

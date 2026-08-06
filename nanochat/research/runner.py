@@ -7,6 +7,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import time
 from typing import Any
 
 import torch
@@ -20,10 +21,11 @@ from nanochat.research.artifacts import (
     make_run_id,
     protected_fingerprint,
     select_triton_ptxas,
+    sha256_json,
 )
 from nanochat.research.config import ResearchConfig
 from nanochat.research.decision import classify_candidate, objectives_from_config
-from nanochat.research.probe import run_memory_probe
+from nanochat.research.probe import probe_protocol_hash, run_memory_probe, run_probe_calibration
 
 
 TRAIN_RESULT_PREFIX = "RESEARCH_TRAIN_RESULT "
@@ -135,7 +137,7 @@ def _state_bytes(config: ResearchConfig) -> int:
     return int(sum(2 * heads * train.head_dim * 2 * length for length in lengths))
 
 
-def _frontier_summaries(artifact_root: Path, exclude_run_id: str) -> list[dict[str, Any]]:
+def _frontier_summaries(artifact_root: Path, exclude_run_id: str, probe_protocol_version: str) -> list[dict[str, Any]]:
     frontier = []
     if not artifact_root.exists():
         return frontier
@@ -144,9 +146,74 @@ def _frontier_summaries(artifact_root: Path, exclude_run_id: str) -> list[dict[s
             summary = json.loads(summary_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
-        if summary.get("run_id") != exclude_run_id and summary.get("decision", {}).get("status") in {"frontier", "confirmed"}:
+        if (summary.get("run_id") != exclude_run_id
+                and summary.get("memory_probe_protocol_version") == probe_protocol_version
+                and summary.get("decision", {}).get("status") in {"frontier", "confirmed"}):
             frontier.append(summary)
     return frontier
+
+
+def _probe_calibration_identity(repo: Path, config: ResearchConfig) -> dict[str, str]:
+    return {
+        "protocol_hash": probe_protocol_hash(config.memory_probe),
+        "protected_hash": sha256_json(protected_fingerprint(repo, config.protection.protected_paths)),
+    }
+
+
+def probe_calibration_path(repo: Path, config: ResearchConfig, artifact_root_override=None) -> Path:
+    artifact_root = Path(artifact_root_override or config.run.artifact_root)
+    if not artifact_root.is_absolute():
+        artifact_root = repo / artifact_root
+    identity = _probe_calibration_identity(repo, config)
+    return artifact_root / "probe-calibration-v2" / identity["protocol_hash"][:12] / "calibration.json"
+
+
+def load_probe_calibration(repo: Path, config: ResearchConfig, artifact_root_override=None) -> dict[str, Any]:
+    path = probe_calibration_path(repo, config, artifact_root_override)
+    if not path.exists():
+        raise FileNotFoundError(f"missing memory-probe calibration: {path}; run `research probe --calibrate`")
+    calibration = json.loads(path.read_text(encoding="utf-8"))
+    identity = _probe_calibration_identity(repo, config)
+    if calibration.get("status") != "valid":
+        raise ValueError(f"memory-probe calibration is not valid: {path}")
+    for key, expected in identity.items():
+        if calibration.get(key) != expected:
+            raise ValueError(f"stale memory-probe calibration ({key} mismatch): {path}")
+    return {"path": str(path), **calibration}
+
+
+def calibrate_memory_probe(root, config, artifact_root_override=None, seeds=None, progress=None) -> dict[str, Any]:
+    repo = Path(root).resolve()
+    provenance = git_provenance(repo)
+    if provenance["commit"] is None or provenance["dirty"]:
+        raise ValueError("memory-probe calibration requires a committed, clean worktree")
+    selected_seeds = list(seeds or config.memory_probe.calibration_seeds)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    result = run_probe_calibration(config.memory_probe, selected_seeds, device, progress)
+    identity = _probe_calibration_identity(repo, config)
+    result.update({
+        **identity,
+        "git": provenance,
+        "environment": environment_provenance(),
+    })
+    path = probe_calibration_path(repo, config, artifact_root_override)
+    atomic_write_json(path, result)
+    return {"path": str(path), **result}
+
+
+def _run_trainer_with_heartbeats(command, repo, environment, log_path, run_id) -> int:
+    print(f"[research] phase=training run_id={run_id} log={log_path}", flush=True)
+    with log_path.open("w", encoding="utf-8") as log:
+        process = subprocess.Popen(command, cwd=repo, env=environment, stdout=log, stderr=subprocess.STDOUT)
+        started = time.monotonic()
+        next_heartbeat = 30.0
+        while process.poll() is None:
+            time.sleep(2)
+            elapsed = time.monotonic() - started
+            if elapsed >= next_heartbeat:
+                print(f"[research] phase=training elapsed={elapsed:.0f}s log={log_path}", flush=True)
+                next_heartbeat += 30.0
+        return process.returncode
 
 
 def run_experiment(
@@ -176,6 +243,7 @@ def run_experiment(
         },
     }
     atomic_write_json(run_dir / "manifest.json", manifest)
+    print(f"[research] run_id={run_id} artifacts={run_dir}", flush=True)
 
     if provenance["commit"] is None or provenance["dirty"]:
         summary = {
@@ -189,6 +257,22 @@ def run_experiment(
         append_jsonl(artifact_root / "index.jsonl", summary)
         return summary
 
+    calibration = None
+    if config.memory_probe.enabled and not skip_probe and not skip_training:
+        try:
+            calibration = load_probe_calibration(repo, config, artifact_root)
+        except (FileNotFoundError, ValueError) as error:
+            summary = {
+                "schema_version": 2,
+                "run_id": run_id,
+                "status": "invalid",
+                "failure_reason": str(error),
+                "manifest": str(run_dir / "manifest.json"),
+            }
+            atomic_write_json(run_dir / "summary.json", summary)
+            append_jsonl(artifact_root / "index.jsonl", summary)
+            return summary
+
     training: dict[str, Any] = {}
     if not skip_training:
         log_path = run_dir / "train.log"
@@ -197,15 +281,11 @@ def run_experiment(
         triton_ptxas = select_triton_ptxas()
         if triton_ptxas:
             environment["TRITON_PTXAS_PATH"] = triton_ptxas
-        with log_path.open("w", encoding="utf-8") as log:
-            completed = subprocess.run(
-                _trainer_command(config, run_id), cwd=repo, env=environment,
-                stdout=log, stderr=subprocess.STDOUT, check=False,
-            )
-        if completed.returncode != 0:
+        returncode = _run_trainer_with_heartbeats(_trainer_command(config, run_id), repo, environment, log_path, run_id)
+        if returncode != 0:
             summary = {
                 "schema_version": 1, "run_id": run_id, "status": "crash",
-                "failure_reason": f"trainer exited with code {completed.returncode}",
+                "failure_reason": f"trainer exited with code {returncode}",
                 "log": str(log_path),
             }
             atomic_write_json(run_dir / "summary.json", summary)
@@ -217,9 +297,18 @@ def run_experiment(
     probe: dict[str, Any] = {}
     if config.memory_probe.enabled and not skip_probe:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        metrics_path = run_dir / "probe-metrics.jsonl"
+        def probe_progress(event):
+            append_jsonl(metrics_path, event)
+            if event["event"] == "probe_train":
+                print(f"[research] phase=probe stage={event['stage']} step={event['stage_step']}/{event['stage_steps']} "
+                      f"answers={event['supervised_answers']} loss={event['loss']:.4f}", flush=True)
+            elif event["event"] == "probe_eval":
+                print(f"[research] phase=probe-eval group={event['group']} cell={event['cell']} "
+                      f"accuracy={event['accuracy']:.4f}", flush=True)
         probe = run_memory_probe(
             config.memory_probe, config.training.window_pattern, config.run.seed, device,
-            config.training.force_final_full,
+            config.training.force_final_full, probe_progress,
         )
         atomic_write_json(run_dir / "memory-probe.json", probe)
 
@@ -244,17 +333,24 @@ def run_experiment(
         "peak_memory_mb": float(training.get("peak_memory_mb", float("inf"))),
         "state_bytes": float(_state_bytes(config)),
     }
-    frontier = _frontier_summaries(artifact_root, run_id)
+    frontier = _frontier_summaries(artifact_root, run_id, config.memory_probe.protocol_version)
     candidate = {"status": "complete", "run_id": run_id, "objectives": objectives}
     decision = classify_candidate(candidate, frontier, objectives_from_config(config.decision))
     summary = {
-        "schema_version": 1,
+        "schema_version": 2,
         "run_id": run_id,
         "status": "complete",
         "suite": config.run.suite,
         "objectives": objectives,
         "training": training,
         "memory_probe": probe.get("evaluation", {}),
+        "memory_probe_easy_control": probe.get("easy_control", {}),
+        "memory_probe_protocol_version": config.memory_probe.protocol_version,
+        "memory_probe_protocol_hash": probe.get("protocol_hash"),
+        "memory_probe_calibration": (
+            {"path": calibration["path"], "protected_hash": calibration["protected_hash"]}
+            if calibration is not None else None
+        ),
         "decision": decision,
         "manifest": str(run_dir / "manifest.json"),
     }
@@ -266,15 +362,18 @@ def run_experiment(
 def render_report(summaries: list[dict[str, Any]]) -> str:
     lines = [
         "# Research comparison", "",
-        "| Run | Decision | BPB ↓ | Memory AUC ↑ | Update ↑ | tok/s ↑ | Peak MB ↓ | State MB ↓ |",
-        "|---|---|---:|---:|---:|---:|---:|---:|",
+        "| Run | Decision | Probe | BPB ↓ | Memory AUC ↑ | Update ↑ | tok/s ↑ | Peak MB ↓ | State MB ↓ |",
+        "|---|---|---|---:|---:|---:|---:|---:|---:|",
     ]
     for summary in summaries:
         obj = summary.get("objectives", {})
+        protocol = summary.get("memory_probe_protocol_version")
+        memory_auc = obj.get("memory_auc", float("nan")) if protocol == "associative_recall_v2" else float("nan")
+        update_accuracy = obj.get("update_accuracy", float("nan")) if protocol == "associative_recall_v2" else float("nan")
         lines.append(
             f"| {summary.get('run_id', '?')} | {summary.get('decision', {}).get('status', summary.get('status', '?'))} "
-            f"| {obj.get('val_bpb', float('nan')):.6f} | {obj.get('memory_auc', float('nan')):.4f} "
-            f"| {obj.get('update_accuracy', float('nan')):.4f} | {obj.get('tokens_per_second', float('nan')):.0f} "
+            f"| {protocol or 'legacy/ineligible'} | {obj.get('val_bpb', float('nan')):.6f} | {memory_auc:.4f} "
+            f"| {update_accuracy:.4f} | {obj.get('tokens_per_second', float('nan')):.0f} "
             f"| {obj.get('peak_memory_mb', float('nan')):.1f} | {obj.get('state_bytes', 0) / 2**20:.2f} |"
         )
     return "\n".join(lines) + "\n"

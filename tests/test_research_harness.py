@@ -12,7 +12,7 @@ from nanochat.research.artifacts import (
     protected_fingerprint,
     select_triton_ptxas,
 )
-from nanochat.research.config import ConfigError, MemoryProbeConfig, apply_candidate, load_config
+from nanochat.research.config import ConfigError, MemoryProbeConfig, ProbeStageConfig, apply_candidate, load_config
 from nanochat.research.decision import (
     aggregate_objectives,
     calibrate_objectives,
@@ -27,8 +27,9 @@ from nanochat.research.memory import (
     generate_memory_batch,
     generate_memory_example,
     score_answer_tokens,
+    score_oracle,
 )
-from nanochat.research.probe import train_probe
+from nanochat.research.probe import calibration_checks, probe_protocol_hash, train_probe, wilson_interval
 from nanochat.research.protected import (
     changed_path_violations,
     initialize_supervisor,
@@ -36,7 +37,15 @@ from nanochat.research.protected import (
     verify_protected,
     verify_signature,
 )
-from nanochat.research.runner import _extract_training_metrics, _parse_training_result
+from nanochat.research.runner import (
+    _extract_training_metrics,
+    _frontier_summaries,
+    _parse_training_result,
+    _probe_calibration_identity,
+    load_probe_calibration,
+    probe_calibration_path,
+    render_report,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -50,6 +59,9 @@ def test_research_configs_load_and_use_distinct_budget_lanes():
     assert promotion.training.seconds == 0
     assert promotion.training.tokens == 100_663_296
     assert promotion.training.tokens % promotion.training.total_batch_size == 0
+    assert discovery.schema_version == promotion.schema_version == 2
+    assert sum(stage.answer_budget for stage in discovery.memory_probe.stages) == 544_768
+    assert probe_protocol_hash(discovery.memory_probe) == probe_protocol_hash(promotion.memory_probe)
 
 
 def test_config_rejects_unknown_keys(tmp_path):
@@ -125,6 +137,13 @@ def test_memory_batch_and_answer_scoring():
     assert len(metadata) == 2
     assert scores["answer_tokens"] == 4
     assert scores["accuracy"] == 1.0
+    assert score_oracle(inputs, labels)["accuracy"] == 1.0
+
+
+def test_wilson_interval_contains_observed_accuracy():
+    low, high = wilson_interval(80, 100)
+    assert low < 0.8 < high
+    assert wilson_interval(0, 1)[0] == 0.0
 
 
 def _objectives(**overrides):
@@ -155,7 +174,8 @@ def test_pareto_decision_distinguishes_dominated_frontier_and_retest():
 
 def test_seed_aggregation_and_noise_calibration():
     summaries = [
-        {"status": "complete", "objectives": _objectives(val_bpb=value)}
+        {"status": "complete", "memory_probe_protocol_version": "associative_recall_v2",
+         "objectives": _objectives(val_bpb=value)}
         for value in (1.99, 2.00, 2.01, 2.02, 1.98)
     ]
     aggregate = aggregate_objectives(summaries)
@@ -220,21 +240,72 @@ def test_supervisor_detects_changes_and_signs(tmp_path):
 
 def test_tiny_memory_probe_training_step_runs_on_cpu():
     config = MemoryProbeConfig(
-        training_tokens=256,
         vocab_size=256,
         depth=1,
         width=32,
         head_dim=16,
-        batch_size=2,
-        train_sequence_length=128,
         window_size=32,
         examples_per_cell=1,
         lengths=(128,),
         loads=(4,),
         updates=(1,),
         distractor_ratios=(0,),
+        stages=(ProbeStageConfig("tiny", 8, 2, 128, (4,)),),
     )
     model, result = train_probe(config, "S", 7, torch.device("cpu"))
     assert result["training_steps"] == 1
-    assert result["final_loss"] is not None
+    assert result["supervised_answers"] == 8
+    assert result["stage_results"][0]["final_loss"] is not None
     assert all(torch.isfinite(parameter).all() for parameter in model.parameters())
+
+
+def _calibration_result(boundary, *, easy=1.0, auc=1.0, updates=1.0, seconds=1.0):
+    return {
+        "easy_control": {"accuracy": easy},
+        "evaluation": {
+            "memory_auc": auc,
+            "update_accuracy": updates,
+            "cells": {"boundary": [
+                {"spec": {"target_distance": distance}, "accuracy": accuracy}
+                for distance, accuracy in boundary.items()
+            ]},
+        },
+        "total_seconds": seconds,
+    }
+
+
+def test_calibration_requires_learning_and_swa_boundary_discrimination():
+    config = MemoryProbeConfig()
+    full = _calibration_result({255: 1.0, 256: 1.0, 1024: 0.95})
+    swa = _calibration_result({255: 0.95, 256: 0.90, 1024: 0.10})
+    checks = calibration_checks(config, [11], {"accuracy": 1.0}, {"accuracy": 1.0}, [full], [swa])
+    assert all(item["passed"] for item in checks)
+    broken = _calibration_result({255: 1.0, 256: 1.0, 1024: 0.90}, easy=0.2)
+    checks = calibration_checks(config, [11], {"accuracy": 1.0}, {"accuracy": 1.0}, [broken], [swa])
+    assert next(item for item in checks if item["name"].endswith("full_easy"))["passed"] is False
+
+
+def test_legacy_probe_runs_are_excluded_from_frontier_and_report(tmp_path):
+    legacy = {"run_id": "v1", "status": "complete", "decision": {"status": "frontier"},
+              "objectives": _objectives(memory_auc=0.99)}
+    current = {"run_id": "v2", "status": "complete", "decision": {"status": "frontier"},
+               "memory_probe_protocol_version": "associative_recall_v2", "objectives": _objectives()}
+    for item in (legacy, current):
+        atomic_write_json(tmp_path / item["run_id"] / "summary.json", item)
+    assert [item["run_id"] for item in _frontier_summaries(tmp_path, "new", "associative_recall_v2")] == ["v2"]
+    report = render_report([legacy, current])
+    assert "legacy/ineligible" in report
+
+
+def test_probe_calibration_loader_rejects_missing_and_stale_artifacts(tmp_path):
+    config = load_config(ROOT / "configs/research/discovery.toml")
+    config = replace(config, protection=replace(config.protection, protected_paths=()))
+    with pytest.raises(FileNotFoundError, match="missing memory-probe calibration"):
+        load_probe_calibration(tmp_path, config)
+    path = probe_calibration_path(tmp_path, config)
+    identity = _probe_calibration_identity(tmp_path, config)
+    atomic_write_json(path, {"status": "valid", **identity})
+    assert load_probe_calibration(tmp_path, config)["protocol_hash"] == identity["protocol_hash"]
+    atomic_write_json(path, {"status": "valid", **identity, "protected_hash": "stale"})
+    with pytest.raises(ValueError, match="protected_hash mismatch"):
+        load_probe_calibration(tmp_path, config)

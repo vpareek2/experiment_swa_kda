@@ -11,6 +11,7 @@ Quick start on the current DGX Spark environment:
 uv sync --extra gpu --group dev
 uv run --no-sync python -m pytest -q
 uv run --no-sync research doctor --config configs/research/discovery.toml
+uv run --no-sync research probe --config configs/research/discovery.toml --calibrate
 uv run --no-sync research probe --config configs/research/discovery.toml
 ```
 

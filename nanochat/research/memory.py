@@ -179,5 +179,27 @@ def score_answer_tokens(logits: torch.Tensor, labels: torch.Tensor) -> dict[str,
     selected_logits = logits[mask].float()
     selected_labels = labels[mask]
     nll = torch.nn.functional.cross_entropy(selected_logits, selected_labels, reduction="mean")
-    accuracy = (selected_logits.argmax(dim=-1) == selected_labels).float().mean()
-    return {"answer_tokens": count, "nll": float(nll.item()), "accuracy": float(accuracy.item())}
+    correct = int((selected_logits.argmax(dim=-1) == selected_labels).sum().item())
+    return {"answer_tokens": count, "correct": correct, "nll": float(nll.item()), "accuracy": correct / count}
+
+
+def score_oracle(inputs: torch.Tensor, labels: torch.Tensor) -> dict[str, Any]:
+    """Solve generated examples by scanning writes with last-write-wins semantics."""
+    if inputs.shape != labels.shape or inputs.ndim != 2:
+        raise ValueError("oracle expects matching [batch, sequence] inputs and labels")
+    correct = 0
+    count = 0
+    for row_inputs, row_labels in zip(inputs.cpu(), labels.cpu()):
+        latest: dict[int, int] = {}
+        for position in range(row_inputs.numel() - 2):
+            if int(row_inputs[position]) == PAIR:
+                latest[int(row_inputs[position + 1])] = int(row_inputs[position + 2])
+        for position in (row_labels >= 0).nonzero(as_tuple=False).flatten().tolist():
+            key = int(row_inputs[position])
+            if key not in latest:
+                raise ValueError(f"query key {key} has no preceding write")
+            correct += int(latest[key] == int(row_labels[position]))
+            count += 1
+    if count == 0:
+        raise ValueError("no answer tokens in labels")
+    return {"answer_tokens": count, "correct": correct, "accuracy": correct / count}
