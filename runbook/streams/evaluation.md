@@ -102,3 +102,65 @@ uv run --no-sync research probe --config configs/research/discovery.toml --calib
 - Commit the protected v2 implementation, run the official calibration command
   from that clean commit, then rerun matched full-attention and pure-SWA baselines.
 - Only after those baselines enter the v2 frontier should KDA integration begin.
+
+## 2026-08-05 [codex] compare full attention and KDA on memory probe v2
+
+**Context**
+
+- Committed the validated SM121 KDA backend, repaired direct probe backend
+  provenance, and added an explicit KDA-only candidate.
+- Ran full-attention and KDA-only diagnostics from the same clean commit with
+  the same initialization, training seed, 544,768 supervised answers, and
+  held-out evaluation cells. These runs intentionally skipped LM pretraining,
+  so they are probe diagnostics rather than frontier-eligible model results.
+
+**Commands**
+
+```bash
+uv run --no-sync research doctor --config configs/research/discovery.toml
+uv run --no-sync research run --config configs/research/discovery.toml \
+  --candidate configs/candidates/baseline_full.toml --skip-training
+uv run --no-sync research run --config configs/research/discovery.toml \
+  --candidate configs/candidates/kda_only.toml --skip-training
+```
+
+**Artifacts**
+
+- `runs/20260806T042723Z-baseline-full-91a7c518-s42/`
+- `runs/20260806T042848Z-kda-only-91a7c518-s42/`
+- `configs/candidates/kda_only.toml`
+- Commit `91a7c51`
+
+**Result**
+
+- The clean-commit doctor gate reported `research_ready=true` with CUDA, BF16,
+  FLA 0.5.2, Triton 3.5.1, and CUDA 13.1 `ptxas` all valid.
+- Full attention achieved easy-control accuracy 0.9937, memory AUC 0.9762,
+  update accuracy 0.7578, and worst-slice accuracy 0.5000. Its repeated-write
+  cells fell from 0.9766 at one write to 0.5000 at eight writes.
+- KDA-only achieved easy-control accuracy 1.0000, memory AUC 0.9731, update
+  accuracy 1.0000, and worst-slice accuracy 0.9063. It was perfect on all four
+  repeated-write cells and all five fixed-distance boundary cells, including a
+  query distance of 1,024 tokens.
+- Aggregate load memory was effectively tied in this seed: mean load accuracy
+  was 0.9744 for full attention and 0.9728 for KDA. At length 2,048 KDA scored
+  0.9720 versus 0.9544 for full attention. Under the strongest distractor load,
+  however, KDA scored 0.9082 versus 0.9453 for full attention.
+- The present KDA path was 17.8x slower on probe training: 461 supervised
+  answers/s and 1,181.6 seconds versus 8,200 answers/s and 66.4 seconds. This
+  tiny-model measurement includes local projections/convolutions and should not
+  be generalized to large-model throughput, but it is too large to ignore.
+- This single fixed training seed demonstrates that the probe now exposes a
+  meaningful architectural tradeoff: KDA strongly improves overwrite behavior
+  without improving aggregate load AUC, while losing some high-distractor
+  accuracy and substantial wall-clock efficiency. It is not an LM quality
+  conclusion or a multi-seed estimate.
+
+**Next**
+
+- Profile the KDA probe by operator and model component to locate the 17.8x
+  long-sequence overhead before spending a pretraining budget.
+- Add and probe the intended SWA+KDA layerwise candidate; the KDA-only result is
+  a mechanism isolation, not the target architecture.
+- Run at least three diagnostic seeds for full, KDA-only, and SWA+KDA before
+  treating overwrite and distractor deltas as stable.
