@@ -81,3 +81,37 @@ uv run --no-sync python -m pytest -q
 **Next**
 
 - Commit the compatibility fix, then rerun the full-attention discovery baseline.
+
+## 2026-08-06 [codex] establish full-attention probe-v2 baseline
+
+**Context**
+
+- Repeated the five-minute full-attention discovery baseline after registering
+  associative-recall probe v2 at clean commit `f754fbc`.
+
+**Commands**
+
+```bash
+uv run --no-sync research run \
+  --config configs/research/discovery.toml \
+  --candidate configs/candidates/baseline_full.toml
+```
+
+**Artifacts**
+
+- `runs/20260806T020617Z-baseline-full-f754fbc3-s42/summary.json`
+
+**Result**
+
+- Complete and classified as the first valid v2 frontier candidate.
+- Validation BPB 1.150807, median throughput 155,077 tok/s, peak allocated
+  memory 1,990.66 MiB, and inference-state estimate 9,437,184 bytes.
+- Probe easy accuracy 1.0, memory AUC 0.988607, update accuracy 0.804688, and
+  256/512/1024/2048 load-curve accuracy 0.9967/0.9948/0.9902/0.9648.
+- Worst slice was 0.492188 on the eight-overwrite stress cell, not the
+  long-distance load cells.
+
+**Next**
+
+- Run the matched pure-SWA discovery baseline from the same commit and compare
+  BPB, throughput, state bytes, and the calibrated boundary/long-range slices.
