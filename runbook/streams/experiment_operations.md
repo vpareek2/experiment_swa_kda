@@ -115,3 +115,42 @@ uv run --no-sync research run \
 
 - Run the matched pure-SWA discovery baseline from the same commit and compare
   BPB, throughput, state bytes, and the calibrated boundary/long-range slices.
+
+## 2026-08-06 [codex] establish pure-SWA probe-v2 baseline
+
+**Context**
+
+- Ran the matched pure-SWA discovery candidate after recording the full-attention
+  baseline. Protected code/config and the registered v2 calibration were unchanged.
+
+**Commands**
+
+```bash
+uv run --no-sync research run \
+  --config configs/research/discovery.toml \
+  --candidate configs/candidates/baseline_swa.toml
+```
+
+**Artifacts**
+
+- `runs/20260806T023214Z-baseline-swa-a7062d9e-s42/summary.json`
+
+**Result**
+
+- Complete; classified `retest` because state bytes improved while BPB, memory
+  AUC, update accuracy, and measured throughput regressed.
+- Versus full attention: BPB 1.209343 versus 1.150807; memory AUC 0.569336
+  versus 0.988607; update accuracy 0.615234 versus 0.804688; throughput 128,106
+  versus 155,077 tok/s; state estimate 2,359,296 versus 9,437,184 bytes (-75%).
+- Peak allocated training memory was effectively unchanged near 1,991 MiB.
+  The current PyTorch SDPA fallback does not realize SWA kernel-efficiency gains.
+- Boundary accuracy was 1.0000/0.9844/0.9766 at distance 255/256/257, 0.8672
+  at 512, and 0.03125 at 1,024. The gradual reach reflects propagation through
+  stacked local layers; the calibrated long-range failure is unambiguous.
+
+**Next**
+
+- Preserve both baselines as the v2 reference frontier/evidence set.
+- Integrate a correctness-first KDA mixer behind the protected probe shell.
+  Treat an optimized SWA kernel as a separate performance intervention so it
+  is not confounded with KDA quality experiments.
