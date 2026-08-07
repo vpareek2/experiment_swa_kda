@@ -59,6 +59,39 @@ class RMSNormGated(nn.Module):
         return normalized * gate.sigmoid()
 
 
+_FLA_CAUSAL_CONV1D: Callable | None = None
+
+
+def _load_fla_causal_conv1d() -> Callable:
+    """Load the pinned Triton causal convolution only after SM121 is configured."""
+
+    global _FLA_CAUSAL_CONV1D
+    if _FLA_CAUSAL_CONV1D is not None:
+        return _FLA_CAUSAL_CONV1D
+
+    configure_triton_ptxas(required=True)
+    try:
+        fla_version = importlib.metadata.version("fla-core")
+    except importlib.metadata.PackageNotFoundError as error:
+        raise RuntimeError(
+            "the optimized KDA backend requires fla-core==0.5.2; "
+            "run `uv sync --extra gpu`"
+        ) from error
+    if fla_version != "0.5.2":
+        raise RuntimeError(f"optimized KDA requires fla-core==0.5.2, found {fla_version}")
+    try:
+        from fla.modules.conv.causal_conv1d import causal_conv1d
+    except ModuleNotFoundError as error:
+        if error.name == "fla" or (error.name and error.name.startswith("fla.")):
+            raise RuntimeError(
+                "the optimized KDA backend requires fla-core==0.5.2; "
+                "run `uv sync --extra gpu`"
+            ) from error
+        raise
+    _FLA_CAUSAL_CONV1D = causal_conv1d
+    return _FLA_CAUSAL_CONV1D
+
+
 class ShortConvolution(nn.Conv1d):
     """Depthwise causal convolution with explicit, non-mutating cache state."""
 
@@ -94,6 +127,18 @@ class ShortConvolution(nn.Conv1d):
         if length == 0:
             output = x.new_empty(batch, 0, channels)
             return output, current if output_final_state else None
+
+        if x.is_cuda:
+            op = _load_fla_causal_conv1d()
+            return op(
+                x,
+                weight=self.weight.squeeze(1).to(dtype=x.dtype),
+                bias=None,
+                initial_state=None if state is None else current,
+                output_final_state=output_final_state,
+                activation="silu",
+                backend="triton",
+            )
 
         # Every recurrent step first discards the oldest cached value, appends
         # the new token, and takes a width-sized dot product.  All of those
