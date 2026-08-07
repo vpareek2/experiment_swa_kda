@@ -529,3 +529,38 @@ research speed-supervisor run --attempt 1
 - Tag the retained baseline. Attempt 2 should use its mandatory profile to
   identify a new primary bottleneck rather than revisiting the removed Python
   token loop.
+
+
+## 2026-08-07 [agent] reject attempt 2 fused QKV projection
+
+**Context**
+
+- Candidate `782b932` concatenated existing q/k/v weights, executed one wider
+  `F.linear`, and split the outputs while preserving public modules and state.
+
+**Commands**
+
+```bash
+research speed-supervisor run --attempt 2
+```
+
+**Artifacts**
+
+- Ledger attempt 2; ignored artifacts:
+  `runs/speed-supervisor/c50c1dfdddc6/attempt-00002/`.
+- Candidate branch: `origin/kda-speed/attempt-002` at `782b932`.
+
+**Result**
+
+- Protected correctness passed. Baseline medians produced supervisor baseline
+  41,538.5 tok/s with only 0.022% drift. Candidate median was 41,759 tok/s,
+  +0.53%, below the frozen 3% threshold.
+- Mandatory profile update improved by only 3.52 ms; forward by 1.78 ms and
+  backward by 0.85 ms. The q/k/v projection regions disappeared as expected,
+  but their prior contribution was too small for a material step gain.
+- Decision: `not_improved`; branch retained for provenance, not merged.
+
+**Next**
+
+- Attempt 3 may test fusion of the three depthwise short-convolution dispatches,
+  whose retained profile contribution is larger than input projection dispatch.
