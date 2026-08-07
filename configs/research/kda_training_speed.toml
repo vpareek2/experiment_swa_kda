@@ -36,8 +36,8 @@ decode_context_lengths = [1024]
 
 [speed_supervisor]
 enabled = true
-ledger_path = "runs/kda-training-autoresearch.sqlite3"
-candidate_paths = ["nanochat/mixers/kda.py"]
+ledger_path = "runs/kda-training-autoresearch-15.sqlite3"
+candidate_paths = ["nanochat/mixers/"]
 correctness_tests = [
   "tests/test_kda_layer.py",
   "tests/test_kda_operator.py",
@@ -45,7 +45,7 @@ correctness_tests = [
   "tests/test_kda_integration.py",
 ]
 test_timeout_seconds = 300.0
-max_attempts = 24
+max_attempts = 15
 min_relative_throughput_improvement = 0.03
 max_baseline_drift_fraction = 0.03
 profile_timeout_seconds = 240.0

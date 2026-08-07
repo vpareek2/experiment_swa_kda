@@ -18,7 +18,7 @@ coordination, benchmark invocation, result interpretation, and runbook entry.
 It must not edit KDA candidate implementation files.
 
 A spawned Prime Agent child is a **candidate worker**. It may work only in its
-assigned candidate worktree and may edit only `nanochat/mixers/kda.py`. It must
+assigned candidate worktree and may edit only files under `nanochat/mixers/`. It must
 not edit the supervisor, benchmark/configuration code, tests, runbook, data,
 tokenizer, fallback policy, or generated artifacts. It returns its hypothesis,
 commit SHA, changed-file list, and risks to its parent.
@@ -114,7 +114,7 @@ credentials, datasets, checkpoints, or private seeds in Git or the runbook.
 
 ## Stop conditions
 
-The protected ledger limits this protocol to 24 attempts. Stop when that budget
+The protected ledger limits this protocol to 15 attempts. Stop when that budget
 is exhausted, a systems invariant fails, or the supervisor cannot attribute an
 observed regression/improvement from saved evidence. Do not start quality or
 long-training campaigns from this program.

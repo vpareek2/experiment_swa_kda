@@ -415,3 +415,39 @@ git push origin kda-speed-prime-context-baseline-20260807
 **Next**
 
 - Launch `kda-speed/attempt-002` from this tag when authorized.
+
+
+## 2026-08-07 [agent] authorize 15-attempt implementation-language-neutral loop
+
+**Context**
+
+- The user authorized the supervising agent to run the protected loop with a
+  hard cap of 15 attempts and allowed any implementation language that works in
+  the existing uv-managed project environment.
+
+**Commands**
+
+```bash
+# Freeze a new protocol: max_attempts=15, new ledger, candidate scope nanochat/mixers/.
+```
+
+**Artifacts**
+
+- Frozen ledger path: `runs/kda-training-autoresearch-15.sqlite3`.
+- Candidate scope: files under `nanochat/mixers/`; all research/config/test and
+  trainer files remain protected.
+
+**Result**
+
+- Candidates may use Python, Triton, CUDA/PTX, CuTe DSL, cuTile, Gluon, or
+  another implementation approach only when it is self-contained under the
+  mixer directory and runs through the existing uv environment. They may not
+  add unreviewed project dependencies, patch the toolchain, use tcgen05/TMEM,
+  or weaken correctness/fallback rules.
+- The previous documentation-only dry run remains historical plumbing evidence
+  in the older ledger and does not consume the new 15-attempt experimental cap.
+
+**Next**
+
+- Commit, push, and tag this new protocol baseline; launch attempt 1 through a
+  separate candidate worktree and child agent.
