@@ -823,3 +823,58 @@ research speed-supervisor run --attempt 9
   locally supported TMA path was neutral.
 - Retained baseline remains attempt 6 at `kda-speed-retained-006-20260807`.
   Quality was not evaluated by this speed-only loop.
+
+
+## 2026-08-07 [agent] final nine-attempt supervisor audit
+
+**Context**
+
+- The loop stopped early at nine of at most fifteen attempts after the
+  post-attempt-6 plateau was established. This audit checks the full protected
+  objective rather than relying on individual run conclusions.
+
+**Commands**
+
+```bash
+uv run --no-sync research speed-supervisor summary   --config configs/research/kda_training_speed.toml
+UV_PROJECT_ENVIRONMENT=/home/veer/Master/projects/experiment_swa_kda/.venv   uv run --no-sync python -m pytest -q
+git worktree list --porcelain
+git ls-remote --heads --tags origin
+```
+
+- SQLite and artifact checks enumerated all attempts/phases, verified profile
+  mode and sizes, and compared remote candidate refs with immutable ledger SHAs.
+
+**Artifacts**
+
+- Frozen ledger: `runs/kda-training-autoresearch-15.sqlite3`.
+- Protocol artifacts: `runs/speed-supervisor/c50c1dfdddc6/`.
+- Retained tag: `kda-speed-retained-006-20260807`.
+
+**Result**
+
+- Exactly nine experimental attempts exist and all are `complete`: attempts 1
+  and 6 are `improved`; attempts 2-5 and 7-9 are `not_improved`.
+- Every attempt has the same six completed protected phases: candidate
+  correctness, baseline-pre systems/profile, candidate systems/profile, and
+  baseline-post systems. All correctness return codes are zero.
+- All 18 mandatory profiles use bounded CUDA-event operator regions; maximum
+  profile JSON size is 4,376 bytes versus the 256 KiB cap. No trace artifact
+  exists. All 27 systems summaries and nine correctness logs are present.
+- Every candidate SHA matches its pushed `origin/kda-speed/attempt-NNN` ref.
+  Only retained mixer commits `a503132` and `70c734f` are ancestors of `main`;
+  all seven rejected candidate commits remain remote-only. Retained tags 1 and
+  6 and the frozen baseline tag are pushed.
+- The complete repository suite passes: 137 passed, 10 skipped, one known
+  GB10/PyTorch capability warning in 8.69 seconds. The coordinator is the only
+  remaining worktree and is clean/pushed.
+- Stable retained throughput is approximately 44.1k tok/s versus the original
+  attempt-1 matched baseline 833.5 tok/s, about 52.96x overall. The retained
+  profile update is 743.06 ms versus 38,160.5 ms before attempt 1, about 51.36x.
+  These are training-speed results only; quality was not evaluated.
+
+**Next**
+
+- Keep attempt 6 as the terminal retained speed baseline. Resume only with a
+  new, evidence-backed mixer hypothesis capable of addressing at least the
+  frozen 3% scale without violating SM121 or protected-harness constraints.
