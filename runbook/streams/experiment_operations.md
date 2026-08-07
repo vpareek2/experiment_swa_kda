@@ -317,3 +317,51 @@ uv run --no-sync research systems --config configs/research/systems_4k.toml
 - Add isolated prefill/decode measurement and profiler artifacts. Then rerun
   the KDA cold phase under the 120-second cap to classify its failure without
   another unbounded wait.
+
+## 2026-08-07 [agent] classify the 4k KDA systems failure
+
+**Context**
+
+- The bounded systems runner was used to distinguish a compiler-only issue from
+  the actual FLA KDA execution path. A matched eager full-attention control was
+  run only for diagnosis.
+
+**Commands**
+
+```bash
+uv run --no-sync research systems --config configs/research/systems_4k.toml \
+  --candidate configs/candidates/kda_only.toml
+TORCH_COMPILE_DISABLE=1 <one- and three-update KDA diagnostics at 4096>
+TORCH_COMPILE_DISABLE=1 <two-update full-attention control at 4096>
+```
+
+**Artifacts**
+
+- Ignored systems artifact:
+  `runs/systems-20260807T180253Z-kda-only-b8a4492a-s42/`
+- Ignored diagnostic logs: `runs/4k-kda-eager-{diagnostic,warm-diagnostic}.log`,
+  `runs/4k-full-eager-control.log`
+
+**Result**
+
+- The compiled KDA cold phase hit the declared 120-second cap without reaching
+  a training step. Its log ends after FLA Blackwell allocator registration; the
+  bounded runner terminated it and no worker remained active.
+- Disabling Torch compilation produced finite 4k KDA training with resolved
+  `fla_triton` backend, no fallback, and three step times of 37.905, 38.656,
+  and 39.176 seconds (864/847/836 tok/s). The diagnostic process was terminated
+  during teardown at its 120-second wall cap, so it is not a valid systems-run
+  artifact, but the completed structured steps establish that the problem is
+  not compile-only.
+- The matched eager full-attention control completed at 1.212 then 0.702 s
+  (27,041 then 46,663 tok/s), with comparable peak allocation near 5.6 GiB.
+  Thus the present eager 4k KDA integration is roughly 56x slower on the second
+  step despite having fewer parameters. This is diagnostic evidence of a real
+  execution-path bottleneck, not an architecture-quality conclusion.
+
+**Next**
+
+- Add a bounded profiler capture for one eager KDA step and attribute time among
+  local projections/convolutions, FLA chunk calls, norms, and optimizer work.
+  Do not launch another compiled KDA training run until that trace identifies a
+  concrete primary intervention.
