@@ -564,3 +564,39 @@ research speed-supervisor run --attempt 2
 
 - Attempt 3 may test fusion of the three depthwise short-convolution dispatches,
   whose retained profile contribution is larger than input projection dispatch.
+
+
+## 2026-08-07 [agent] reject attempt 3 fused short convolutions
+
+**Context**
+
+- Candidate `1ac8183` fused the three retained vectorized q/k/v depthwise
+  convolutions into one wider grouped convolution while preserving modules and
+  cache semantics.
+
+**Commands**
+
+```bash
+research speed-supervisor run --attempt 3
+```
+
+**Artifacts**
+
+- Ledger attempt 3; ignored artifacts:
+  `runs/speed-supervisor/c50c1dfdddc6/attempt-00003/`.
+- Candidate branch: `origin/kda-speed/attempt-003` at `1ac8183`.
+
+**Result**
+
+- Correctness passed. Baseline was 41,529 tok/s with 0.21% drift. Candidate
+  was 40,876 tok/s, a 1.57% regression.
+- Individual q/k/v convolution profile regions disappeared as expected, but
+  model backward increased 9.64 ms and the full update increased 12.61 ms.
+  The wider grouped depthwise kernel was counterproductive at this GB10 shape.
+- Decision: `not_improved`; not merged.
+
+**Next**
+
+- Target FLA backward recomputation: test `disable_recompute=True` in chunk
+  training as a speed-for-activation-memory tradeoff, with exact correctness
+  and peak-memory evidence.
