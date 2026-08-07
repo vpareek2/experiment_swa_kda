@@ -451,3 +451,34 @@ git push origin kda-speed-prime-context-baseline-20260807
 
 - Commit, push, and tag this new protocol baseline; launch attempt 1 through a
   separate candidate worktree and child agent.
+
+
+## 2026-08-07 [agent] namespace artifacts across speed protocols
+
+**Context**
+
+- The first launch in the new 15-attempt ledger stopped before correctness or
+  GPU work because attempt ID 1 collided with the historical dry-run artifact
+  directory from the older protocol.
+
+**Commands**
+
+```bash
+uv run --no-sync python -m pytest -q tests/test_speed_supervisor.py
+```
+
+**Artifacts**
+
+- No candidate phase artifact was created and no GPU job launched.
+
+**Result**
+
+- Protected supervisor artifacts are now namespaced by the first 12 hex digits
+  of the frozen protocol hash before the attempt ID. Tests pass (7). The empty
+  `testing` transition is reset to `accepted` with an append-only audit event
+  so the same immutable candidate can resume without consuming an experimental
+  attempt for a harness-only collision.
+
+**Next**
+
+- Resume attempt 1 at commit `a503132` under the corrected artifact namespace.

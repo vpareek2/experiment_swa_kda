@@ -219,7 +219,10 @@ def run_attempt(root: str | Path, config: ResearchConfig, attempt_id: int, ledge
         status, base, candidate, idea = row
         if status != "accepted": db.execute("ROLLBACK"); raise ValueError(f"attempt {attempt_id} is {status}, not accepted")
         db.execute("UPDATE attempts SET status='testing' WHERE id=?", (attempt_id,)); _record_event(db, attempt_id, status, "testing", {"idea": idea}); db.execute("COMMIT")
-        artifact = repo / config.run.artifact_root / "speed-supervisor" / f"attempt-{attempt_id:05d}"
+        # Attempt ids are local to a ledger/protocol. Namespace artifacts by
+        # the frozen protocol hash so a fresh bounded campaign cannot collide
+        # with historical ledgers that also begin at attempt 1.
+        artifact = repo / config.run.artifact_root / "speed-supervisor" / ready["protocol_sha"][:12] / f"attempt-{attempt_id:05d}"
         if artifact.exists(): raise ValueError(f"attempt artifact already exists: {artifact}")
         with _worktree(repo, candidate) as candidate_root:
             test = _bounded([sys.executable, "-m", "pytest", "-q", *config.speed_supervisor.correctness_tests], candidate_root,

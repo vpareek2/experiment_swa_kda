@@ -75,6 +75,12 @@ def test_speed_supervisor_rejects_non_eager_lane(tmp_path):
         validate_config(bad)
 
 
+def test_speed_artifacts_are_namespaced_by_protocol():
+    source = (ROOT / "nanochat/research/speed_supervisor.py").read_text(encoding="utf-8")
+    assert 'ready["protocol_sha"][:12]' in source
+    assert 'f"attempt-{attempt_id:05d}"' in source
+
+
 def test_speed_supervisor_init_detects_protocol_change(tmp_path):
     root, _ = make_repo(tmp_path)
     value = config(tmp_path)
