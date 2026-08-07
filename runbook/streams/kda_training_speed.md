@@ -600,3 +600,38 @@ research speed-supervisor run --attempt 3
 - Target FLA backward recomputation: test `disable_recompute=True` in chunk
   training as a speed-for-activation-memory tradeoff, with exact correctness
   and peak-memory evidence.
+
+
+## 2026-08-07 [agent] reject attempt 4 disable FLA recomputation
+
+**Context**
+
+- Candidate `2dde1f2` passed `disable_recompute=True` only to FLA chunk KDA,
+  intentionally trading saved activations for less backward recomputation.
+
+**Commands**
+
+```bash
+research speed-supervisor run --attempt 4
+```
+
+**Artifacts**
+
+- Ledger attempt 4; ignored artifacts:
+  `runs/speed-supervisor/c50c1dfdddc6/attempt-00004/`.
+- Candidate branch: `origin/kda-speed/attempt-004` at `2dde1f2`.
+
+**Result**
+
+- Correctness passed. Baseline was 41,460.5 tok/s with 0.080% drift.
+  Candidate was 41,992 tok/s, +1.28%, below the 3% threshold.
+- Profile update improved 13.65 ms and backward improved 12.75 ms. Peak
+  allocated training memory increased from 5,664.25 MiB to 5,986.39 MiB.
+- Decision: `not_improved`; the real speed-for-memory gain was too small to
+  retain independently.
+
+**Next**
+
+- Reassess the remaining KDA forward/backward kernel and layout costs before
+  attempt 5; do not combine this rejected axis without a distinct interaction
+  hypothesis.
