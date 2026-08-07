@@ -397,3 +397,63 @@ TORCH_COMPILE_DISABLE=1 <one-warmup, one-profiled 4k KDA optimizer step>
   component timing around KDA projections/convolutions, FLA chunk work, output
   gate/norm, and optimizer; only then use a single restricted profiler table or
   a targeted kernel trace for the identified dominant component.
+
+## 2026-08-07 [agent] vectorize the diagnosed KDA short-convolution bottleneck
+
+**Context**
+
+- The restricted no-export CUDA profiler was run after the rejected full Chrome
+  trace. It completed in 94 seconds and retained only a 16 KiB key-averages
+  table plus a 74-byte summary; no Chrome trace exists. The table showed over
+  1.09 million CUDA launches, dominated by tiny generic elementwise kernels.
+- The cause was local and concrete: `ShortConvolution.forward` used a Python
+  loop over every token. At 4k, six KDA layers and q/k/v convolutions execute
+  73,728 iterations before backward/optimizer work, rather than issuing a
+  grouped depthwise convolution over the sequence. FLA KDA kernels appeared in
+  the table but were not the dominant captured kernel time.
+
+**Commands**
+
+```bash
+uv run --no-sync python -m pytest -q tests/test_kda_layer.py tests/test_kda_operator.py
+uv run --no-sync python -m pytest -q tests/test_kda_cuda.py
+TORCH_COMPILE_DISABLE=1 <three-update matched 4k KDA eager diagnostic>
+uv run --no-sync research systems --config configs/research/systems_4k.toml \
+  --candidate configs/candidates/kda_only.toml
+```
+
+**Artifacts**
+
+- Ignored restricted profiler: `runs/4k-kda-eager-profile/cuda-key-averages.txt`
+  and `summary.json`; it has no `trace.json`.
+- Ignored eager diagnostic: `runs/4k-kda-eager-vectorized-conv.log`.
+- Ignored compiled systems result:
+  `runs/systems-20260807T201839Z-kda-only-0a4c60c8-s42/`.
+- Candidate commit: `0a4c60c` (`Vectorize KDA short convolution`).
+
+**Result**
+
+- Replaced only the full-sequence short-convolution token loop with equivalent
+  grouped `F.conv1d`; its cache convention and single-token path remain the
+  same. Focused CPU tests passed (22) and CUDA tests passed (15), including
+  production-dimension compiled forward/backward coverage.
+- With compilation disabled and the same 4k/batch/seed/model settings as the
+  prior eager diagnosis, the post-change steady updates were 0.79523 and
+  0.79542 s (41,205/41,195 tok/s), versus 38.656 and 39.176 s
+  (847/836 tok/s) before. The loss sequence was the same to shown precision,
+  FLA resolved to `fla_triton` without fallback, and peak allocation fell from
+  5,980 to 5,664 MiB. This is a roughly 49x eager diagnostic speedup from the
+  single vectorization intervention.
+- The official compiled systems phase is still invalid, but it no longer
+  timed out in KDA setup. It crashed after 96.28 seconds in protected
+  `adamw_step_fused`: Dynamo reached its fullgraph recompile limit because its
+  parameter loop encountered ranks 3 then 1. No optimizer step completed. This
+  is an optimizer-compilation integration blocker, not evidence that the new
+  KDA mixer is slow or incorrect.
+
+**Next**
+
+- Preserve the vectorized KDA candidate. Before a compiled systems claim,
+  address the protected optimizer's rank-polymorphic fullgraph compilation in
+  a separately reviewed systems change (or deliberately benchmark model
+  compilation with an eager optimizer); do not hide it by a candidate fallback.
