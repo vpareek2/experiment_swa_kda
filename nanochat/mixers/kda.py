@@ -383,7 +383,7 @@ def _run_fla_kda(
         "use_gate_in_kernel": True,
         "use_beta_sigmoid_in_kernel": True,
         "lower_bound": lower_bound,
-        "state_v_first": True,
+        "state_v_first": initial_state is not None or output_final_state,
     }
     inputs = tuple(tensor.contiguous() for tensor in (q, k, v, raw_gate, beta_logits))
     if mode == "chunk":
