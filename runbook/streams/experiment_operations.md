@@ -457,3 +457,36 @@ uv run --no-sync research systems --config configs/research/systems_4k.toml \
   address the protected optimizer's rank-polymorphic fullgraph compilation in
   a separately reviewed systems change (or deliberately benchmark model
   compilation with an eager optimizer); do not hide it by a candidate fallback.
+
+## 2026-08-07 [agent] retract out-of-scope KDA implementation change
+
+**Context**
+
+- The user clarified that this work is to build bounded profiling/autoresearch
+  infrastructure, not to directly fix the KDA implementation.
+
+**Commands**
+
+```bash
+git revert --no-edit 0a4c60c
+```
+
+**Artifacts**
+
+- Reversion commit: `4c02a80`.
+- The prior ignored profiler and eager diagnostic logs remain evidence of the
+  bottleneck only; they are not a retained candidate result.
+
+**Result**
+
+- Reverted the vectorized short-convolution candidate cleanly. The repository
+  again contains the original KDA implementation. The observed token-loop
+  bottleneck and the failed compiled optimizer path remain inputs for the
+  future autoresearch objective/design, not direct implementation changes.
+
+**Next**
+
+- Restrict further work to protected systems/autoresearch tooling: define the
+  correctness gates, bounded objective, candidate interface, artifact schema,
+  and supervisor loop. Candidate modifications must be proposed and executed
+  by the designated autoresearch process, not applied directly here.
