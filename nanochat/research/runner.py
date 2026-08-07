@@ -48,14 +48,17 @@ def doctor(root: str | Path, config: ResearchConfig) -> dict[str, Any]:
         core_bundle_ready = not config.evaluation.core_enabled or prepared_core_bundle(config.evaluation).is_dir()
     except (FileNotFoundError, ValueError):
         core_bundle_ready = False
-    try:
-        ruler_manifest_data = prepared_ruler_manifest(config.evaluation)[0]
-        ruler_bundle_ready = not config.evaluation.ruler_enabled or (
-            bool(ruler_manifest_data["tasks"])
-            and all(int(task.get("context_tokens", 0)) <= config.training.sequence_length for task in ruler_manifest_data["tasks"])
-        )
-    except (FileNotFoundError, ValueError, TypeError):
-        ruler_bundle_ready = False
+    if not config.evaluation.ruler_enabled:
+        ruler_bundle_ready = True
+    else:
+        try:
+            ruler_manifest_data = prepared_ruler_manifest(config.evaluation)[0]
+            ruler_bundle_ready = (
+                bool(ruler_manifest_data["tasks"])
+                and all(int(task.get("context_tokens", 0)) <= config.training.sequence_length for task in ruler_manifest_data["tasks"])
+            )
+        except (FileNotFoundError, ValueError, TypeError):
+            ruler_bundle_ready = False
     checks = {
         "git_repository": (repo / ".git").exists(),
         "uv": shutil.which("uv") is not None,

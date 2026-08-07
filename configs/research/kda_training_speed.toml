@@ -1,0 +1,63 @@
+schema_version = 2
+
+[run]
+name = "kda-training-speed"
+suite = "discovery"
+artifact_root = "runs"
+seed = 42
+
+[training]
+seconds = 300.0
+tokens = 0
+depth = 6
+head_dim = 128
+sequence_length = 4096
+device_batch_size = 2
+total_batch_size = 32768
+window_pattern = "K"
+sliding_window = 256
+force_final_full = false
+eval_tokens = 1048576
+precision = "bfloat16"
+kda_backend = "fla_triton"
+
+[evaluation]
+enabled = false
+
+[systems]
+enabled = true
+execution_mode = "eager"
+compile_timeout_seconds = 120.0
+warm_timeout_seconds = 300.0
+warmup_steps = 1
+timed_steps = 3
+prefill_lengths = [1024]
+decode_context_lengths = [1024]
+
+[speed_supervisor]
+enabled = true
+ledger_path = "runs/kda-training-autoresearch.sqlite3"
+candidate_paths = ["nanochat/mixers/kda.py"]
+correctness_tests = [
+  "tests/test_kda_layer.py",
+  "tests/test_kda_operator.py",
+  "tests/test_kda_cuda.py",
+  "tests/test_kda_integration.py",
+]
+test_timeout_seconds = 300.0
+max_attempts = 24
+min_relative_throughput_improvement = 0.03
+max_baseline_drift_fraction = 0.03
+
+[protection]
+allowed_paths = ["nanochat/gpt.py", "nanochat/mixers/", "configs/candidates/"]
+protected_paths = [
+  "nanochat/research/",
+  "configs/research/",
+  "scripts/base_eval.py",
+  "nanochat/core_eval.py",
+  "nanochat/loss_eval.py",
+  "nanochat/dataloader.py",
+  "nanochat/dataset.py",
+  "nanochat/tokenizer.py",
+]

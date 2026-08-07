@@ -13,6 +13,7 @@ from nanochat.research.probe import run_memory_probe
 from nanochat.research.protected import initialize_supervisor, verify_protected
 from nanochat.research.runner import calibrate_memory_probe, doctor, prepare_data, render_report, run_experiment
 from nanochat.research.systems import run_system_benchmark
+from nanochat.research.speed_supervisor import initialize as speed_initialize, intake as speed_intake, run_attempt as speed_run_attempt, summary as speed_summary
 from nanochat.research.supervisor import format_command, sandbox_command, sign_result, verify_candidate
 
 
@@ -54,6 +55,26 @@ def build_parser() -> argparse.ArgumentParser:
     systems_parser.add_argument("--config", default="configs/research/systems_4k.toml")
     systems_parser.add_argument("--candidate", help="architecture-only candidate TOML applied to the frozen protocol")
     systems_parser.add_argument("--artifact-root")
+
+    speed = sub.add_parser("speed-supervisor", help="manage bounded KDA training-speed candidates")
+    speed_sub = speed.add_subparsers(dest="speed_command", required=True)
+    speed_init = speed_sub.add_parser("init", help="create or verify the immutable speed ledger")
+    speed_init.add_argument("--config", default="configs/research/kda_training_speed.toml")
+    speed_init.add_argument("--ledger")
+    speed_intake_parser = speed_sub.add_parser("intake", help="record and validate one committed candidate")
+    speed_intake_parser.add_argument("--config", default="configs/research/kda_training_speed.toml")
+    speed_intake_parser.add_argument("--base-ref", required=True)
+    speed_intake_parser.add_argument("--candidate-ref", required=True)
+    speed_intake_parser.add_argument("--idea", required=True)
+    speed_intake_parser.add_argument("--ledger")
+    speed_run = speed_sub.add_parser("run", help="run fixed tests and A-B-A timing for one accepted candidate")
+    speed_run.add_argument("--config", default="configs/research/kda_training_speed.toml")
+    speed_run.add_argument("--attempt", type=int, required=True)
+    speed_run.add_argument("--ledger")
+    speed_view = speed_sub.add_parser("summary", help="render compact evidence for the next candidate-model turn")
+    speed_view.add_argument("--config", default="configs/research/kda_training_speed.toml")
+    speed_view.add_argument("--attempt", type=int)
+    speed_view.add_argument("--ledger")
 
     report_parser = sub.add_parser("report", help="render a comparison from summary JSON files")
     report_parser.add_argument("summaries", nargs="+")
@@ -160,6 +181,22 @@ def main(argv=None) -> int:
             result = run_system_benchmark(root, config, args.artifact_root)
             _json(result)
             return 0 if result["status"] == "complete" else 1
+        if args.command == "speed-supervisor":
+            config = load_config(args.config)
+            if args.speed_command == "init":
+                _json(speed_initialize(root, config, args.ledger))
+                return 0
+            if args.speed_command == "intake":
+                result = speed_intake(root, config, args.base_ref, args.candidate_ref, args.idea, args.ledger)
+                _json(result)
+                return 0 if result["status"] == "accepted" else 1
+            if args.speed_command == "run":
+                result = speed_run_attempt(root, config, args.attempt, args.ledger)
+                _json(result)
+                return 0 if result["status"] == "complete" else 1
+            if args.speed_command == "summary":
+                _json(speed_summary(root, config, args.attempt, args.ledger))
+                return 0
         if args.command == "report":
             report = render_report(_load_summaries(args.summaries))
             if args.output:

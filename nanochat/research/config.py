@@ -115,11 +115,34 @@ class GeneralEvaluationConfig:
 @dataclass(frozen=True)
 class SystemsConfig:
     enabled: bool = False
+    # "full_compile" preserves the inherited training behavior. "eager" is a
+    # declared systems lane, not a fallback: Torch compilation is disabled for
+    # both model and optimizer in every subprocess.
+    execution_mode: str = "full_compile"
     compile_timeout_seconds: float = 120.0
+    warm_timeout_seconds: float = 300.0
     warmup_steps: int = 3
     timed_steps: int = 10
     prefill_lengths: tuple[int, ...] = (1024,)
     decode_context_lengths: tuple[int, ...] = (1024,)
+
+
+@dataclass(frozen=True)
+class SpeedSupervisorConfig:
+    """Protected contract for bounded KDA training-speed iteration."""
+    enabled: bool = False
+    ledger_path: str = "runs/kda-training-autoresearch.sqlite3"
+    candidate_paths: tuple[str, ...] = ("nanochat/mixers/kda.py",)
+    correctness_tests: tuple[str, ...] = (
+        "tests/test_kda_layer.py",
+        "tests/test_kda_operator.py",
+        "tests/test_kda_cuda.py",
+        "tests/test_kda_integration.py",
+    )
+    test_timeout_seconds: float = 300.0
+    max_attempts: int = 24
+    min_relative_throughput_improvement: float = 0.03
+    max_baseline_drift_fraction: float = 0.03
 
 
 @dataclass(frozen=True)
@@ -160,6 +183,7 @@ class ResearchConfig:
     memory_probe: MemoryProbeConfig = field(default_factory=MemoryProbeConfig)
     evaluation: GeneralEvaluationConfig = field(default_factory=GeneralEvaluationConfig)
     systems: SystemsConfig = field(default_factory=SystemsConfig)
+    speed_supervisor: SpeedSupervisorConfig = field(default_factory=SpeedSupervisorConfig)
     decision: DecisionConfig = field(default_factory=DecisionConfig)
     protection: ProtectionConfig = field(default_factory=ProtectionConfig)
 
@@ -176,7 +200,7 @@ def _section(cls, raw: dict[str, Any], name: str):
     if unknown:
         raise ConfigError(f"Unknown [{name}] keys: {sorted(unknown)}")
     for key, value in list(values.items()):
-        if key in {"lengths", "loads", "updates", "distractor_ratios", "calibration_seeds", "context_lengths", "prefill_lengths", "decode_context_lengths", "baseline_seeds", "internal_promotion_seeds", "allowed_paths", "protected_paths"}:
+        if key in {"lengths", "loads", "updates", "distractor_ratios", "calibration_seeds", "context_lengths", "prefill_lengths", "decode_context_lengths", "baseline_seeds", "internal_promotion_seeds", "allowed_paths", "protected_paths", "candidate_paths", "correctness_tests"}:
             values[key] = tuple(value)
     if cls is MemoryProbeConfig and "stages" in values:
         stages = []
@@ -202,7 +226,7 @@ def load_config(path: str | Path) -> ResearchConfig:
     schema_version = raw.get("schema_version", 1)
     if schema_version != 2:
         raise ConfigError(f"Unsupported schema_version={schema_version}; expected 2")
-    known = {"schema_version", "run", "training", "memory_probe", "evaluation", "systems", "decision", "protection"}
+    known = {"schema_version", "run", "training", "memory_probe", "evaluation", "systems", "speed_supervisor", "decision", "protection"}
     unknown = set(raw) - known
     if unknown:
         raise ConfigError(f"Unknown top-level keys: {sorted(unknown)}")
@@ -213,6 +237,7 @@ def load_config(path: str | Path) -> ResearchConfig:
         memory_probe=_section(MemoryProbeConfig, raw, "memory_probe"),
         evaluation=_section(GeneralEvaluationConfig, raw, "evaluation"),
         systems=_section(SystemsConfig, raw, "systems"),
+        speed_supervisor=_section(SpeedSupervisorConfig, raw, "speed_supervisor"),
         decision=_section(DecisionConfig, raw, "decision"),
         protection=_section(ProtectionConfig, raw, "protection"),
     )
@@ -289,12 +314,26 @@ def validate_config(config: ResearchConfig) -> None:
             raise ConfigError("enabled RULER evaluation requires a manifest path and SHA-256")
     systems = config.systems
     if systems.enabled:
-        if systems.compile_timeout_seconds <= 0 or systems.warmup_steps < 0 or systems.timed_steps <= 0:
+        if systems.execution_mode not in {"full_compile", "eager"}:
+            raise ConfigError("systems execution_mode must be full_compile or eager")
+        if systems.compile_timeout_seconds <= 0 or systems.warm_timeout_seconds <= 0 or systems.warmup_steps < 0 or systems.timed_steps <= 0:
             raise ConfigError("systems timing budgets must be positive")
         if not systems.prefill_lengths or not systems.decode_context_lengths:
             raise ConfigError("systems prefill/decode lengths must be non-empty")
         if max((*systems.prefill_lengths, *systems.decode_context_lengths)) > train.sequence_length:
             raise ConfigError("systems lengths must not exceed the trained sequence length")
+    speed = config.speed_supervisor
+    if speed.enabled:
+        if not systems.enabled or systems.execution_mode != "eager":
+            raise ConfigError("training-speed supervisor requires an enabled eager systems lane")
+        if "K" not in train.window_pattern.upper():
+            raise ConfigError("training-speed supervisor requires a KDA training pattern")
+        if not speed.ledger_path or not speed.candidate_paths or not speed.correctness_tests:
+            raise ConfigError("speed supervisor requires ledger, candidate paths, and correctness tests")
+        if speed.test_timeout_seconds <= 0 or speed.max_attempts <= 0:
+            raise ConfigError("speed-supervisor budgets must be positive")
+        if not 0 < speed.min_relative_throughput_improvement < 1 or not 0 < speed.max_baseline_drift_fraction < 1:
+            raise ConfigError("speed-supervisor threshold fractions must be in (0, 1)")
     if probe.enabled:
         if probe.protocol_version != "associative_recall_v2":
             raise ConfigError(f"Unsupported memory probe protocol: {probe.protocol_version}")

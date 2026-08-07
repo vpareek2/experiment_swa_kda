@@ -490,3 +490,53 @@ git revert --no-edit 0a4c60c
   correctness gates, bounded objective, candidate interface, artifact schema,
   and supervisor loop. Candidate modifications must be proposed and executed
   by the designated autoresearch process, not applied directly here.
+
+## 2026-08-07 [agent] add protected KDA training-speed supervisor
+
+**Context**
+
+- The requested automation target is KDA training speed only. It must maintain
+  an experiment ledger and feed a bounded, evidence-backed summary to the next
+  candidate-model turn; it must not directly edit KDA or run quality evaluation.
+
+**Commands**
+
+```bash
+uv run --no-sync research speed-supervisor init \
+  --config configs/research/kda_training_speed.toml
+uv run --no-sync python -m pytest -q
+uv run --no-sync research doctor --config configs/research/kda_training_speed.toml
+```
+
+**Artifacts**
+
+- Frozen eager 4k lane: `configs/research/kda_training_speed.toml`.
+- Ignored local SQLite ledger: `runs/kda-training-autoresearch.sqlite3`.
+- Protected supervisor: `nanochat/research/speed_supervisor.py`.
+
+**Result**
+
+- Added `research speed-supervisor {init,intake,run,summary}`. `intake` binds
+  an idea to immutable ancestor/candidate commits, records the exact allowed
+  KDA-only patch and its hash in SQLite, and rejects out-of-scope diffs.
+- `run` creates detached candidate/base worktrees; executes the fixed KDA
+  correctness suite before timing; then uses a baseline-pre/candidate/
+  baseline-post eager 4k systems sequence. It scores only warm training tok/s,
+  declares quality unevaluated, and requires both a 3% improvement and at most
+  3% baseline drift. Crashes, timeouts, missing rows, and failed tests are
+  invalid, not scores.
+- The lane declares `TORCH_COMPILE_DISABLE=1` for every baseline and candidate
+  subprocess through `systems.execution_mode = "eager"`; this is an explicit
+  comparable target while the separate rank-polymorphic compiled-optimizer
+  blocker remains unresolved. Cold setup is retained as a diagnostic, never a
+  score. No Chrome trace is produced.
+- Added supervisor/config tests. Full suite passed: `134 passed, 10 skipped`.
+  Doctor reports a valid environment; it is only not research-ready until this
+  protected implementation is committed.
+
+**Next**
+
+- Commit and push the protected supervisor. Then register the original KDA
+  commit as the speed baseline with `speed-supervisor intake/run` before any
+  candidate model is allowed to propose a change. Do not apply a candidate
+  directly outside that loop.

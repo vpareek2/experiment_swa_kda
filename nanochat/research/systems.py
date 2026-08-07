@@ -48,9 +48,16 @@ def summarize_warm_steps(steps: list[dict[str, Any]], warmup_steps: int) -> dict
             "tokens_per_second": {"median": statistics.median(throughput), "values": throughput}}
 
 
-def _run(command: list[str], root: Path, log: Path, timeout: float) -> dict[str, Any]:
+def _run(command: list[str], root: Path, log: Path, timeout: float, execution_mode: str) -> dict[str, Any]:
     env = os.environ.copy()
     env.setdefault("NANOCHAT_DTYPE", "bfloat16")
+    if execution_mode == "eager":
+        # This is a frozen benchmark mode, deliberately not an implicit
+        # recovery from a compiler failure. It disables model and optimizer
+        # compilation for every candidate and baseline subprocess.
+        env["TORCH_COMPILE_DISABLE"] = "1"
+    elif execution_mode != "full_compile":
+        raise ValueError(f"unsupported systems execution mode: {execution_mode}")
     ptxas = select_triton_ptxas()
     if ptxas:
         env["TRITON_PTXAS_PATH"] = ptxas
@@ -83,15 +90,26 @@ def run_system_benchmark(root: str | Path, config: ResearchConfig, artifact_root
     run_dir.mkdir(parents=True, exist_ok=False)
     atomic_write_json(run_dir / "resolved-config.json", config.to_dict())
     atomic_write_json(run_dir / "manifest.json", {"run_id": run_id, "git": provenance, "environment": environment_provenance()})
-    cold = _run(trainer_command(config, f"{run_id}-cold", 1), repo, run_dir / "compile.log", systems.compile_timeout_seconds)
+    cold = _run(
+        trainer_command(config, f"{run_id}-cold", 1), repo, run_dir / "compile.log",
+        systems.compile_timeout_seconds, systems.execution_mode,
+    )
     cold["log"] = str(run_dir / "compile.log")
+    cold["phase"] = "cold_setup" if systems.execution_mode == "eager" else "cold_compile"
     if cold["status"] != "complete":
-        result = {"schema_version": 1, "run_id": run_id, "status": cold["status"], "compile": cold}
+        result = {
+            "schema_version": 1, "run_id": run_id, "status": cold["status"],
+            "execution_mode": systems.execution_mode, "compile": cold,
+        }
         atomic_write_json(run_dir / "summary.json", result); return result
     warm_steps = systems.warmup_steps + systems.timed_steps
-    warm = _run(trainer_command(config, f"{run_id}-warm", warm_steps), repo, run_dir / "train.log", systems.compile_timeout_seconds * 2)
+    warm = _run(
+        trainer_command(config, f"{run_id}-warm", warm_steps), repo, run_dir / "train.log",
+        systems.warm_timeout_seconds, systems.execution_mode,
+    )
     warm["log"] = str(run_dir / "train.log")
-    result = {"schema_version": 1, "run_id": run_id, "status": warm["status"], "compile": cold, "training": warm,
+    result = {"schema_version": 1, "run_id": run_id, "status": warm["status"],
+              "execution_mode": systems.execution_mode, "compile": cold, "training": warm,
               "warm_training": summarize_warm_steps(parse_steps(run_dir / "train.log"), systems.warmup_steps) if warm["status"] == "complete" else None,
               "prefill": {"status": "not_run"}, "decode": {"status": "not_run"}}
     atomic_write_json(run_dir / "summary.json", result)
