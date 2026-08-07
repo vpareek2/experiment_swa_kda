@@ -48,6 +48,9 @@ test_timeout_seconds = 300.0
 max_attempts = 24
 min_relative_throughput_improvement = 0.03
 max_baseline_drift_fraction = 0.03
+profile_timeout_seconds = 240.0
+profile_max_bytes = 262144
+profile_operator_rows = 30
 
 [protection]
 allowed_paths = ["nanochat/gpt.py", "nanochat/mixers/", "configs/candidates/"]

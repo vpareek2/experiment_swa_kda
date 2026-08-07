@@ -85,6 +85,10 @@ parser.add_argument("--sample-every", type=int, default=2000, help="sample from 
 parser.add_argument("--save-every", type=int, default=-1, help="save checkpoints every N steps (-1 = only at end)")
 # Output
 parser.add_argument("--model-tag", type=str, default=None, help="override model tag for checkpoint directory name")
+parser.add_argument("--speed-profile-output", type=str, default="", help=argparse.SUPPRESS)
+parser.add_argument("--speed-profile-warmup-steps", type=int, default=1, help=argparse.SUPPRESS)
+parser.add_argument("--speed-profile-max-bytes", type=int, default=262144, help=argparse.SUPPRESS)
+parser.add_argument("--speed-profile-operator-rows", type=int, default=30, help=argparse.SUPPRESS)
 args = parser.parse_args()
 user_config = vars(args).copy()  # for logging
 # -----------------------------------------------------------------------------
@@ -339,6 +343,13 @@ scaler = torch.amp.GradScaler() if COMPUTE_DTYPE == torch.float16 else None
 if scaler is not None:
     print0("GradScaler enabled for fp16 training")
 
+speed_profile = None
+if args.speed_profile_output:
+    if device_type != "cuda":
+        raise RuntimeError("speed profile requires CUDA")
+    from nanochat.research.speed_profile import SpeedProfile
+    speed_profile = SpeedProfile(orig_model, args.speed_profile_max_bytes, args.speed_profile_operator_rows)
+
 # -----------------------------------------------------------------------------
 # Initialize the DataLoaders for train/val
 dataloader_resume_state_dict = None if not resuming else meta_data["dataloader_state_dict"]
@@ -555,14 +566,25 @@ while True:
     # evaluate the gradient
     synchronize()
     t0 = time.time()
+    profile_this_step = speed_profile is not None and step == args.speed_profile_warmup_steps
+    if profile_this_step:
+        speed_profile.begin()
     for micro_step in range(grad_accum_steps):
+        if profile_this_step:
+            speed_profile.mark("model_forward", True)
         loss = model(x, y)
+        if profile_this_step:
+            speed_profile.mark("model_forward", False)
         train_loss = loss.detach() # for logging
         loss = loss / grad_accum_steps # each .backward() is a grad sum => normalize loss here
+        if profile_this_step:
+            speed_profile.mark("model_backward", True)
         if scaler is not None:
             scaler.scale(loss).backward()
         else:
             loss.backward()
+        if profile_this_step:
+            speed_profile.mark("model_backward", False)
         x, y, dataloader_state_dict = next(train_loader) # prefetch the next batch while the GPU is busy with forward/backward
     # step the optimizer
     lrm = get_lr_multiplier(step)
@@ -584,10 +606,17 @@ while True:
         scaler.step(optimizer)
         scaler.update()
     else:
+        if profile_this_step:
+            speed_profile.mark("optimizer", True)
         optimizer.step()
+        if profile_this_step:
+            speed_profile.mark("optimizer", False)
     model.zero_grad(set_to_none=True)
     train_loss_f = train_loss.item() # .item() is a CPU-GPU sync point
     synchronize()
+    if profile_this_step:
+        profile_result = speed_profile.write(args.speed_profile_output)
+        print0("RESEARCH_SPEED_PROFILE " + json.dumps(profile_result, sort_keys=True))
     t1 = time.time()
     dt = t1 - t0
     # -------------------------------------------------------------------------
@@ -654,6 +683,8 @@ while True:
     elif step % 5000 == 0: # every 5000 steps...
         gc.collect() # manually collect, just to be safe for very, very long runs
 
+if speed_profile is not None:
+    speed_profile.close()
 # print a few more stats
 print0(f"Peak memory usage: {get_max_memory() / 1024 / 1024:.2f}MiB")
 print0(f"Total training time: {total_training_time/60:.2f}m")

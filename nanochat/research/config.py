@@ -143,6 +143,9 @@ class SpeedSupervisorConfig:
     max_attempts: int = 24
     min_relative_throughput_improvement: float = 0.03
     max_baseline_drift_fraction: float = 0.03
+    profile_timeout_seconds: float = 240.0
+    profile_max_bytes: int = 262_144
+    profile_operator_rows: int = 30
 
 
 @dataclass(frozen=True)
@@ -330,8 +333,10 @@ def validate_config(config: ResearchConfig) -> None:
             raise ConfigError("training-speed supervisor requires a KDA training pattern")
         if not speed.ledger_path or not speed.candidate_paths or not speed.correctness_tests:
             raise ConfigError("speed supervisor requires ledger, candidate paths, and correctness tests")
-        if speed.test_timeout_seconds <= 0 or speed.max_attempts <= 0:
+        if speed.test_timeout_seconds <= 0 or speed.max_attempts <= 0 or speed.profile_timeout_seconds <= 0:
             raise ConfigError("speed-supervisor budgets must be positive")
+        if speed.profile_max_bytes <= 0 or speed.profile_operator_rows <= 0:
+            raise ConfigError("speed-supervisor profile limits must be positive")
         if not 0 < speed.min_relative_throughput_improvement < 1 or not 0 < speed.max_baseline_drift_fraction < 1:
             raise ConfigError("speed-supervisor threshold fractions must be in (0, 1)")
     if probe.enabled:

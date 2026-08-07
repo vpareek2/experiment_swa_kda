@@ -23,7 +23,7 @@ from typing import Any, Iterator
 
 from nanochat.research.artifacts import canonical_json_bytes
 from nanochat.research.config import ResearchConfig
-from nanochat.research.systems import run_system_benchmark
+from nanochat.research.systems import run_speed_profile, run_system_benchmark
 
 
 def _sha(value: Any) -> str:
@@ -190,6 +190,13 @@ def _phase(db: sqlite3.Connection, attempt: int, role: str, phase: str, ordinal:
        (attempt, role, phase, ordinal, result["status"], time.time() - result.get("seconds", 0), time.time(), result.get("returncode"), result.get("timeout_seconds"), str(artifact), json.dumps(metric, sort_keys=True) if metric else None, result.get("reason")))
 
 
+def _profile(root: Path, config: ResearchConfig, output: Path, label: str) -> dict[str, Any]:
+    result = run_speed_profile(root, config, output, label)
+    if result.get("status") != "complete":
+        return {"status": "invalid", "reason": result.get("reason", result.get("status")), "profile_result": result}
+    return {"status": "complete", "profile": result["profile"], "artifact": result["artifact"]}
+
+
 def _benchmark(root: Path, config: ResearchConfig, output: Path) -> dict[str, Any]:
     try:
         result = run_system_benchmark(root, config, output)
@@ -223,14 +230,18 @@ def run_attempt(root: str | Path, config: ResearchConfig, attempt_id: int, ledge
             pre = None; post = None
             with _worktree(repo, base) as base_root:
                 pre = _benchmark(base_root, config, artifact / "baseline-pre")
+                pre_profile = _profile(base_root, config, artifact / "baseline-pre-profile", f"attempt-{attempt_id}-baseline") if pre["status"] == "complete" else {"status": "invalid", "reason": "baseline systems invalid"}
             _phase(db, attempt_id, "baseline", "systems", 0, pre, artifact / "baseline-pre", {"tokens_per_second": pre.get("tokens_per_second")})
+            _phase(db, attempt_id, "baseline", "profile", 0, pre_profile, artifact / "baseline-pre-profile", pre_profile.get("profile"))
             candidate_result = _benchmark(candidate_root, config, artifact / "candidate")
+            candidate_profile = _profile(candidate_root, config, artifact / "candidate-profile", f"attempt-{attempt_id}-candidate") if candidate_result["status"] == "complete" else {"status": "invalid", "reason": "candidate systems invalid"}
             _phase(db, attempt_id, "candidate", "systems", 0, candidate_result, artifact / "candidate", {"tokens_per_second": candidate_result.get("tokens_per_second")})
+            _phase(db, attempt_id, "candidate", "profile", 0, candidate_profile, artifact / "candidate-profile", candidate_profile.get("profile"))
             with _worktree(repo, base) as base_root:
                 post = _benchmark(base_root, config, artifact / "baseline-post")
             _phase(db, attempt_id, "baseline", "systems", 1, post, artifact / "baseline-post", {"tokens_per_second": post.get("tokens_per_second")})
-        if any(item["status"] != "complete" for item in (pre, candidate_result, post)):
-            return _finish(db, attempt_id, "invalid", "systems benchmark invalid", artifact)
+        if any(item["status"] != "complete" for item in (pre, pre_profile, candidate_result, candidate_profile, post)):
+            return _finish(db, attempt_id, "invalid", "systems or required profile invalid", artifact)
         baseline = statistics.median([pre["tokens_per_second"], post["tokens_per_second"]])
         drift = abs(post["tokens_per_second"] - pre["tokens_per_second"]) / baseline
         relative = candidate_result["tokens_per_second"] / baseline - 1.0
@@ -244,6 +255,7 @@ def run_attempt(root: str | Path, config: ResearchConfig, attempt_id: int, ledge
                    "attempt_id": attempt_id, "base_sha": base, "candidate_sha": candidate, "idea": idea,
                    "baseline_tokens_per_second": baseline, "candidate_tokens_per_second": candidate_result["tokens_per_second"],
                    "relative_change": relative, "baseline_drift": drift, "decision": decision, "reason": reason,
+                   "profile_delta": _profile_delta(pre_profile["profile"], candidate_profile["profile"]),
                    "artifact_dir": str(artifact)}
         return _finish(db, attempt_id, "complete", reason, artifact, decision, summary)
     finally:
@@ -257,6 +269,12 @@ def _finish(db: sqlite3.Connection, attempt: int, status: str, reason: str, arti
     _record_event(db, attempt, "testing", status, {"reason": reason})
     return {"attempt_id": attempt, "status": status, "decision": decision, "reason": reason,
             "summary": summary, "artifact_dir": str(artifact)}
+
+
+def _profile_delta(baseline: dict[str, Any], candidate: dict[str, Any]) -> dict[str, Any]:
+    def regions(value): return {key: item.get("milliseconds", 0.0) for key, item in value.get("regions", {}).items()}
+    left, right = regions(baseline), regions(candidate)
+    return {key: right.get(key, 0.0) - left.get(key, 0.0) for key in sorted(set(left) | set(right))}
 
 
 def summary(root: str | Path, config: ResearchConfig, attempt_id: int | None = None,

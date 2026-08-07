@@ -51,6 +51,16 @@ def test_speed_supervisor_records_rejected_protected_diff(tmp_path):
     assert "outside" in result["reason"]
 
 
+def test_speed_supervisor_profile_contract_is_frozen(tmp_path):
+    value = config(tmp_path)
+    assert value.speed_supervisor.profile_timeout_seconds == 240
+    assert value.speed_supervisor.profile_max_bytes == 262144
+    assert value.speed_supervisor.profile_operator_rows == 30
+    bad = replace(value, speed_supervisor=replace(value.speed_supervisor, profile_operator_rows=0))
+    with pytest.raises(ConfigError, match="profile limits"):
+        validate_config(bad)
+
+
 def test_speed_supervisor_rejects_non_eager_lane(tmp_path):
     value = config(tmp_path)
     bad = replace(value, systems=replace(value.systems, execution_mode="full_compile"))

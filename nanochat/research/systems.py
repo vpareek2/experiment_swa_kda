@@ -19,9 +19,9 @@ STEP_PREFIX = "RESEARCH_TRAIN_STEP "
 RESULT_PREFIX = "RESEARCH_TRAIN_RESULT "
 
 
-def trainer_command(config: ResearchConfig, tag: str, iterations: int) -> list[str]:
+def trainer_command(config: ResearchConfig, tag: str, iterations: int, profile_output: str | None = None) -> list[str]:
     train = config.training
-    return [
+    command = [
         sys.executable, "-m", "scripts.base_train", "--seed", str(config.run.seed),
         "--depth", str(train.depth), "--head-dim", str(train.head_dim),
         "--window-pattern", train.window_pattern, "--kda-backend", train.kda_backend,
@@ -32,6 +32,14 @@ def trainer_command(config: ResearchConfig, tag: str, iterations: int) -> list[s
         "--eval-every", "-1", "--core-metric-every", "-1", "--sample-every", "-1", "--save-every", "-1",
         "--model-tag", tag, "--run", "dummy",
     ]
+    if profile_output:
+        command.extend([
+            "--speed-profile-output", profile_output,
+            "--speed-profile-warmup-steps", "1",
+            "--speed-profile-max-bytes", str(config.speed_supervisor.profile_max_bytes),
+            "--speed-profile-operator-rows", str(config.speed_supervisor.profile_operator_rows),
+        ])
+    return command
 
 
 def parse_steps(log: Path) -> list[dict[str, Any]]:
@@ -73,6 +81,30 @@ def _run(command: list[str], root: Path, log: Path, timeout: float, execution_mo
             os.killpg(process.pid, signal.SIGTERM)
             process.wait(timeout=10)
             return {"status": "compile_timeout", "seconds": time.monotonic() - started, "timeout_seconds": timeout}
+
+
+def run_speed_profile(root: str | Path, config: ResearchConfig, artifact_dir: str | Path, label: str) -> dict[str, Any]:
+    """Run the required bounded profile in a clean, reviewed worktree."""
+    repo = Path(root).resolve()
+    output = Path(artifact_dir); output.mkdir(parents=True, exist_ok=False)
+    profile_path, log_path = output / "profile.json", output / "profile.log"
+    result = _run(
+        trainer_command(config, f"{label}-profile", 2, str(profile_path)), repo, log_path,
+        config.speed_supervisor.profile_timeout_seconds, config.systems.execution_mode,
+    )
+    result["log"] = str(log_path); result["artifact"] = str(profile_path)
+    if result["status"] != "complete":
+        return result
+    try:
+        payload = json.loads(profile_path.read_text(encoding="utf-8"))
+        if profile_path.stat().st_size > config.speed_supervisor.profile_max_bytes:
+            raise ValueError("profile artifact exceeds frozen byte cap")
+        if not payload.get("regions") or not payload.get("operators"):
+            raise ValueError("profile artifact has no regions or operators")
+        result["profile"] = payload
+    except (FileNotFoundError, ValueError, json.JSONDecodeError) as error:
+        result["status"] = "invalid_profile"; result["reason"] = str(error)
+    return result
 
 
 def run_system_benchmark(root: str | Path, config: ResearchConfig, artifact_root: str | Path | None = None) -> dict[str, Any]:
