@@ -387,3 +387,31 @@ chmod -R a-w ref/nvidia-skills
 - Use the ordinary eager KDA/PyTorch/FLA path as the baseline constraint; let
   mandatory profile artifacts, not unsupported instruction speculation, select
   subsequent candidate hypotheses.
+
+
+## 2026-08-07 [agent] prepare context-complete Prime baseline
+
+**Context**
+
+- The earlier Prime baseline tag predates the pinned NVIDIA/CUDA/DGX source
+  context and the verified SM121 instruction constraint.
+
+**Commands**
+
+```bash
+git tag -a kda-speed-prime-context-baseline-20260807 -m "Context-complete Prime baseline for KDA speed autoresearch" <this commit>
+git push origin kda-speed-prime-context-baseline-20260807
+```
+
+**Artifacts**
+
+- The new immutable tag is created after this documentation commit.
+
+**Result**
+
+- Future Prime candidate worktrees must use `kda-speed-prime-context-baseline-20260807` so their checked-out
+  program includes the complete source/context and tcgen05/TMEM constraint.
+
+**Next**
+
+- Launch `kda-speed/attempt-002` from this tag when authorized.
