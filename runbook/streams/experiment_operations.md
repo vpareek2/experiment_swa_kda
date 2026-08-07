@@ -365,3 +365,35 @@ TORCH_COMPILE_DISABLE=1 <two-update full-attention control at 4096>
   local projections/convolutions, FLA chunk calls, norms, and optimizer work.
   Do not launch another compiled KDA training run until that trace identifies a
   concrete primary intervention.
+
+## 2026-08-07 [agent] reject an unbounded full-step KDA trace
+
+**Context**
+
+- Attempted the requested eager 4k KDA profile after the bounded systems
+  diagnosis. The first approach captured a full CPU/CUDA Chrome trace around a
+  warm step, which is not suitable at this shape.
+
+**Commands**
+
+```bash
+TORCH_COMPILE_DISABLE=1 <one-warmup, one-profiled 4k KDA optimizer step>
+```
+
+**Artifacts**
+
+- No retained profile artifact. The partial ignored trace was deleted.
+
+**Result**
+
+- The profile process exceeded its 240-second cap and was terminated. It had
+  emitted a 3.5 GiB partial Chrome trace before reporting an operator table;
+  the trace, script, and log were deleted immediately and no profiler process
+  remained. This is an invalid profiling attempt, not performance evidence.
+
+**Next**
+
+- Do not export a full Chrome trace at this shape. Add low-overhead CUDA-event
+  component timing around KDA projections/convolutions, FLA chunk work, output
+  gate/norm, and optimizer; only then use a single restricted profiler table or
+  a targeted kernel trace for the identified dominant component.
