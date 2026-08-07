@@ -23,6 +23,34 @@ not edit the supervisor, benchmark/configuration code, tests, runbook, data,
 tokenizer, fallback policy, or generated artifacts. It returns its hypothesis,
 commit SHA, changed-file list, and risks to its parent.
 
+## Mandatory Git topology
+
+`main` is the clean **coordinator** and must never receive an unreviewed
+candidate implementation commit. The immutable starting point for this program
+is the pushed annotated tag `kda-speed-baseline-20260807`. The pushed
+`kda-speed-dry-run` branch is provenance for the plumbing validation only; do
+not use it as a performance baseline or merge it.
+
+For every attempt, the parent creates a separate named candidate worktree and
+branch from the retained baseline/tag, for example:
+
+```bash
+git worktree add -b kda-speed/attempt-002 ../kda-speed-attempt-002 \
+  kda-speed-baseline-20260807
+```
+
+The child works only in that assigned directory. Before intake, it commits and
+pushes its candidate branch so the reviewed SHA survives host failure. The
+parent remains in the clean coordinator, uses the baseline tag/SHA and pushed
+candidate SHA for `speed-supervisor intake`, and invokes `run` there so the
+central ignored ledger remains in the coordinator `runs/` directory.
+
+Never use checkout, reset, clean, rebase, force-push, or automatic merge for a
+candidate. Retain every candidate branch named in the ledger, including invalid
+and non-improved attempts. A human explicitly decides whether a validated
+improvement becomes the next retained baseline; only then may a new annotated
+baseline tag be created and pushed.
+
 ## Candidate cycle
 
 1. The supervisor chooses a clean baseline commit and creates a candidate

@@ -192,3 +192,37 @@ research speed-supervisor summary --attempt 1
 - Start actual Prime candidate work from the protected `main` baseline; use the
   recorded dry run as evidence that small timing differences require retest,
   not as a performance target.
+
+
+## 2026-08-07 [agent] freeze and push speed-loop Git topology
+
+**Context**
+
+- The Prime-Agent loop needs durable baseline and candidate provenance across
+  brittle local hardware, while keeping `main` free of unreviewed code.
+
+**Commands**
+
+```bash
+git tag -a kda-speed-baseline-20260807 -m "Frozen baseline for protected KDA training-speed autoresearch" 531c16d
+git push origin kda-speed-baseline-20260807
+git push origin kda-speed-dry-run
+```
+
+**Artifacts**
+
+- Pushed annotated baseline tag: `kda-speed-baseline-20260807` at `531c16d`.
+- Pushed dry-run provenance branch: `origin/kda-speed-dry-run` at `ec97019`.
+- Updated `program_kda_training_speed.md` with the mandatory topology.
+
+**Result**
+
+- `main` is the clean coordinator. Every actual candidate must use its own
+  named worktree/branch created from the retained baseline tag, be committed
+  and pushed before intake, and remain retained as an immutable ledger ref.
+  The Prime parent alone invokes the supervisor from the coordinator.
+
+**Next**
+
+- Launch the first Prime candidate child from a separate
+  `kda-speed/attempt-002` worktree when authorized.
