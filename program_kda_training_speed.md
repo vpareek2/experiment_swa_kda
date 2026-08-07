@@ -105,8 +105,11 @@ or copy it into candidate code. The parent may expose the pinned NVIDIA skills r
 child; their upstream instructions are conceptual guidance and never override
 this program's candidate scope, Git rules, evaluator, or backend contract. Do
 not install skills, add a runtime dependency, or copy reference code during an
-attempt. Prefer local profiler/ledger evidence over assumptions from external
-guides. Do not place hostnames, private paths,
+attempt. DGX Spark/GB10 SM121 has an explicit local constraint: do not target
+or assume `tcgen05` or TMEM support. TMA/DSMEM may be available but require
+local toolchain and profile evidence; server-Blackwell/SM100 assumptions do not
+transfer automatically. Prefer local profiler/ledger evidence over assumptions
+from external guides. Do not place hostnames, private paths,
 credentials, datasets, checkpoints, or private seeds in Git or the runbook.
 
 ## Stop conditions

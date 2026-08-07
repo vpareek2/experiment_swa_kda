@@ -349,3 +349,41 @@ chmod -R a-w ref/nvidia-skills
 - The Prime parent should expose `ref/nvidia-docs/AGENT_INDEX.md` and relevant
   source text read-only to children. A child should consult the concise tuning
   guide first, then targeted sections, rather than ingesting the full corpus.
+
+
+## 2026-08-07 [agent] record GB10 SM121 tensor-core instruction constraint
+
+**Context**
+
+- DGX Spark GB10 is not interchangeable with server Blackwell for low-level
+  instruction assumptions. The candidate briefing needs a verified constraint,
+  not inference from marketing terminology.
+
+**Commands**
+
+```bash
+# Snapshot official NVIDIA/dgx-spark-playbooks issue 22 and maintainer comments
+# into ignored ref/nvidia-docs/dgx-spark-playbooks-issue-22.json.
+```
+
+**Artifacts**
+
+- Local source snapshot SHA-256:
+  `7bb0f5ca3eeafe1ad31dc7d7d206df51d7f5ad97852c2220fc2b4f878bb7f786`.
+- Canonical source: [NVIDIA/dgx-spark-playbooks issue 22](https://github.com/NVIDIA/dgx-spark-playbooks/issues/22), including NVIDIA maintainer comments dated 2025-12-19 and 2025-12-22.
+
+**Result**
+
+- NVIDIA states that DGX Spark/GB10 is SM121; `tcgen05` and TMEM are not
+  supported. DSMEM and TMA/multicast are stated to be available. TMA/DSMEM
+  availability does not prove that the installed PyTorch/Triton/FLA stack has a
+  usable path.
+- Candidate workers must not target tcgen05, TMEM, SM100 cubin patching, or
+  server-Blackwell instruction assumptions. Any proposed TMA/DSMEM path needs
+  explicit local toolchain support and a measured systems/profile justification.
+
+**Next**
+
+- Use the ordinary eager KDA/PyTorch/FLA path as the baseline constraint; let
+  mandatory profile artifacts, not unsupported instruction speculation, select
+  subsequent candidate hypotheses.
