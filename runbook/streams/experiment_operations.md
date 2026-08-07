@@ -524,7 +524,8 @@ uv run --no-sync research doctor --config configs/research/kda_training_speed.to
   baseline-post eager 4k systems sequence. It scores only warm training tok/s,
   declares quality unevaluated, and requires both a 3% improvement and at most
   3% baseline drift. Crashes, timeouts, missing rows, and failed tests are
-  invalid, not scores.
+  invalid, not scores. The ledger rejects duplicate candidate/protocol pairs
+  and records every intake against the frozen 24-attempt budget.
 - The lane declares `TORCH_COMPILE_DISABLE=1` for every baseline and candidate
   subprocess through `systems.execution_mode = "eager"`; this is an explicit
   comparable target while the separate rank-polymorphic compiled-optimizer

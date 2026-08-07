@@ -135,6 +135,13 @@ def intake(root: str | Path, config: ResearchConfig, base_ref: str, candidate_re
             )
         patch = _git(repo, ["diff", "--binary", f"{base}..{candidate}"]) if changed else ""
         patch_sha = hashlib.sha256(patch.encode("utf-8")).hexdigest()
+        existing = db.execute("SELECT id,status FROM attempts WHERE candidate_sha=? AND protocol_sha=?", (candidate, ready["protocol_sha"])).fetchone()
+        if existing:
+            return {"attempt_id": existing[0], "status": "already_recorded", "reason": f"candidate already {existing[1]}",
+                    "base_sha": base, "candidate_sha": candidate, "changed_paths": changed}
+        used = db.execute("SELECT COUNT(*) FROM attempts WHERE protocol_sha=?", (ready["protocol_sha"],)).fetchone()[0]
+        if reason is None and used >= config.speed_supervisor.max_attempts:
+            reason = "frozen maximum attempt budget exhausted"
         status = "accepted" if reason is None else "rejected"
         db.execute("BEGIN IMMEDIATE")
         try:
