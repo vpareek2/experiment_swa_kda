@@ -7,6 +7,9 @@ kernels are validated.  It does not import code from the local ``ref/`` tree.
 
 from __future__ import annotations
 
+import sys
+import threading
+
 from dataclasses import dataclass
 import importlib.metadata
 import math
@@ -279,40 +282,120 @@ def _reference_kda(
 
 
 _FLA_OPS: tuple[Callable, Callable] | None = None
+_FLA_OPS_LOCK = threading.Lock()
+_FLA_OPS_LOAD_FAILED = False
 
 
 def _load_fla_ops() -> tuple[Callable, Callable]:
     """Load the pinned Triton operators only after SM121 is configured."""
 
-    global _FLA_OPS
+    global _FLA_OPS, _FLA_OPS_LOAD_FAILED
     if _FLA_OPS is not None:
         return _FLA_OPS
+    if _FLA_OPS_LOAD_FAILED:
+        raise RuntimeError("optimized KDA backend initialization previously failed")
 
-    configure_triton_ptxas(required=True)
-    # Keep this research phase deterministic if optional accelerator packages
-    # happen to be installed in the environment later.
-    os.environ["FLA_FLASH_KDA"] = "0"
-    os.environ["FLA_TILELANG"] = "0"
-    try:
-        fla_version = importlib.metadata.version("fla-core")
-    except importlib.metadata.PackageNotFoundError as error:
-        raise RuntimeError(
-            "the optimized KDA backend requires fla-core==0.5.2; "
-            "run `uv sync --extra gpu`"
-        ) from error
-    if fla_version != "0.5.2":
-        raise RuntimeError(f"optimized KDA requires fla-core==0.5.2, found {fla_version}")
-    try:
-        from fla.ops.kda import chunk_kda, fused_recurrent_kda
-    except ModuleNotFoundError as error:
-        if error.name == "fla" or (error.name and error.name.startswith("fla.")):
-            raise RuntimeError(
-                "the optimized KDA backend requires fla-core==0.5.2; "
-                "run `uv sync --extra gpu`"
-            ) from error
-        raise
-    _FLA_OPS = chunk_kda, fused_recurrent_kda
-    return _FLA_OPS
+    with _FLA_OPS_LOCK:
+        if _FLA_OPS is not None:
+            return _FLA_OPS
+        if _FLA_OPS_LOAD_FAILED:
+            raise RuntimeError("optimized KDA backend initialization previously failed")
+
+        try:
+            configure_triton_ptxas(required=True)
+            # Keep this research phase deterministic if optional accelerator packages
+            # happen to be installed in the environment later.
+            os.environ["FLA_FLASH_KDA"] = "0"
+            os.environ["FLA_TILELANG"] = "0"
+            try:
+                fla_version = importlib.metadata.version("fla-core")
+            except importlib.metadata.PackageNotFoundError as error:
+                raise RuntimeError(
+                    "the optimized KDA backend requires fla-core==0.5.2; "
+                    "run `uv sync --extra gpu`"
+                ) from error
+            if fla_version != "0.5.2":
+                raise RuntimeError(
+                    f"optimized KDA requires fla-core==0.5.2, found {fla_version}"
+                )
+
+            import triton
+            import fla.utils as fla_utils
+
+            if any(
+                module_name == "fla.ops" or module_name.startswith("fla.ops.")
+                for module_name in sys.modules
+            ):
+                raise RuntimeError("fla.ops was imported before KDA backend preparation")
+
+            device_count = torch.cuda.device_count()
+            if device_count <= 0:
+                raise RuntimeError("optimized KDA requires a visible SM121 CUDA device")
+            for device_idx in range(device_count):
+                capability = torch.cuda.get_device_capability(device_idx)
+                if capability != (12, 1):
+                    raise RuntimeError(
+                        "optimized KDA requires every visible CUDA device to have "
+                        f"capability (12, 1), found {capability} for device {device_idx}"
+                    )
+                properties = torch.cuda.get_device_properties(device_idx)
+                optin_shared_mem = properties.shared_memory_per_block_optin
+                if optin_shared_mem < 101376:
+                    raise RuntimeError(
+                        "optimized KDA requires torch opt-in shared memory >= 101376 "
+                        f"bytes, found {optin_shared_mem} for device {device_idx}"
+                    )
+                triton_properties = (
+                    triton.runtime.driver.active.utils.get_device_properties(device_idx)
+                )
+                max_shared_mem = triton_properties["max_shared_mem"]
+                if max_shared_mem < 101376:
+                    raise RuntimeError(
+                        "optimized KDA requires Triton max_shared_mem >= 101376 bytes, "
+                        f"found {max_shared_mem} for device {device_idx}"
+                    )
+
+            original_check_shared_mem = fla_utils.check_shared_mem
+
+            def guarded_check_shared_mem(arch: str = "none", tensor_idx: int = 0):
+                if arch == "none":
+                    return original_check_shared_mem("ada", tensor_idx)
+                return original_check_shared_mem(arch, tensor_idx)
+
+            before_modules = set(sys.modules)
+            fla_utils.check_shared_mem = guarded_check_shared_mem
+            try:
+                from fla.ops.kda import chunk_kda, fused_recurrent_kda
+                import fla.ops.kda.chunk_bwd as chunk_bwd
+                import fla.ops.kda.gate as gate
+            except ModuleNotFoundError as error:
+                if error.name == "fla" or (error.name and error.name.startswith("fla.")):
+                    raise RuntimeError(
+                        "the optimized KDA backend requires fla-core==0.5.2; "
+                        "run `uv sync --extra gpu`"
+                    ) from error
+                raise
+            finally:
+                fla_utils.check_shared_mem = original_check_shared_mem
+                for module_name in set(sys.modules) - before_modules:
+                    module = sys.modules.get(module_name)
+                    namespace = getattr(module, "__dict__", None)
+                    if namespace is None:
+                        continue
+                    for name, value in list(namespace.items()):
+                        if value is guarded_check_shared_mem:
+                            namespace[name] = original_check_shared_mem
+
+            if 64 not in chunk_bwd.BK_LIST:
+                raise RuntimeError("fla.ops.kda.chunk_bwd.BK_LIST must contain 64")
+            if 64 not in gate.BS_LIST:
+                raise RuntimeError("fla.ops.kda.gate.BS_LIST must contain 64")
+
+            _FLA_OPS = chunk_kda, fused_recurrent_kda
+            return _FLA_OPS
+        except BaseException:
+            _FLA_OPS_LOAD_FAILED = True
+            raise
 
 
 def prepare_kda_backend() -> None:
