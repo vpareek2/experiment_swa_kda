@@ -536,7 +536,7 @@ uv run --no-sync research doctor --config configs/research/kda_training_speed.to
 
 **Next**
 
-- Commit and push the protected supervisor. Then register the original KDA
-  commit as the speed baseline with `speed-supervisor intake/run` before any
-  candidate model is allowed to propose a change. Do not apply a candidate
-  directly outside that loop.
+- The first candidate attempt supplies its reviewed parent as the frozen KDA
+  baseline; `run` measures that parent before and after the candidate, so there
+  is no standalone or no-op baseline trial. Do not apply a candidate directly
+  outside the intake/run loop.
