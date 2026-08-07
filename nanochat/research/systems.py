@@ -12,7 +12,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from nanochat.research.artifacts import atomic_write_json, environment_provenance, git_provenance, make_run_id
+from nanochat.research.artifacts import atomic_write_json, environment_provenance, git_provenance, make_run_id, select_triton_ptxas
 from nanochat.research.config import ResearchConfig
 
 STEP_PREFIX = "RESEARCH_TRAIN_STEP "
@@ -51,6 +51,11 @@ def summarize_warm_steps(steps: list[dict[str, Any]], warmup_steps: int) -> dict
 def _run(command: list[str], root: Path, log: Path, timeout: float) -> dict[str, Any]:
     env = os.environ.copy()
     env.setdefault("NANOCHAT_DTYPE", "bfloat16")
+    ptxas = select_triton_ptxas()
+    if ptxas:
+        env["TRITON_PTXAS_PATH"] = ptxas
+    env["FLA_FLASH_KDA"] = "0"
+    env["FLA_TILELANG"] = "0"
     started = time.monotonic()
     with log.open("w", encoding="utf-8") as handle:
         process = subprocess.Popen(command, cwd=root, env=env, stdout=handle, stderr=subprocess.STDOUT, start_new_session=True)
