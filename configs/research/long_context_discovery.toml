@@ -1,7 +1,7 @@
 schema_version = 2
 
 [run]
-name = "discovery"
+name = "long-context-discovery"
 suite = "discovery"
 artifact_root = "runs"
 seed = 42
@@ -11,8 +11,8 @@ seconds = 300.0
 tokens = 0
 depth = 6
 head_dim = 128
-sequence_length = 1024
-device_batch_size = 8
+sequence_length = 4096
+device_batch_size = 2
 total_batch_size = 32768
 window_pattern = "L"
 sliding_window = 256
@@ -25,16 +25,16 @@ kda_backend = "fla_triton"
 [evaluation]
 enabled = true
 protocol = "general_lm"
-context_lengths = [128, 256, 512, 1024]
+context_lengths = [128, 256, 512, 1024, 2048, 4096]
 target_tokens = 64
-max_documents = 128
-source_documents = 1024
+max_documents = 64
+source_documents = 8192
 core_enabled = true
 core_manifest = "eval_bundle.manifest.json"
 core_manifest_sha256 = "1da36d32981a35fedc18fb655097153f42a33723611d0bd622bdfc01dd0d877d"
-ruler_enabled = false
-ruler_manifest = ""
-ruler_manifest_sha256 = ""
+ruler_enabled = true
+ruler_manifest = "ruler-ground-truth/manifest.json"
+ruler_manifest_sha256 = "c5a0e086e54dbe38e7ed0eb077e7d78072d7ef3ebef88f5f6f16a75779418cd0"
 core_max_per_task = 100
 
 [decision]

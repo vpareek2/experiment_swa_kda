@@ -198,3 +198,40 @@ NANOCHAT_DTYPE=bfloat16 TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas \
 - Add a frozen 4k lane only after the RULER preparation path rejects impossible
   prompt/generation budgets before launching work. Run equivalent bounded SWA
   and KDA correctness/memory checks before any matched longer-context campaign.
+
+## 2026-08-06 [agent] bounded 4k SWA/KDA execution checks
+
+**Context**
+
+- After the full-attention 4k smoke, ran the same one-update budget for pure
+  SWA and KDA before allowing any longer-context comparison.
+
+**Commands**
+
+```bash
+# Shared: BF16, sequence length 4096, device batch 2, global batch 32768,
+# one optimizer update, no periodic evaluation.
+uv run --no-sync python -m scripts.base_train --window-pattern S --no-force-final-full <shared arguments>
+uv run --no-sync python -m scripts.base_train --window-pattern K --no-force-final-full --kda-backend fla_triton <shared arguments>
+```
+
+**Artifacts**
+
+- Ignored smoke logs: `runs/4k-swa-smoke.log`, `runs/4k-kda-smoke.log`
+- Nanochat-cache checkpoint tag: `smoke-swa-4k`, step 1
+
+**Result**
+
+- Pure SWA completed one update with finite loss 10.396439 and peak allocated
+  memory 1,704.42 MiB. The first step took 7.267 s / 4,509 tok/s including
+  compilation and warmup, so it is not comparative throughput evidence. SDPA
+  warned that it has no sliding-window implementation.
+- KDA did not reach its first optimizer update. It remained at compilation/
+  setup for 900 seconds, was terminated, and is an invalid run. No checkpoint,
+  quality, memory, or performance value may be inferred from it.
+
+**Next**
+
+- Diagnose the 4k KDA compile/setup timeout with a tightly bounded backend
+  smoke before any 4k KDA training attempt. Keep the full/SWA work as
+  correctness-only evidence.

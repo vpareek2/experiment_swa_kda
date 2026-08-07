@@ -27,7 +27,7 @@ from nanochat.research.artifacts import (
 from nanochat.research.config import ResearchConfig
 from nanochat.research.decision import classify_candidate, objectives_from_config
 from nanochat.research.probe import probe_protocol_hash, run_memory_probe, run_probe_calibration
-from nanochat.research.general_eval import prepared_core_bundle, run_general_evaluation
+from nanochat.research.general_eval import prepared_core_bundle, prepared_ruler_manifest, run_general_evaluation
 
 
 TRAIN_RESULT_PREFIX = "RESEARCH_TRAIN_RESULT "
@@ -48,16 +48,20 @@ def doctor(root: str | Path, config: ResearchConfig) -> dict[str, Any]:
         core_bundle_ready = not config.evaluation.core_enabled or prepared_core_bundle(config.evaluation).is_dir()
     except (FileNotFoundError, ValueError):
         core_bundle_ready = False
-    ruler_manifest = base_dir / config.evaluation.ruler_manifest if config.evaluation.ruler_enabled else None
+    try:
+        ruler_manifest_data = prepared_ruler_manifest(config.evaluation)[0]
+        ruler_bundle_ready = not config.evaluation.ruler_enabled or (
+            bool(ruler_manifest_data["tasks"])
+            and all(int(task.get("context_tokens", 0)) <= config.training.sequence_length for task in ruler_manifest_data["tasks"])
+        )
+    except (FileNotFoundError, ValueError, TypeError):
+        ruler_bundle_ready = False
     checks = {
         "git_repository": (repo / ".git").exists(),
         "uv": shutil.which("uv") is not None,
         "tokenizer": all(path.exists() for path in tokenizer_files),
         "core_bundle": core_bundle_ready,
-        "ruler_bundle": (not config.evaluation.ruler_enabled) or (
-            ruler_manifest is not None and ruler_manifest.is_file()
-            and sha256_file(ruler_manifest) == config.evaluation.ruler_manifest_sha256
-        ),
+        "ruler_bundle": ruler_bundle_ready,
         "dataset_shards": len(parquet),
         "cuda": environment["cuda_available"],
         "bfloat16": not environment["cuda_available"] or tuple(environment.get("compute_capability", (0, 0))) >= (8, 0),

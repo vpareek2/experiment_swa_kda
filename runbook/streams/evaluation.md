@@ -260,3 +260,54 @@ uv run --no-sync research doctor --config configs/research/discovery.toml
 - Commit and push the CORE preparation support, then rerun doctor from the clean
   commit.
 - Select and prepare the exact official RULER export before enabling its adapter.
+
+## 2026-08-06 [agent] prepare the official RULER ground-truth bundle for the 4k lane
+
+**Context**
+
+- The full author-defined RULER suite cannot fit the existing 1,024-token lane.
+  A bounded 4k full-attention smoke passed, so the benchmark material was
+  prepared for a separately frozen 4k lane rather than by substituting a
+  partial task selection.
+
+**Commands**
+
+```bash
+# Pin NVIDIA/RULER source, retrieve its declared source corpora, then run its
+# generator once per task with the nanochat tokenizer bridge, seed 42, and 500
+# samples. Every subprocess has a hard timeout and runs sequentially.
+uv run --no-sync python -m pytest -q
+uv run --no-sync research doctor --config configs/research/long_context_discovery.toml
+```
+
+**Artifacts**
+
+- Prepared nanochat-cache RULER export and hash manifest
+- `configs/research/{long_context_discovery,long_context_promotion}.toml`
+- `nanochat/research/{config,general_eval,runner}.py`
+- `tests/test_general_eval.py`
+
+**Result**
+
+- Pinned the Apache-2.0 `NVIDIA/RULER` source at
+  `c3f5e3b4f87f97e048793bb510a3a6b19a46bf3a`. Generated all 13 author-defined
+  tasks with 500 examples each (6,500 total) using seed 42 and nanochat-token
+  length accounting. The manifest SHA-256 is
+  `c5a0e086e54dbe38e7ed0eb077e7d78072d7ef3ebef88f5f6f16a75779418cd0`.
+- A first 4,096-token generator pass exposed one 4,097-token row. The accepted
+  material therefore uses a 4,080-token generation budget; independent
+  nanochat-token preflight verified every prompt, answer prefix, and maximum
+  generation allowance fits the 4,096-token model, with observed maximum
+  4,081 tokens.
+- The evaluator now matches the upstream all-reference containment score for
+  retrieval/tracking/aggregation and partial-reference containment for QA.
+  Doctor verifies the manifest and every task-file hash. It reports both CORE
+  and RULER inputs ready; the worktree is the only remaining readiness block.
+- Full validation passed: 129 passed, 10 skipped. No model was evaluated on
+  RULER during preparation.
+
+**Next**
+
+- Commit the protected 4k evaluation lane and rerun doctor from the clean
+  commit. Do not start a comparison until the 4k KDA execution timeout is
+  diagnosed and cleared.

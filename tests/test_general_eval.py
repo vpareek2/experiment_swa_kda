@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from nanochat.research.config import ConfigError, GeneralEvaluationConfig, ResearchConfig, TrainingConfig, validate_config
-from nanochat.research.general_eval import collect_suffix_examples, prepared_core_bundle, ruler_match_score, score_context_curve
+from nanochat.research.general_eval import collect_suffix_examples, prepared_core_bundle, prepared_ruler_manifest, ruler_match_score, score_context_curve
 
 
 def test_collect_suffix_examples_is_deterministic_and_uses_only_long_documents():
@@ -46,6 +46,7 @@ def test_general_evaluation_rejects_untrained_or_ambiguous_context_lengths():
 
 def test_enabled_ruler_requires_a_hash_pinned_manifest():
     config = ResearchConfig(
+        training=TrainingConfig(sequence_length=4096),
         memory_probe=__import__("dataclasses").replace(ResearchConfig().memory_probe, enabled=False),
         evaluation=GeneralEvaluationConfig(ruler_enabled=True),
     )
@@ -78,3 +79,30 @@ def test_ruler_matching_matches_official_all_and_partial_semantics():
     assert ruler_match_score(prediction, ["alpha", "beta", "missing"], "all") == pytest.approx(2 / 3)
     assert ruler_match_score(prediction, ["missing", "BETA"], "partial") == 1.0
     assert ruler_match_score("", ["alpha"], "partial") == 0.0
+
+
+def test_ruler_bundle_requires_every_manifested_task_hash(tmp_path, monkeypatch):
+    monkeypatch.setenv("NANOCHAT_BASE_DIR", str(tmp_path))
+    task = tmp_path / "task.jsonl"
+    task.write_text('{"input":"x","outputs":["y"]}\n', encoding="utf-8")
+    task_hash = hashlib.sha256(task.read_bytes()).hexdigest()
+    manifest = {"tasks": [{"name": "task", "path": "task.jsonl", "sha256": task_hash}]}
+    path = tmp_path / "ruler.json"
+    path.write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
+    manifest_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+    config = GeneralEvaluationConfig(
+        ruler_enabled=True, ruler_manifest="ruler.json", ruler_manifest_sha256=manifest_hash,
+    )
+    assert prepared_ruler_manifest(config)[0] == manifest
+    task.write_text("changed\n", encoding="utf-8")
+    with pytest.raises(FileNotFoundError, match="changed"):
+        prepared_ruler_manifest(config)
+
+
+def test_complete_ruler_is_rejected_below_its_supported_context_lane():
+    config = ResearchConfig(
+        memory_probe=__import__("dataclasses").replace(ResearchConfig().memory_probe, enabled=False),
+        evaluation=GeneralEvaluationConfig(ruler_enabled=True, ruler_manifest="ruler.json", ruler_manifest_sha256="0" * 64),
+    )
+    with pytest.raises(ConfigError, match="4096-token"):
+        validate_config(config)

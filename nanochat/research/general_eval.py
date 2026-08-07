@@ -85,8 +85,8 @@ def heldout_context_curve(model, tokenizer, config, device: torch.device) -> dic
     """Evaluate deterministic suffixes from the held-out validation shard."""
     texts: list[str] = []
     batches = _document_batches("val", None, tokenizer_batch_size=128)
-    # Gather more than requested because short documents are excluded.
-    limit = max(config.max_documents * 8, config.max_documents)
+    # Scan a frozen count of source documents because long documents are sparse.
+    limit = config.source_documents
     while len(texts) < limit:
         batch, _ = next(batches)
         texts.extend(batch)
@@ -145,15 +145,28 @@ def prepared_core_bundle(config) -> Path:
     return bundle
 
 
-def _load_ruler_manifest(config) -> tuple[dict[str, Any], Path]:
+def prepared_ruler_manifest(config) -> tuple[dict[str, Any], Path]:
+    """Return a complete hash-verified local RULER export without downloading."""
     from nanochat.common import get_base_dir
     path = Path(get_base_dir()) / config.ruler_manifest
     if not path.is_file() or sha256_file(path) != config.ruler_manifest_sha256:
         raise FileNotFoundError("prepared RULER manifest is missing or its SHA-256 does not match the frozen config")
     manifest = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(manifest.get("tasks"), list) or not manifest["tasks"]:
+    tasks = manifest.get("tasks")
+    if not isinstance(tasks, list) or not tasks:
         raise ValueError("prepared RULER manifest requires a non-empty tasks list")
-    return manifest, path.parent
+    parent = path.parent
+    for task in tasks:
+        if not isinstance(task, dict) or not isinstance(task.get("path"), str) or not isinstance(task.get("sha256"), str):
+            raise ValueError("invalid RULER manifest task entry")
+        target = parent / task["path"]
+        try:
+            target.relative_to(parent)
+        except ValueError as error:
+            raise ValueError("RULER manifest path escapes its bundle") from error
+        if not target.is_file() or sha256_file(target) != task["sha256"]:
+            raise FileNotFoundError(f"RULER task is missing or changed: {task.get('name', '?')}")
+    return manifest, parent
 
 
 @torch.no_grad()
@@ -165,7 +178,7 @@ def evaluate_prepared_ruler(model, tokenizer, config) -> dict[str, Any]:
     containment for retrieval/tracking/aggregation and any-reference containment
     for QA. The manifest fixes generated files, prompt budgets, and scorers.
     """
-    manifest, parent = _load_ruler_manifest(config)
+    manifest, parent = prepared_ruler_manifest(config)
     from nanochat.engine import Engine
     engine = Engine(model, tokenizer)
     max_sequence = model.config.sequence_len
