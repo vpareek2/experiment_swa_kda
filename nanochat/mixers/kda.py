@@ -91,13 +91,31 @@ class ShortConvolution(nn.Conv1d):
                 raise ValueError(f"convolution state must have shape {expected}")
             current = state.to(device=x.device, dtype=x.dtype).clone()
 
-        weight = self.weight[:, 0].to(dtype=x.dtype)
-        outputs: list[torch.Tensor] = []
-        for index in range(length):
-            current = torch.cat((current[..., 1:], x[:, index].unsqueeze(-1)), dim=-1)
-            outputs.append(F.silu((current * weight.unsqueeze(0)).sum(dim=-1)))
-        output = torch.stack(outputs, dim=1) if outputs else x.new_empty(batch, 0, channels)
-        return output, current if output_final_state else None
+        if length == 0:
+            output = x.new_empty(batch, 0, channels)
+            return output, current if output_final_state else None
+
+        # Every recurrent step first discards the oldest cached value, appends
+        # the new token, and takes a width-sized dot product.  All of those
+        # windows are one grouped cross-correlation over the cached suffix and
+        # the complete sequence.  Besides removing the Python token loop, this
+        # maps the operation to a single depthwise convolution kernel.
+        sequence = x.transpose(1, 2)
+        convolution_input = torch.cat((current[..., 1:], sequence), dim=-1)
+        output = F.silu(
+            F.conv1d(
+                convolution_input,
+                self.weight.to(dtype=x.dtype),
+                groups=channels,
+            )
+        ).transpose(1, 2)
+
+        final_state = None
+        if output_final_state:
+            # Clone the small suffix so a decode cache neither aliases nor
+            # retains the full training-sequence storage.
+            final_state = convolution_input[..., -width:].clone()
+        return output, final_state
 
 
 def _gate_shapes(
