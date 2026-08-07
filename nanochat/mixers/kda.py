@@ -1,5 +1,8 @@
 """Correctness-first PyTorch implementation of Kimi K3 Delta Attention.
 
+# Speed-supervisor dry-run candidate: documentation-only change; no executable
+# KDA behavior, parameterization, backend selection, or fallback policy changes.
+
 The implementation in this module is intentionally straightforward.  It is the
 production CPU oracle and fallback against which optimized chunk/recurrent GPU
 kernels are validated.  It does not import code from the local ``ref/`` tree.
