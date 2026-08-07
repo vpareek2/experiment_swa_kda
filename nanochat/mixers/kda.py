@@ -293,6 +293,7 @@ def _load_fla_ops() -> tuple[Callable, Callable]:
     # happen to be installed in the environment later.
     os.environ["FLA_FLASH_KDA"] = "0"
     os.environ["FLA_TILELANG"] = "0"
+    os.environ["FLA_USE_TMA"] = "1"
     try:
         fla_version = importlib.metadata.version("fla-core")
     except importlib.metadata.PackageNotFoundError as error:
