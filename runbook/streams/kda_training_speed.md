@@ -60,7 +60,8 @@ supervisor may expose its local location to a candidate worker out of band.
 | CUDA execution model | locally cached guide/PDF | NVIDIA CUDA C++ Programming Guide |
 | Optimization practices | locally cached guide/PDF | NVIDIA CUDA Best Practices Guide |
 | Triton kernel patterns | locally cached docs/examples | Triton documentation |
-| GB10 platform facts | locally cached vendor documentation | NVIDIA DGX Spark documentation |
+| GB10 platform facts | `ref/nvidia-docs/dgx-spark-user-guide.txt` | [DGX Spark User Guide](https://docs.nvidia.com/dgx/dgx-spark/dgx-spark.pdf) |
+| CUDA kernel concepts | `ref/nvidia-docs/{blackwell-tuning-guide,cuda-best-practices-guide,cuda-programming-guide}.txt` | NVIDIA CUDA 13.3 documentation |
 | GPU-kernel agent guidance | `ref/nvidia-skills/` at `a9ea6f987f3a2e5efbd6f94ad394dc0b64265719` | [NVIDIA/skills](https://github.com/NVIDIA/skills), Apache-2.0 + CC-BY-4.0 |
 
 The pinned NVIDIA catalog is 64 MiB and read-only. For this loop, read only
@@ -301,3 +302,50 @@ chmod -R a-w ref/nvidia-skills
 
 - A Prime parent may expose this read-only reference root to its candidate
   child alongside the program, runbook briefing, and current ledger summary.
+
+
+## 2026-08-07 [agent] pin DGX Spark and CUDA kernel documentation
+
+**Context**
+
+- Added official NVIDIA platform and CUDA reference material so Prime candidate
+  workers can reason from local documented concepts rather than generic GPU
+  priors alone.
+
+**Commands**
+
+```bash
+# Downloaded official NVIDIA documentation snapshots and extracted searchable text.
+# See ref/nvidia-docs/SOURCES.json for URLs and SHA-256 values.
+```
+
+**Artifacts**
+
+- Ignored, read-only `ref/nvidia-docs/` (31 MiB), with PDFs, HTML snapshots,
+  extracted text, `SOURCES.json`, and `AGENT_INDEX.md`.
+- DGX guide PDF SHA-256:
+  `96ec0bed663a954ee5e4a1e6a7c55d9f1bf3d6223302e6245c6a5043e516983c`.
+- CUDA Programming Guide 13.3 SHA-256:
+  `1a0659b7324d10f1c0a57fc0c82aa83ee1aba437fa85dabc90ee8f736e439bea`.
+- CUDA Best Practices Guide 13.3 SHA-256:
+  `38ed26226ea3f71f92a69516128cfea31a309a110ec75bc2a43777c440479def`.
+- Blackwell Tuning Guide 13.3 SHA-256:
+  `1697938ef20db2127bb2874ce8bff1df2a07d57a435fcef5055eb521774e13da`.
+
+**Result**
+
+- Verified DGX Spark guide facts added to the local agent index: Grace
+  Blackwell integrated platform; 20-core Arm CPU (10 Cortex-X925 + 10
+  Cortex-A725); 128 GB LPDDR5x unified memory on a 256-bit, 4266 MHz interface
+  with documented 273 GB/s bandwidth; Blackwell GPU with fifth-generation
+  Tensor Cores; 10 GbE/ConnectX-7 connectivity.
+- The Blackwell guide labels its architecture-specific discussion as compute
+  capability 10.0, whereas the live GB10 reports 12.1. Candidates may use its
+  general concepts but must not assume its specific limits apply to GB10; local
+  profile and systems artifacts remain authoritative.
+
+**Next**
+
+- The Prime parent should expose `ref/nvidia-docs/AGENT_INDEX.md` and relevant
+  source text read-only to children. A child should consult the concise tuning
+  guide first, then targeted sections, rather than ingesting the full corpus.
