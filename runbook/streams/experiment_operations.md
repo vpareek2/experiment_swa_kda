@@ -280,3 +280,40 @@ uv run --no-sync research doctor --config configs/research/systems_4k.toml
   the 120-second cap to reproduce the KDA compile failure. Add isolated
   prefill/decode and profiler artifacts before treating systems results as a
   complete candidate-selection signal.
+
+## 2026-08-07 [agent] establish bounded 4k full-attention systems baseline
+
+**Context**
+
+- Ran the newly committed systems command only for the declared full-attention
+  reference. This is a systems baseline, not a quality or architecture result.
+
+**Commands**
+
+```bash
+uv run --no-sync research systems --config configs/research/systems_4k.toml
+```
+
+**Artifacts**
+
+- Ignored artifact directory:
+  `runs/systems-20260807T062318Z-systems-4k-40c427aa-s42/`
+
+**Result**
+
+- Cold first-update process completed in 6.606 s using the system CUDA 13.1
+  assembler. The initial systems command first failed because it selected
+  Triton's bundled assembler; the systems runner was corrected, committed, and
+  rerun before accepting this baseline.
+- After three warmup updates, ten matched full-attention training updates had
+  median 0.226376 s step time and 144,750 tok/s at sequence length 4,096,
+  device batch 2, and global batch 32,768. These are warmed training-only
+  measurements, separate from compile time.
+- Prefill and decode remain explicitly `not_run`; this artifact is not a
+  complete systems scorecard. No KDA comparison was launched.
+
+**Next**
+
+- Add isolated prefill/decode measurement and profiler artifacts. Then rerun
+  the KDA cold phase under the 120-second cap to classify its failure without
+  another unbounded wait.
