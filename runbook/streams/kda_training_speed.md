@@ -668,3 +668,43 @@ research speed-supervisor run --attempt 5
 - Attempt 6 will test FLA's existing Triton causal-convolution path separately
   for q/k/v, targeting fused SiLU, contiguous BTD output, and generic-conv
   backward/copy overhead without fusing the three independent branches.
+
+
+## 2026-08-07 [agent] retain attempt 6 FLA Triton causal convolutions
+
+**Context**
+
+- Candidate `70c734f` replaced only the CUDA path of each independent q/k/v
+  short convolution with fla-core 0.5.2's Triton causal-convolution operator.
+  It fuses SiLU and emits contiguous BTD tensors; CPU/reference behavior,
+  public weights/state, recurrence, and the three independent branches remain.
+
+**Commands**
+
+```bash
+research speed-supervisor run --attempt 6
+```
+
+**Artifacts**
+
+- Ledger attempt 6; ignored artifacts:
+  `runs/speed-supervisor/c50c1dfdddc6/attempt-00006/`.
+- Candidate branch: `origin/kda-speed/attempt-006` at `70c734f`.
+
+**Result**
+
+- Protected correctness passed. Baseline was 41,472.5 tok/s with 0.137%
+  drift. Candidate was 44,090 tok/s, a 6.31% improvement over the matched
+  baseline and above the frozen 3% threshold.
+- Mandatory profile update improved 40.79 ms: forward improved 20.66 ms and
+  backward improved 20.39 ms. FLA forward also improved 6.42 ms because its
+  input tensors no longer require the retained non-contiguous conversion path.
+- Peak allocated training memory decreased from 5,664.25 MiB to 5,550.47 MiB.
+- Decision: `improved`; candidate merged and retained. Quality was not
+  evaluated by this training-speed-only loop.
+
+**Next**
+
+- Use this retained commit as the attempt-7 baseline. Re-evaluate FLA KDA
+  state layout and kernel-resource hypotheses against the new profile rather
+  than combining rejected small axes.
