@@ -27,7 +27,7 @@ commit SHA, changed-file list, and risks to its parent.
 
 `main` is the clean **coordinator** and must never receive an unreviewed
 candidate implementation commit. The immutable starting point for this program
-is the pushed annotated tag `kda-speed-baseline-20260807`. The pushed
+is the pushed annotated tag `kda-speed-prime-baseline-20260807`. The pushed
 `kda-speed-dry-run` branch is provenance for the plumbing validation only; do
 not use it as a performance baseline or merge it.
 
@@ -36,7 +36,7 @@ branch from the retained baseline/tag, for example:
 
 ```bash
 git worktree add -b kda-speed/attempt-002 ../kda-speed-attempt-002 \
-  kda-speed-baseline-20260807
+  kda-speed-prime-baseline-20260807
 ```
 
 The child works only in that assigned directory. Before intake, it commits and

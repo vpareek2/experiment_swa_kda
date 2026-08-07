@@ -226,3 +226,33 @@ git push origin kda-speed-dry-run
 
 - Launch the first Prime candidate child from a separate
   `kda-speed/attempt-002` worktree when authorized.
+
+
+## 2026-08-07 [agent] publish Prime worktree baseline
+
+**Context**
+
+- The Git-topology briefing itself must be present in every candidate worktree,
+  so the earlier pre-briefing baseline tag is retained as provenance while a
+  new immutable Prime-loop tag anchors future candidates.
+
+**Commands**
+
+```bash
+git tag -a kda-speed-prime-baseline-20260807 -m "Prime Agent worktree baseline for protected KDA training-speed autoresearch" 2e8cd30
+git push origin kda-speed-prime-baseline-20260807
+```
+
+**Artifacts**
+
+- Pushed annotated tag: `kda-speed-prime-baseline-20260807` at `2e8cd30`.
+
+**Result**
+
+- Future candidate worktrees must branch from
+  `kda-speed-prime-baseline-20260807`, which includes the mandatory Prime
+  parent/child and coordinator/worktree contract.
+
+**Next**
+
+- The first real candidate is `kda-speed/attempt-002` from this tag.
