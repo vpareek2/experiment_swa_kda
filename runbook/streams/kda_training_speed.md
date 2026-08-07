@@ -149,3 +149,46 @@ uv run --no-sync python -m pytest -q
 - The Prime supervisor can now require profile deltas for every candidate.
   Add a runbook entry after every terminal attempt using the immutable ledger
   and profile artifacts; do not reintroduce an unrestricted per-kernel trace.
+
+
+## 2026-08-07 [agent] complete end-to-end speed-supervisor dry run
+
+**Context**
+
+- Validated the full protected loop with a documentation-only candidate commit
+  that changed only `nanochat/mixers/kda.py` and deliberately preserved all KDA
+  execution behavior.
+
+**Commands**
+
+```bash
+research speed-supervisor intake --base-ref c051775 --candidate-ref ec97019 \
+  --idea "Dry-run documentation-only KDA diff to validate supervisor plumbing"
+research speed-supervisor run --attempt 1
+research speed-supervisor summary --attempt 1
+```
+
+**Artifacts**
+
+- Ledger attempt: `1`; candidate branch: `kda-speed-dry-run` at `ec97019`.
+- Ignored artifacts: `runs/speed-supervisor/attempt-00001/`.
+- The temporary candidate worktree was removed after completion; the branch
+  preserves the reviewed commit for ledger provenance.
+
+**Result**
+
+- The complete sequence passed: fixed correctness suite; baseline-pre systems
+  timing and required profile; candidate systems timing and required profile;
+  baseline-post systems timing; SQLite summary generation.
+- Baseline median was 827 tok/s and the documentation-only candidate was
+  842 tok/s (+1.81%). Baseline drift was 4.11%, above the frozen 3% limit, so
+  the supervisor correctly emitted `retest`, not an improvement. No quality
+  metric was run and no candidate implementation was retained on `main`.
+- This is plumbing validation, not a KDA speed conclusion. It occupies one of
+  the bounded ledger attempts and remains visible to later candidate models.
+
+**Next**
+
+- Start actual Prime candidate work from the protected `main` baseline; use the
+  recorded dry run as evidence that small timing differences require retest,
+  not as a performance target.
