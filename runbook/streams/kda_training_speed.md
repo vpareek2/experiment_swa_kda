@@ -482,3 +482,50 @@ uv run --no-sync python -m pytest -q tests/test_speed_supervisor.py
 **Next**
 
 - Resume attempt 1 at commit `a503132` under the corrected artifact namespace.
+
+
+## 2026-08-07 [agent] retain attempt 1 vectorized short convolution
+
+**Context**
+
+- Candidate `a503132` replaced the per-token Python short-convolution loop with
+  one equivalent grouped `conv1d` over cached history plus the full sequence.
+  It was produced and pushed from isolated branch `kda-speed/attempt-001`.
+
+**Commands**
+
+```bash
+research speed-supervisor intake --base-ref kda-speed-autoresearch-15-baseline-20260807 \
+  --candidate-ref a503132 --idea "Vectorize ShortConvolution ..."
+research speed-supervisor run --attempt 1
+```
+
+**Artifacts**
+
+- Ledger: `runs/kda-training-autoresearch-15.sqlite3`, attempt 1.
+- Ignored artifact root:
+  `runs/speed-supervisor/c50c1dfdddc6/attempt-00001/`.
+- Candidate branch/commit: `origin/kda-speed/attempt-001` at `a503132`.
+
+**Result**
+
+- Protected correctness passed: 52 tests, including the fixed CPU/operator/
+  CUDA/integration suite; FLA resolved without fallback.
+- Baseline-pre median: 845 tok/s (38.766 s/step). Baseline-post median:
+  822 tok/s (39.818 s/step). Their supervisor median was 833.5 tok/s and drift
+  was 2.76%, within the frozen 3% limit.
+- Candidate median: 41,413 tok/s (0.7912 s/step), a 48.69x relative increase
+  over the supervisor baseline median. Timed candidate samples were
+  41,248/41,413/41,465 tok/s.
+- Mandatory profile training update fell from 38,160.5 ms to 787.8 ms. The
+  q/k/v short-convolution regions fell from 2,917.9/2,648.4/2,598.5 ms to
+  6.17/6.22/6.17 ms. FLA forward remained small (42.3 to 32.1 ms). The
+  improvement is far beyond timing noise and passed all frozen gates.
+- Decision: `improved`; the candidate was merged as the next retained baseline.
+  This is a training-speed systems result only; quality remains unevaluated.
+
+**Next**
+
+- Tag the retained baseline. Attempt 2 should use its mandatory profile to
+  identify a new primary bottleneck rather than revisiting the removed Python
+  token loop.
