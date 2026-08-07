@@ -107,3 +107,45 @@ uv run --no-sync research speed-supervisor init \
 
 - Add local reference provenance when material is actually supplied, then let a
   Prime supervisor create the first candidate worktree and child task.
+
+
+## 2026-08-07 [agent] require bounded CUDA-event operator-region profiles
+
+**Context**
+
+- Every valid speed attempt needs comparable attribution without the prior
+  multi-gigabyte Chrome-trace failure or an agent-selected profiling mode.
+
+**Commands**
+
+```bash
+TORCH_COMPILE_DISABLE=1 <two-update 4k KDA profile smoke>
+uv run --no-sync python -m pytest -q
+```
+
+**Artifacts**
+
+- Protected profiler: `nanochat/research/speed_profile.py`.
+- Ignored smoke artifact: `runs/speed-profile-smoke/profile.json` (4,348 bytes).
+
+**Result**
+
+- `speed-supervisor run` now requires baseline-pre and candidate CUDA-event
+  operator-region profiles after their successful systems timings. A missing,
+  malformed, timed-out, or oversized profile invalidates the attempt.
+- The profile instruments the actual eager 4k training update, including its
+  four gradient-accumulation microbatches, with protected CUDA events around
+  forward/backward, optimizer, each KDA layer, q/k/v projections and short
+  convolutions, FLA KDA forward, and output components. It synchronizes once
+  and stores a compact JSON region table; it never invokes `torch.profiler` or
+  exports a Chrome trace.
+- The raw KDA smoke completed in 82.9 seconds end-to-end. Its profiled update
+  took 39.639 s and produced the expected attribution: q/k/v short
+  convolutions consumed about 8.558 s in aggregate and FLA KDA forward about
+  47 ms. This is diagnostic evidence only, not an autoresearch candidate run.
+
+**Next**
+
+- The Prime supervisor can now require profile deltas for every candidate.
+  Add a runbook entry after every terminal attempt using the immutable ledger
+  and profile artifacts; do not reintroduce an unrestricted per-kernel trace.

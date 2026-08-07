@@ -99,8 +99,8 @@ def run_speed_profile(root: str | Path, config: ResearchConfig, artifact_dir: st
         payload = json.loads(profile_path.read_text(encoding="utf-8"))
         if profile_path.stat().st_size > config.speed_supervisor.profile_max_bytes:
             raise ValueError("profile artifact exceeds frozen byte cap")
-        if not payload.get("regions") or not payload.get("operators"):
-            raise ValueError("profile artifact has no regions or operators")
+        if not payload.get("regions") or not payload.get("operator_regions"):
+            raise ValueError("profile artifact has no regions or operator regions")
         result["profile"] = payload
     except (FileNotFoundError, ValueError, json.JSONDecodeError) as error:
         result["status"] = "invalid_profile"; result["reason"] = str(error)

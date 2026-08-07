@@ -57,9 +57,16 @@ The lane is explicitly eager (`TORCH_COMPILE_DISABLE=1`) for both model and
 optimizer; cold setup is diagnostic only. An improvement needs the frozen
 throughput threshold and stable baseline-pre/baseline-post measurements.
 
+Every systems-valid baseline-pre and candidate run also requires the protected
+CUDA-event operator-region profile. It records fixed named regions (KDA layers,
+projections, short convolutions, FLA forward, output components, forward,
+backward, and optimizer) for one warmed full update. It has a hard timeout and
+byte cap, never exports a Chrome trace, and is not model-selectable. Profile
+failure is invalid, not missing feedback.
+
 A failed correctness test, fallback, NaN, OOM, crash, timeout, malformed metric,
-or excessive baseline drift is invalid/retest, never a slow numeric score and
-never a win.
+profile failure, or excessive baseline drift is invalid/retest, never a slow
+numeric score and never a win.
 
 ## References and evidence
 

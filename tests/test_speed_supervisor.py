@@ -51,6 +51,13 @@ def test_speed_supervisor_records_rejected_protected_diff(tmp_path):
     assert "outside" in result["reason"]
 
 
+def test_speed_profile_never_exports_a_chrome_trace():
+    source = (ROOT / "nanochat/research/speed_profile.py").read_text(encoding="utf-8")
+    assert "export_chrome_trace" not in source
+    assert "torch.profiler" not in source
+    assert "mandatory_cuda_event_operator_regions" in source
+
+
 def test_speed_supervisor_profile_contract_is_frozen(tmp_path):
     value = config(tmp_path)
     assert value.speed_supervisor.profile_timeout_seconds == 240

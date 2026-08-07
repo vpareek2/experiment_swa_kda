@@ -9,7 +9,7 @@ import torch
 class SpeedProfile:
     def __init__(self, model, max_bytes: int, rows: int):
         self.model, self.max_bytes, self.rows = model, max_bytes, rows
-        self.active = False; self.records = defaultdict(list); self.handles = []; self.prof = None
+        self.active = False; self.records = defaultdict(list); self.handles = []
         self._patch_fla()
         for name, module in model.named_modules():
             label = self._label(name, module)
@@ -34,7 +34,8 @@ class SpeedProfile:
         if self.active and self.records[label] and self.records[label][-1][1] is None:
             event=self._event(); event.record(); self.records[label][-1][1]=event
     def _patch_fla(self):
-        import nanochat.mixers.kda as kda_module
+        import importlib
+        kda_module = importlib.import_module("nanochat.mixers.kda")
         self.kda_module, self.original_fla = kda_module, kda_module._run_fla_kda
         def wrapped(*args, **kwargs):
             self._start('fla_kda_forward')
@@ -43,25 +44,24 @@ class SpeedProfile:
         kda_module._run_fla_kda = wrapped
     def begin(self):
         self.active = True
-        self.prof = torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA], record_shapes=False, profile_memory=False, with_stack=False)
-        self.prof.start(); self._start('training_update')
+        self._start('training_update')
     def mark(self, label, begin):
         (self._start if begin else self._end)(label)
     def finish(self):
-        self._end('training_update'); torch.cuda.synchronize(); self.active=False; self.prof.stop()
+        self._end('training_update'); torch.cuda.synchronize(); self.active=False
         regions={}
         for label, pairs in self.records.items():
             values=[a.elapsed_time(b) for a,b in pairs if b is not None]
             if values: regions[label]={'milliseconds': sum(values), 'calls': len(values)}
-        entries=[]
-        for event in self.prof.key_averages():
-            self_cuda=float(getattr(event, 'self_device_time_total', getattr(event, 'self_cuda_time_total', 0.0)))
-            total_cuda=float(getattr(event, 'device_time_total', getattr(event, 'cuda_time_total', 0.0)))
-            if self_cuda or total_cuda:
-                entries.append({'name': event.key, 'calls': int(event.count), 'self_cuda_us': self_cuda, 'total_cuda_us': total_cuda})
-        entries.sort(key=lambda x: x['self_cuda_us'], reverse=True)
-        return {'schema_version': 1, 'profile_mode': 'mandatory_cuda_events_and_aggregate_cuda_operators',
-                'regions': regions, 'operators': entries[:self.rows], 'operator_event_count': sum(x['calls'] for x in entries)}
+        # These are protected named operator regions, not an unbounded CUPTI
+        # event stream. Their fixed taxonomy makes the artifact comparable
+        # across candidates without producing a Chrome trace or millions of
+        # per-kernel records.
+        operator_regions = [
+            {'name': name, **value} for name, value in sorted(regions.items(), key=lambda item: item[1]['milliseconds'], reverse=True)
+        ][:self.rows]
+        return {'schema_version': 1, 'profile_mode': 'mandatory_cuda_event_operator_regions',
+                'regions': regions, 'operator_regions': operator_regions}
     def write(self, path: str):
         result=self.finish(); encoded=json.dumps(result, sort_keys=True).encode()
         if len(encoded) > self.max_bytes: raise RuntimeError(f'speed profile exceeds {self.max_bytes} byte cap')
