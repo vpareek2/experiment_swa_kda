@@ -635,3 +635,36 @@ research speed-supervisor run --attempt 4
 - Reassess the remaining KDA forward/backward kernel and layout costs before
   attempt 5; do not combine this rejected axis without a distinct interaction
   hypothesis.
+
+
+## 2026-08-07 [agent] reject attempt 5 FLA chunk size 32
+
+**Context**
+
+- Candidate `5cad2e3` changed only FLA KDA chunk scheduling from the default 64
+  to the other supported value, 32, for B2/T4096/H4/K128.
+
+**Commands**
+
+```bash
+research speed-supervisor run --attempt 5
+```
+
+**Artifacts**
+
+- Ledger attempt 5; ignored artifacts:
+  `runs/speed-supervisor/c50c1dfdddc6/attempt-00005/`.
+- Candidate branch: `origin/kda-speed/attempt-005` at `5cad2e3`.
+
+**Result**
+
+- Correctness passed. Baseline was 41,440.5 tok/s with 0.18% drift.
+  Candidate was 41,186 tok/s, a 0.61% regression.
+- Profile update worsened 8.21 ms, including +7.39 ms backward.
+- Decision: `not_improved`; default chunk size 64 remains preferred.
+
+**Next**
+
+- Attempt 6 will test FLA's existing Triton causal-convolution path separately
+  for q/k/v, targeting fused SiLU, contiguous BTD output, and generic-conv
+  backward/copy overhead without fusing the three independent branches.
