@@ -708,3 +708,37 @@ research speed-supervisor run --attempt 6
 - Use this retained commit as the attempt-7 baseline. Re-evaluate FLA KDA
   state layout and kernel-resource hypotheses against the new profile rather
   than combining rejected small axes.
+
+
+## 2026-08-07 [agent] reject attempt 7 stateless K-first state layout
+
+**Context**
+
+- Candidate `11a753c` used FLA's native K-first internal state layout only when
+  no initial/final public state existed; all cache-facing paths stayed V-first.
+
+**Commands**
+
+```bash
+research speed-supervisor run --attempt 7
+```
+
+**Artifacts**
+
+- Ledger attempt 7; ignored artifacts:
+  `runs/speed-supervisor/c50c1dfdddc6/attempt-00007/`.
+- Candidate branch: `origin/kda-speed/attempt-007` at `11a753c`.
+
+**Result**
+
+- Correctness passed. Baseline was 43,989 tok/s with 0.57% drift. Candidate
+  was 44,193 tok/s, +0.46%, below the threshold.
+- Mandatory profile changed the full update by only -0.21 ms; K-first and
+  V-first are effectively neutral for this K=V=128 lane.
+- Decision: `not_improved`; not merged.
+
+**Next**
+
+- Determine whether GB10-valid larger FLA tiles can be exposed through a
+  mixer-local, resource-checked configuration without patching the installed
+  package/toolchain. Stop this axis if that cannot be done defensibly.
