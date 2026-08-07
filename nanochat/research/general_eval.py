@@ -98,8 +98,23 @@ def heldout_context_curve(model, tokenizer, config, device: torch.device) -> dic
     return score_context_curve(model, examples, config.context_lengths, config.target_tokens, token_bytes, device)
 
 
-def _normalise_answer(value: str) -> str:
-    return " ".join(value.strip().casefold().split())
+def _ruler_prediction(value: str) -> str:
+    # Matches the upstream RULER postprocess_pred behavior before matching.
+    import re
+    return re.sub(r"[\x00-\x1f]", "\n", value).strip().lower()
+
+
+def ruler_match_score(prediction: str, references: Sequence[str], scorer: str) -> float:
+    """Return the upstream RULER per-example all/partial match contribution."""
+    if not references:
+        raise ValueError("RULER reference list must be non-empty")
+    prediction = _ruler_prediction(prediction)
+    references = [reference.lower() for reference in references]
+    if scorer == "all":
+        return sum(reference in prediction for reference in references) / len(references)
+    if scorer == "partial":
+        return float(any(reference in prediction for reference in references))
+    raise ValueError("unsupported RULER scorer")
 
 
 def prepared_core_bundle(config) -> Path:
@@ -143,51 +158,57 @@ def _load_ruler_manifest(config) -> tuple[dict[str, Any], Path]:
 
 @torch.no_grad()
 def evaluate_prepared_ruler(model, tokenizer, config) -> dict[str, Any]:
-    """Run a hash-verified local RULER export without a runtime downloader.
+    """Run a hash-verified export from the official RULER generator.
 
-    The manifest is deliberately narrow: each task names a JSONL file, its
-    SHA-256, a max_new_tokens limit, and an official-answer-compatible scorer
-    (``exact`` or ``contains``). Rows contain ``prompt``/``answers``; the
-    common ``input``/``outputs`` aliases are accepted for prepared exports.
+    Rows use the upstream ``input``, ``answer_prefix``, and ``outputs`` fields.
+    Matching exactly follows the upstream synthetic evaluator: all-reference
+    containment for retrieval/tracking/aggregation and any-reference containment
+    for QA. The manifest fixes generated files, prompt budgets, and scorers.
     """
     manifest, parent = _load_ruler_manifest(config)
     from nanochat.engine import Engine
     engine = Engine(model, tokenizer)
     max_sequence = model.config.sequence_len
     tasks: dict[str, Any] = {}
+    allowed = {"name", "path", "sha256", "max_new_tokens", "scorer", "context_tokens"}
+    required = allowed
     for task in manifest["tasks"]:
-        required = {"name", "path", "sha256", "max_new_tokens", "scorer"}
-        if not isinstance(task, dict) or set(task) - required or required - set(task):
-            raise ValueError("each RULER task must contain only name/path/sha256/max_new_tokens/scorer")
-        if task["scorer"] not in {"exact", "contains"} or int(task["max_new_tokens"]) <= 0:
+        if not isinstance(task, dict) or set(task) != required:
+            raise ValueError("each RULER task must contain the frozen task fields")
+        if task["scorer"] not in {"all", "partial"} or int(task["max_new_tokens"]) <= 0:
             raise ValueError("unsupported RULER scorer or generation limit")
         data_path = parent / task["path"]
         if not data_path.is_file() or sha256_file(data_path) != task["sha256"]:
             raise FileNotFoundError(f"RULER task is missing or changed: {task['name']}")
-        correct = total = 0
+        score = 0.0
+        total = 0
         for line in data_path.read_text(encoding="utf-8").splitlines():
             row = json.loads(line)
-            prompt = row.get("prompt", row.get("input"))
-            answers = row.get("answers", row.get("outputs"))
-            if not isinstance(prompt, str) or not isinstance(answers, list) or not all(isinstance(a, str) for a in answers):
-                raise ValueError(f"invalid RULER row in {task['name']}")
-            tokens = tokenizer.encode(prompt, prepend=tokenizer.get_bos_token_id())
+            prompt = row.get("input", row.get("prompt"))
+            answer_prefix = row.get("answer_prefix", "")
+            answers = row.get("outputs", row.get("answers"))
+            if not isinstance(prompt, str) or not isinstance(answer_prefix, str):
+                raise ValueError(f"invalid RULER prompt in {task['name']}")
+            if not isinstance(answers, list) or not all(isinstance(answer, str) for answer in answers):
+                raise ValueError(f"invalid RULER references in {task['name']}")
+            tokens = tokenizer.encode(prompt + answer_prefix, prepend=tokenizer.get_bos_token_id())
             if len(tokens) + int(task["max_new_tokens"]) > max_sequence:
                 raise ValueError(f"RULER prompt exceeds trained context: {task['name']}")
             generated, _ = engine.generate_batch(tokens, num_samples=1, max_tokens=int(task["max_new_tokens"]), temperature=0)
-            answer = _normalise_answer(tokenizer.decode(generated[0][len(tokens):]))
-            expected = [_normalise_answer(item) for item in answers]
-            if task["scorer"] == "exact":
-                passed = answer in expected
-            else:
-                passed = any(item in answer for item in expected)
-            correct += int(passed)
+            prediction = tokenizer.decode(generated[0][len(tokens):])
+            score += ruler_match_score(prediction, answers, task["scorer"])
             total += 1
         if not total:
             raise ValueError(f"empty RULER task: {task['name']}")
-        tasks[task["name"]] = {"accuracy": correct / total, "correct": correct, "examples": total,
-                               "scorer": task["scorer"], "max_new_tokens": task["max_new_tokens"],
-                               "sha256": task["sha256"]}
+        tasks[task["name"]] = {
+            "accuracy": score / total,
+            "score_sum": score,
+            "examples": total,
+            "scorer": task["scorer"],
+            "max_new_tokens": task["max_new_tokens"],
+            "context_tokens": task["context_tokens"],
+            "sha256": task["sha256"],
+        }
     return {"manifest_sha256": config.ruler_manifest_sha256, "tasks": tasks}
 
 

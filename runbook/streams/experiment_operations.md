@@ -154,3 +154,47 @@ uv run --no-sync research run \
 - Integrate a correctness-first KDA mixer behind the protected probe shell.
   Treat an optimized SWA kernel as a separate performance intervention so it
   is not confounded with KDA quality experiments.
+
+## 2026-08-06 [agent] bounded 4k full-attention feasibility smoke
+
+**Context**
+
+- The current 1,024-token training lane is too short for full RULER coverage.
+  Before designing a matched longer-context lane, the requested question was
+  whether the existing GB10 setup can execute the current model at 4,096 tokens.
+- This was one optimizer update and one checkpoint-load forward check, not a
+  discovery or quality run.
+
+**Commands**
+
+```bash
+NANOCHAT_DTYPE=bfloat16 TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas \
+  uv run --no-sync python -m scripts.base_train \
+  --seed 42 --depth 6 --head-dim 128 --window-pattern L \
+  --max-seq-len 4096 --device-batch-size 2 --total-batch-size 32768 \
+  --num-iterations 1 --eval-every -1 --core-metric-every -1 \
+  --sample-every -1 --save-every -1 --model-tag smoke-full-4k --run dummy
+```
+
+**Artifacts**
+
+- Ignored smoke log: `runs/4k-full-attention-smoke.log`
+- Nanochat-cache checkpoint tag: `smoke-full-4k`, step 1
+
+**Result**
+
+- Complete: one BF16 full-attention optimizer update at 4,096 tokens with
+  finite loss 10.396439 and peak allocated memory 1,672.17 MiB. The checkpoint
+  reloaded and produced finite logits of shape `[1, 4096, 32768]`.
+- The microbatch was `2 × 4096 = 8,192` tokens with four accumulation steps,
+  preserving the 32,768-token global batch. The instantiated model had
+  73,531,538 parameters.
+- The reported first-step 3,750 tok/s and 8.736 s step time include compilation
+  and warmup; they are not throughput evidence. PyTorch SDPA fallback was used
+  because Flash Attention 3 is unavailable.
+
+**Next**
+
+- Add a frozen 4k lane only after the RULER preparation path rejects impossible
+  prompt/generation budgets before launching work. Run equivalent bounded SWA
+  and KDA correctness/memory checks before any matched longer-context campaign.

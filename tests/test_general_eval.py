@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from nanochat.research.config import ConfigError, GeneralEvaluationConfig, ResearchConfig, TrainingConfig, validate_config
-from nanochat.research.general_eval import collect_suffix_examples, prepared_core_bundle, score_context_curve
+from nanochat.research.general_eval import collect_suffix_examples, prepared_core_bundle, ruler_match_score, score_context_curve
 
 
 def test_collect_suffix_examples_is_deterministic_and_uses_only_long_documents():
@@ -71,3 +71,10 @@ def test_core_bundle_requires_a_pinned_complete_manifest(tmp_path, monkeypatch):
     (bundle / "core.yaml").write_text("changed\n", encoding="utf-8")
     with pytest.raises(FileNotFoundError, match="changed"):
         prepared_core_bundle(config)
+
+
+def test_ruler_matching_matches_official_all_and_partial_semantics():
+    prediction = "The values are Alpha and beta."
+    assert ruler_match_score(prediction, ["alpha", "beta", "missing"], "all") == pytest.approx(2 / 3)
+    assert ruler_match_score(prediction, ["missing", "BETA"], "partial") == 1.0
+    assert ruler_match_score("", ["alpha"], "partial") == 0.0
