@@ -91,22 +91,13 @@ class ShortConvolution(nn.Conv1d):
                 raise ValueError(f"convolution state must have shape {expected}")
             current = state.to(device=x.device, dtype=x.dtype).clone()
 
-        if length == 0:
-            return x.new_empty(batch, 0, channels), current if output_final_state else None
-
-        # The reference formulation updates the width-sized state then applies
-        # a depthwise dot product at every token. Express the identical causal
-        # operation as one grouped convolution: the leading ``width - 1`` state
-        # entries provide history and every valid convolution output includes
-        # exactly one new input token. This avoids Python/token-level CUDA
-        # launches for full-sequence training while retaining the same cache
-        # convention for chunked prefill and single-token decode.
-        x_channels_first = x.transpose(1, 2)
-        history = torch.cat((current[..., 1:], x_channels_first), dim=-1)
-        weight = self.weight.to(dtype=x.dtype)
-        output = F.silu(F.conv1d(history, weight, groups=channels).transpose(1, 2))
-        final_current = torch.cat((current, x_channels_first), dim=-1)[..., -width:]
-        return output, final_current if output_final_state else None
+        weight = self.weight[:, 0].to(dtype=x.dtype)
+        outputs: list[torch.Tensor] = []
+        for index in range(length):
+            current = torch.cat((current[..., 1:], x[:, index].unsqueeze(-1)), dim=-1)
+            outputs.append(F.silu((current * weight.unsqueeze(0)).sum(dim=-1)))
+        output = torch.stack(outputs, dim=1) if outputs else x.new_empty(batch, 0, channels)
+        return output, current if output_final_state else None
 
 
 def _gate_shapes(
