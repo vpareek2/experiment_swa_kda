@@ -342,7 +342,7 @@ def _run_fla_kda(
     }
     inputs = tuple(tensor.contiguous() for tensor in (q, k, v, raw_gate, beta_logits))
     if mode == "chunk":
-        return chunk_kda(*inputs, safe_gate=True, **common)
+        return chunk_kda(*inputs, safe_gate=True, disable_recompute=True, **common)
     return fused_recurrent_kda(*inputs, **common)
 
 
