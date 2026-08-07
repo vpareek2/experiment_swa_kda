@@ -480,14 +480,28 @@ class KimiDeltaAttention(nn.Module):
         k_state = None if state is None else state.k_conv
         v_state = None if state is None else state.v_conv
         memory = None if state is None else state.memory
+        # q/k/v have the same input and output width.  Concatenating their
+        # existing weights makes them one wider GEMM instead of three separate
+        # eager dispatches, while the split views keep the public projection
+        # modules, parameters, gradients, and state-dict keys unchanged.  Cast
+        # after concatenation so mixed-precision execution also needs one
+        # weight conversion rather than three.
+        qkv = F.linear(
+            hidden_states,
+            torch.cat(
+                (self.q_proj.weight, self.k_proj.weight, self.v_proj.weight),
+                dim=0,
+            ).to(dtype=hidden_states.dtype),
+        )
+        q_projected, k_projected, v_projected = qkv.split(self.hidden_size, dim=-1)
         q, q_final = self.q_conv1d(
-            self.q_proj(hidden_states), q_state, output_final_state=want_state
+            q_projected, q_state, output_final_state=want_state
         )
         k, k_final = self.k_conv1d(
-            self.k_proj(hidden_states), k_state, output_final_state=want_state
+            k_projected, k_state, output_final_state=want_state
         )
         v, v_final = self.v_conv1d(
-            self.v_proj(hidden_states), v_state, output_final_state=want_state
+            v_projected, v_state, output_final_state=want_state
         )
 
         q = q.reshape(batch, length, self.num_heads, self.head_dim)
