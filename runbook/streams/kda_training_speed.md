@@ -778,3 +778,48 @@ research speed-supervisor run --attempt 8
 - Audit remaining compliant mixer-local opportunities against the approximately
   22 ms/update required for a 3% gain. Stop on plateau if only previously
   sub-threshold combinations or invasive recurrence/kernel rewrites remain.
+
+
+## 2026-08-07 [agent] reject attempt 9 FLA TMA and stop on plateau
+
+**Context**
+
+- Candidate `d60a616` enabled pinned fla-core 0.5.2's existing TMA
+  triangular-solve path after local SM121 and Triton tensor-descriptor support
+  were verified. It was a one-line mixer-only backend selection.
+
+**Commands**
+
+```bash
+research speed-supervisor run --attempt 9
+```
+
+**Artifacts**
+
+- Ledger attempt 9; ignored artifacts:
+  `runs/speed-supervisor/c50c1dfdddc6/attempt-00009/`.
+- Candidate branch: `origin/kda-speed/attempt-009` at `d60a616`.
+
+**Result**
+
+- Correctness and TMA compile/runtime coverage passed. Baseline was 44,143
+  tok/s with 0.16% drift. Candidate was 44,041 tok/s, a 0.23% regression.
+- Mandatory profile changed the update by only -0.61 ms; FLA forward was
+  effectively unchanged (-0.007 ms).
+- Decision: `not_improved`; not merged.
+
+**Next**
+
+- Stop the bounded loop after nine experimental attempts due to a measured
+  plateau. Since retained attempt 6, three distinct kernel/layout hypotheses
+  produced +0.46%, -0.39%, and -0.23%, with profile effects no larger than
+  2.48 ms against roughly 22 ms/update required by the frozen 3% gate.
+- Earlier small axes were likewise sub-threshold: fused projections +0.53%,
+  disable-recompute +1.28%, and chunk-size/conv-fusion regressions. Combining
+  rejected axes has no supported interaction hypothesis. Remaining custom
+  recurrence/fused-normalization rewrites would duplicate or patch substantial
+  pinned FLA kernels and are not a defensible next isolated mixer hypothesis;
+  tcgen05/TMEM are unavailable on SM121, larger tiles were tested, and the
+  locally supported TMA path was neutral.
+- Retained baseline remains attempt 6 at `kda-speed-retained-006-20260807`.
+  Quality was not evaluated by this speed-only loop.
