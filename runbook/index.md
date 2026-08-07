@@ -11,6 +11,7 @@ quality or end-to-end efficiency result is claimed yet.
 - [Experiment operations](streams/experiment_operations.md)
 - [Architecture](streams/architecture.md)
 - [Evaluation and autoresearch](streams/evaluation.md)
+- [KDA training-speed autoresearch](streams/kda_training_speed.md)
 
 ## References
 
