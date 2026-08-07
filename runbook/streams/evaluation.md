@@ -219,3 +219,44 @@ uv run --no-sync research doctor --config configs/research/discovery.toml
 - Prepare and hash the offline CORE bundle, then run clean baseline calibration
   before any candidate comparison. Add provenance-pinned natural long-context
   evaluation only after its base-LM prompt/scoring contract is validated.
+
+## 2026-08-06 [agent] prepare and pin the offline CORE bundle
+
+**Context**
+
+- The current general-LM evaluation plan requires CORE to be available in the
+  network-disabled evaluation environment. The bundle was absent, making the
+  doctor gate fail.
+
+**Commands**
+
+```bash
+uv run --no-sync python -c '<nanochat CORE downloader invocation>'
+uv run --no-sync python -m pytest -q
+uv run --no-sync research doctor --config configs/research/discovery.toml
+```
+
+**Artifacts**
+
+- Prepared nanochat-cache CORE bundle and its hash manifest
+- `configs/research/{discovery,promotion}.toml`
+- `nanochat/research/{config,general_eval,runner}.py`
+- `tests/test_general_eval.py`
+
+**Result**
+
+- Downloaded the inherited CORE archive from its declared source, retained the
+  archive, and wrote a manifest covering all 77 unpacked files. The archive
+  SHA-256 is `90a7c19e28ee7a52b4f6e1f87658deb9fde7f63deba2379045bdb1fe9ea5d200`.
+- The frozen configs pin the manifest SHA-256. Doctor and the evaluator now
+  verify the manifest and every listed file before evaluating; missing or
+  altered data fails closed without a network download.
+- Full validation passed: 126 passed, 10 skipped. Doctor is environment-valid
+  with `core_bundle=true`; it is not research-ready only because these protected
+  changes are not committed yet.
+
+**Next**
+
+- Commit and push the CORE preparation support, then rerun doctor from the clean
+  commit.
+- Select and prepare the exact official RULER export before enabling its adapter.

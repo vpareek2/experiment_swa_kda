@@ -102,7 +102,9 @@ class GeneralEvaluationConfig:
     context_lengths: tuple[int, ...] = (128, 256, 512, 1024)
     target_tokens: int = 64
     max_documents: int = 128
-    core_enabled: bool = True
+    core_enabled: bool = False
+    core_manifest: str = ""
+    core_manifest_sha256: str = ""
     core_max_per_task: int = 100
     ruler_enabled: bool = False
     ruler_manifest: str = ""
@@ -266,6 +268,8 @@ def validate_config(config: ResearchConfig) -> None:
             raise ConfigError("evaluation max_documents must be positive")
         if evaluation.core_max_per_task == 0 or evaluation.core_max_per_task < -1:
             raise ConfigError("evaluation core_max_per_task must be -1 or positive")
+        if evaluation.core_enabled and (not evaluation.core_manifest or len(evaluation.core_manifest_sha256) != 64):
+            raise ConfigError("enabled CORE evaluation requires a manifest path and SHA-256")
         if evaluation.ruler_enabled and (not evaluation.ruler_manifest or len(evaluation.ruler_manifest_sha256) != 64):
             raise ConfigError("enabled RULER evaluation requires a manifest path and SHA-256")
     if probe.enabled:

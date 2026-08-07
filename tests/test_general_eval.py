@@ -1,10 +1,12 @@
+import hashlib
+import json
 import math
 
 import pytest
 import torch
 
 from nanochat.research.config import ConfigError, GeneralEvaluationConfig, ResearchConfig, TrainingConfig, validate_config
-from nanochat.research.general_eval import collect_suffix_examples, score_context_curve
+from nanochat.research.general_eval import collect_suffix_examples, prepared_core_bundle, score_context_curve
 
 
 def test_collect_suffix_examples_is_deterministic_and_uses_only_long_documents():
@@ -49,3 +51,23 @@ def test_enabled_ruler_requires_a_hash_pinned_manifest():
     )
     with pytest.raises(ConfigError, match="manifest path and SHA-256"):
         validate_config(config)
+
+
+def test_core_bundle_requires_a_pinned_complete_manifest(tmp_path, monkeypatch):
+    monkeypatch.setenv("NANOCHAT_BASE_DIR", str(tmp_path))
+    bundle = tmp_path / "eval_bundle"
+    bundle.mkdir()
+    files = {}
+    for name, contents in (("core.yaml", b"tasks: []\n"), ("eval_meta_data.csv", b"header\n")):
+        target = bundle / name
+        target.write_bytes(contents)
+        files[name] = hashlib.sha256(contents).hexdigest()
+    manifest = {"schema_version": 1, "files": files}
+    manifest_path = tmp_path / "core.manifest.json"
+    manifest_path.write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
+    manifest_hash = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    config = GeneralEvaluationConfig(core_enabled=True, core_manifest="core.manifest.json", core_manifest_sha256=manifest_hash)
+    assert prepared_core_bundle(config) == bundle
+    (bundle / "core.yaml").write_text("changed\n", encoding="utf-8")
+    with pytest.raises(FileNotFoundError, match="changed"):
+        prepared_core_bundle(config)

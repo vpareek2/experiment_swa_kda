@@ -102,12 +102,31 @@ def _normalise_answer(value: str) -> str:
     return " ".join(value.strip().casefold().split())
 
 
-def _prepared_core_bundle() -> Path:
+def prepared_core_bundle(config) -> Path:
+    """Return a complete, hash-verified local CORE bundle without downloading."""
     from nanochat.common import get_base_dir
-    bundle = Path(get_base_dir()) / "eval_bundle"
-    required = (bundle / "core.yaml", bundle / "eval_data", bundle / "eval_meta_data.csv")
-    if not all(path.exists() for path in required):
-        raise FileNotFoundError("CORE bundle is not prepared locally; evaluation will not download data")
+    base = Path(get_base_dir())
+    manifest_path = base / config.core_manifest
+    if not manifest_path.is_file() or sha256_file(manifest_path) != config.core_manifest_sha256:
+        raise FileNotFoundError("CORE manifest is missing or its SHA-256 does not match the frozen config")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    files = manifest.get("files")
+    bundle = base / "eval_bundle"
+    if manifest.get("schema_version") != 1 or not isinstance(files, dict):
+        raise ValueError("invalid CORE manifest")
+    required = {"core.yaml", "eval_meta_data.csv"}
+    if not required.issubset(files):
+        raise ValueError("CORE manifest is missing required files")
+    for relative, expected_hash in files.items():
+        if not isinstance(relative, str) or not isinstance(expected_hash, str):
+            raise ValueError("invalid CORE manifest file entry")
+        target = bundle / relative
+        try:
+            target.relative_to(bundle)
+        except ValueError as error:
+            raise ValueError("CORE manifest path escapes its bundle") from error
+        if not target.is_file() or sha256_file(target) != expected_hash:
+            raise FileNotFoundError(f"CORE bundle file is missing or changed: {relative}")
     return bundle
 
 
@@ -179,7 +198,7 @@ def run_general_evaluation(model, tokenizer, config, device: torch.device) -> di
         "natural_context": heldout_context_curve(model, tokenizer, config, device),
     }
     if config.core_enabled:
-        _prepared_core_bundle()
+        prepared_core_bundle(config)
         # The inherited CORE code owns its frozen bundle and task formatting.
         from scripts.base_eval import evaluate_core
         result["core"] = evaluate_core(model, tokenizer, device, max_per_task=config.core_max_per_task)
