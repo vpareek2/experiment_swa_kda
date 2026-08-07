@@ -118,6 +118,72 @@ class ShortConvolution(nn.Conv1d):
         return output, final_state
 
 
+def _fused_short_convolutions(
+    convolutions: tuple[ShortConvolution, ShortConvolution, ShortConvolution],
+    inputs: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+    states: tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None],
+    output_final_state: bool,
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor | None,
+    torch.Tensor | None,
+    torch.Tensor | None,
+]:
+    """Run three independent short convolutions as one grouped convolution."""
+
+    if len(convolutions) != 3 or len(inputs) != 3 or len(states) != 3:
+        raise ValueError("convolutions, inputs, and states must each contain three items")
+    first = inputs[0]
+    if first.ndim != 3 or any(x.ndim != 3 or x.shape != first.shape for x in inputs[1:]):
+        raise ValueError("the three inputs must share shape [B,T,D]")
+    batch, length, channels = first.shape
+
+    currents: list[torch.Tensor] = []
+    widths: list[int] = []
+    for convolution, x, state in zip(convolutions, inputs, states):
+        if x.shape[-1] != convolution.in_channels:
+            raise ValueError(f"x must have shape [B,T,{convolution.in_channels}]")
+        width = convolution.kernel_size[0]
+        widths.append(width)
+        if state is None:
+            current = x.new_zeros(batch, channels, width)
+        else:
+            expected = (batch, channels, width)
+            if state.shape != expected:
+                raise ValueError(f"convolution state must have shape {expected}")
+            current = state.to(device=x.device, dtype=x.dtype).clone()
+        currents.append(current)
+    if any(width != widths[0] for width in widths[1:]):
+        raise ValueError("the three convolutions must share a kernel size")
+    width = widths[0]
+
+    if length == 0:
+        outputs = tuple(x.new_empty(batch, 0, channels) for x in inputs)
+        finals = tuple(currents) if output_final_state else (None, None, None)
+        return (*outputs, *finals)
+
+    sequence = torch.cat(inputs, dim=-1).transpose(1, 2)
+    current = torch.cat(currents, dim=1)
+    convolution_input = torch.cat((current[..., 1:], sequence), dim=-1)
+    weight = torch.cat(
+        tuple(convolution.weight.to(dtype=first.dtype) for convolution in convolutions),
+        dim=0,
+    )
+    fused_output = F.silu(
+        F.conv1d(convolution_input, weight, groups=3 * channels)
+    ).transpose(1, 2)
+    outputs = fused_output.split(channels, dim=-1)
+
+    if output_final_state:
+        final = convolution_input[..., -width:].clone()
+        finals = final.split(channels, dim=1)
+    else:
+        finals = (None, None, None)
+    return (*outputs, *finals)
+
+
 def _gate_shapes(
     raw_gate: torch.Tensor,
     A_log: torch.Tensor,
@@ -480,14 +546,14 @@ class KimiDeltaAttention(nn.Module):
         k_state = None if state is None else state.k_conv
         v_state = None if state is None else state.v_conv
         memory = None if state is None else state.memory
-        q, q_final = self.q_conv1d(
-            self.q_proj(hidden_states), q_state, output_final_state=want_state
-        )
-        k, k_final = self.k_conv1d(
-            self.k_proj(hidden_states), k_state, output_final_state=want_state
-        )
-        v, v_final = self.v_conv1d(
-            self.v_proj(hidden_states), v_state, output_final_state=want_state
+        q = self.q_proj(hidden_states)
+        k = self.k_proj(hidden_states)
+        v = self.v_proj(hidden_states)
+        q, k, v, q_final, k_final, v_final = _fused_short_convolutions(
+            (self.q_conv1d, self.k_conv1d, self.v_conv1d),
+            (q, k, v),
+            (q_state, k_state, v_state),
+            want_state,
         )
 
         q = q.reshape(batch, length, self.num_heads, self.head_dim)
