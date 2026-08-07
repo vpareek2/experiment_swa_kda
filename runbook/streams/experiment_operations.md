@@ -235,3 +235,48 @@ uv run --no-sync python -m scripts.base_train --window-pattern K --no-force-fina
 - Diagnose the 4k KDA compile/setup timeout with a tightly bounded backend
   smoke before any 4k KDA training attempt. Keep the full/SWA work as
   correctness-only evidence.
+
+## 2026-08-06 [agent] add bounded systems-benchmark foundation
+
+**Context**
+
+- The 4k KDA path timed out during compilation/setup, while the existing
+  training summary conflates compile and first-step timing. A protected
+  systems lane is required before automated performance iteration can be
+  trusted.
+
+**Commands**
+
+```bash
+uv run --no-sync python -m pytest -q
+uv run --no-sync research systems --help
+uv run --no-sync research doctor --config configs/research/systems_4k.toml
+```
+
+**Artifacts**
+
+- `configs/research/systems_4k.toml`
+- `nanochat/research/{config,systems,cli}.py`
+- `tests/test_general_eval.py`
+
+**Result**
+
+- Added a frozen 4k systems config and `research systems` command. It requires
+  a clean commit, runs the cold first-update subprocess under a 120-second
+  timeout, then records a separately warmed training sample after fixed
+  warmup/timed counts. Logs, resolved config, environment, compile result, and
+  summary are saved as artifacts.
+- A compile timeout is returned as `compile_timeout`, not converted into a
+  throughput number. The command explicitly marks prefill/decode `not_run`;
+  those measurements and profiler traces remain the next implementation step,
+  so this initial foundation must not be described as a complete systems suite.
+- Config validation covers timing budgets and shapes; 30 focused tests passed.
+  Doctor validates all prepared evaluation inputs but is not research-ready in
+  the current dirty worktree.
+
+**Next**
+
+- Commit the systems foundation, establish clean full/SWA baselines, and use
+  the 120-second cap to reproduce the KDA compile failure. Add isolated
+  prefill/decode and profiler artifacts before treating systems results as a
+  complete candidate-selection signal.

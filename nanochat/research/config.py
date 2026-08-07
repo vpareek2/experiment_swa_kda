@@ -113,6 +113,16 @@ class GeneralEvaluationConfig:
 
 
 @dataclass(frozen=True)
+class SystemsConfig:
+    enabled: bool = False
+    compile_timeout_seconds: float = 120.0
+    warmup_steps: int = 3
+    timed_steps: int = 10
+    prefill_lengths: tuple[int, ...] = (1024,)
+    decode_context_lengths: tuple[int, ...] = (1024,)
+
+
+@dataclass(frozen=True)
 class DecisionConfig:
     bpb_floor: float = 0.002
     throughput_floor_fraction: float = 0.03
@@ -149,6 +159,7 @@ class ResearchConfig:
     # Retained only to read historical artifacts; it is disabled in the current plan.
     memory_probe: MemoryProbeConfig = field(default_factory=MemoryProbeConfig)
     evaluation: GeneralEvaluationConfig = field(default_factory=GeneralEvaluationConfig)
+    systems: SystemsConfig = field(default_factory=SystemsConfig)
     decision: DecisionConfig = field(default_factory=DecisionConfig)
     protection: ProtectionConfig = field(default_factory=ProtectionConfig)
 
@@ -165,7 +176,7 @@ def _section(cls, raw: dict[str, Any], name: str):
     if unknown:
         raise ConfigError(f"Unknown [{name}] keys: {sorted(unknown)}")
     for key, value in list(values.items()):
-        if key in {"lengths", "loads", "updates", "distractor_ratios", "calibration_seeds", "context_lengths", "baseline_seeds", "internal_promotion_seeds", "allowed_paths", "protected_paths"}:
+        if key in {"lengths", "loads", "updates", "distractor_ratios", "calibration_seeds", "context_lengths", "prefill_lengths", "decode_context_lengths", "baseline_seeds", "internal_promotion_seeds", "allowed_paths", "protected_paths"}:
             values[key] = tuple(value)
     if cls is MemoryProbeConfig and "stages" in values:
         stages = []
@@ -191,7 +202,7 @@ def load_config(path: str | Path) -> ResearchConfig:
     schema_version = raw.get("schema_version", 1)
     if schema_version != 2:
         raise ConfigError(f"Unsupported schema_version={schema_version}; expected 2")
-    known = {"schema_version", "run", "training", "memory_probe", "evaluation", "decision", "protection"}
+    known = {"schema_version", "run", "training", "memory_probe", "evaluation", "systems", "decision", "protection"}
     unknown = set(raw) - known
     if unknown:
         raise ConfigError(f"Unknown top-level keys: {sorted(unknown)}")
@@ -201,6 +212,7 @@ def load_config(path: str | Path) -> ResearchConfig:
         training=_section(TrainingConfig, raw, "training"),
         memory_probe=_section(MemoryProbeConfig, raw, "memory_probe"),
         evaluation=_section(GeneralEvaluationConfig, raw, "evaluation"),
+        systems=_section(SystemsConfig, raw, "systems"),
         decision=_section(DecisionConfig, raw, "decision"),
         protection=_section(ProtectionConfig, raw, "protection"),
     )
@@ -275,6 +287,14 @@ def validate_config(config: ResearchConfig) -> None:
             raise ConfigError("the complete RULER task family requires a 4096-token training lane")
         if evaluation.ruler_enabled and (not evaluation.ruler_manifest or len(evaluation.ruler_manifest_sha256) != 64):
             raise ConfigError("enabled RULER evaluation requires a manifest path and SHA-256")
+    systems = config.systems
+    if systems.enabled:
+        if systems.compile_timeout_seconds <= 0 or systems.warmup_steps < 0 or systems.timed_steps <= 0:
+            raise ConfigError("systems timing budgets must be positive")
+        if not systems.prefill_lengths or not systems.decode_context_lengths:
+            raise ConfigError("systems prefill/decode lengths must be non-empty")
+        if max((*systems.prefill_lengths, *systems.decode_context_lengths)) > train.sequence_length:
+            raise ConfigError("systems lengths must not exceed the trained sequence length")
     if probe.enabled:
         if probe.protocol_version != "associative_recall_v2":
             raise ConfigError(f"Unsupported memory probe protocol: {probe.protocol_version}")

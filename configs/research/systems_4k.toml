@@ -1,0 +1,67 @@
+schema_version = 2
+
+[run]
+name = "systems-4k"
+suite = "discovery"
+artifact_root = "runs"
+seed = 42
+
+[training]
+seconds = 300.0
+tokens = 0
+depth = 6
+head_dim = 128
+sequence_length = 4096
+device_batch_size = 2
+total_batch_size = 32768
+window_pattern = "L"
+sliding_window = 256
+force_final_full = true
+eval_tokens = 1048576
+precision = "bfloat16"
+kda_backend = "fla_triton"
+
+
+[evaluation]
+enabled = true
+protocol = "general_lm"
+context_lengths = [128, 256, 512, 1024, 2048, 4096]
+target_tokens = 64
+max_documents = 64
+source_documents = 8192
+core_enabled = true
+core_manifest = "eval_bundle.manifest.json"
+core_manifest_sha256 = "1da36d32981a35fedc18fb655097153f42a33723611d0bd622bdfc01dd0d877d"
+ruler_enabled = true
+ruler_manifest = "ruler-ground-truth/manifest.json"
+ruler_manifest_sha256 = "c5a0e086e54dbe38e7ed0eb077e7d78072d7ef3ebef88f5f6f16a75779418cd0"
+core_max_per_task = 100
+
+[systems]
+enabled = true
+compile_timeout_seconds = 120.0
+warmup_steps = 3
+timed_steps = 10
+prefill_lengths = [1024, 4096]
+decode_context_lengths = [1024, 4096]
+
+[decision]
+bpb_floor = 0.002
+throughput_floor_fraction = 0.03
+memory_floor_fraction = 0.02
+baseline_seeds = [11, 23, 37, 53, 71]
+internal_promotion_seeds = [101, 211, 307]
+confirmation_seed_count = 5
+
+[protection]
+allowed_paths = ["nanochat/gpt.py", "nanochat/mixers/", "configs/candidates/"]
+protected_paths = [
+  "nanochat/research/",
+  "configs/research/",
+  "scripts/base_eval.py",
+  "nanochat/core_eval.py",
+  "nanochat/loss_eval.py",
+  "nanochat/dataloader.py",
+  "nanochat/dataset.py",
+  "nanochat/tokenizer.py",
+]

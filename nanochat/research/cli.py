@@ -12,6 +12,7 @@ from nanochat.research.decision import aggregate_objectives, calibrate_objective
 from nanochat.research.probe import run_memory_probe
 from nanochat.research.protected import initialize_supervisor, verify_protected
 from nanochat.research.runner import calibrate_memory_probe, doctor, prepare_data, render_report, run_experiment
+from nanochat.research.systems import run_system_benchmark
 from nanochat.research.supervisor import format_command, sandbox_command, sign_result, verify_candidate
 
 
@@ -48,6 +49,11 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--skip-probe", action="store_true")
     run_parser.add_argument("--seeds", help="comma-separated declared seeds for a sequential campaign")
     run_parser.add_argument("--confirmation-seeds", help=argparse.SUPPRESS)
+
+    systems_parser = sub.add_parser("systems", help="run the frozen bounded systems benchmark")
+    systems_parser.add_argument("--config", default="configs/research/systems_4k.toml")
+    systems_parser.add_argument("--candidate", help="architecture-only candidate TOML applied to the frozen protocol")
+    systems_parser.add_argument("--artifact-root")
 
     report_parser = sub.add_parser("report", help="render a comparison from summary JSON files")
     report_parser.add_argument("summaries", nargs="+")
@@ -147,6 +153,13 @@ def main(argv=None) -> int:
             print(f"summary_path: {Path(args.artifact_root or config.run.artifact_root) / result['run_id'] / 'summary.json'}")
             _json(result)
             return 0 if result.get("status") in {"complete", "diagnostic"} else 1
+        if args.command == "systems":
+            config = load_config(args.config)
+            if args.candidate:
+                config = apply_candidate(args.candidate, config)
+            result = run_system_benchmark(root, config, args.artifact_root)
+            _json(result)
+            return 0 if result["status"] == "complete" else 1
         if args.command == "report":
             report = render_report(_load_summaries(args.summaries))
             if args.output:

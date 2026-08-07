@@ -6,6 +6,7 @@ import pytest
 import torch
 
 from nanochat.research.config import ConfigError, GeneralEvaluationConfig, ResearchConfig, TrainingConfig, validate_config
+from nanochat.research.systems import summarize_warm_steps
 from nanochat.research.general_eval import collect_suffix_examples, prepared_core_bundle, prepared_ruler_manifest, ruler_match_score, score_context_curve
 
 
@@ -106,3 +107,16 @@ def test_complete_ruler_is_rejected_below_its_supported_context_lane():
     )
     with pytest.raises(ConfigError, match="4096-token"):
         validate_config(config)
+
+
+def test_systems_summary_excludes_warmup_and_requires_timed_steps():
+    steps = [
+        {"step_seconds": 9.0, "tokens_per_second": 1.0},
+        {"step_seconds": 3.0, "tokens_per_second": 10.0},
+        {"step_seconds": 5.0, "tokens_per_second": 6.0},
+    ]
+    result = summarize_warm_steps(steps, 1)
+    assert result["step_seconds"]["median"] == 4.0
+    assert result["tokens_per_second"]["median"] == 8.0
+    with pytest.raises(ValueError, match="no timed"):
+        summarize_warm_steps(steps, 3)
