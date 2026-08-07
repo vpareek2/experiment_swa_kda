@@ -742,3 +742,39 @@ research speed-supervisor run --attempt 7
 - Determine whether GB10-valid larger FLA tiles can be exposed through a
   mixer-local, resource-checked configuration without patching the installed
   package/toolchain. Stop this axis if that cannot be done defensibly.
+
+
+## 2026-08-07 [agent] reject attempt 8 SM121 high-shared-memory FLA candidates
+
+**Context**
+
+- Candidate `c95e786` temporarily mapped FLA's default 102,400-byte import
+  check to its existing ADA 101,376-byte threshold only on homogeneous,
+  resource-verified SM121. It restored all bindings after import and exposed
+  the installed BK/BS 64 autotune candidates without modifying site packages.
+
+**Commands**
+
+```bash
+research speed-supervisor run --attempt 8
+```
+
+**Artifacts**
+
+- Ledger attempt 8; ignored artifacts:
+  `runs/speed-supervisor/c50c1dfdddc6/attempt-00008/`.
+- Candidate branch: `origin/kda-speed/attempt-008` at `c95e786`.
+
+**Result**
+
+- Import restoration smoke and correctness passed. Baseline was 44,142.5
+  tok/s with 0.12% drift. Candidate was 43,970 tok/s, a 0.39% regression.
+- Profile improved only 2.48 ms; broader installed tile candidates did not
+  yield a material selected configuration at this shape.
+- Decision: `not_improved`; not merged.
+
+**Next**
+
+- Audit remaining compliant mixer-local opportunities against the approximately
+  22 ms/update required for a 3% gain. Stop on plateau if only previously
+  sub-threshold combinations or invasive recurrence/kernel rewrites remain.
