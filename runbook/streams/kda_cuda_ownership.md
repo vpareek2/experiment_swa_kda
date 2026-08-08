@@ -827,3 +827,46 @@ git -C "$WORKTREE" \
   naive native `chunk_forward` plus `chunk_backward` atomic unit, preserve all
   three retained operators, and require the same staged checker, exact handoff,
   authoritative supervisor run, evidence review, and explicit retention.
+
+## 2026-08-08 [agent] launch final naive chunk migration
+
+**Context**
+
+- Retained milestone 3 owns recurrent decode and causal-convolution
+  forward/backward for exact 40% project-owned CUDA coverage.
+- The only remaining atomic unit is `chunk_forward` plus `chunk_backward` (60%).
+  Completing it correctly should produce the first fully project-owned,
+  runtime-FLA-free naive CUDA milestone before any optimization.
+
+**Commands**
+
+```bash
+git worktree add -b kda-cuda/chunk-migration-003 \
+  ../experiment_swa_kda_cuda_attempt_003 \
+  146e9090a6823a9e87c91114e4eec1b8852a6836
+```
+
+**Artifacts**
+
+- Candidate worktree: `../experiment_swa_kda_cuda_attempt_003`.
+- Candidate branch: `kda-cuda/chunk-migration-003`.
+- Exact base: `146e9090a6823a9e87c91114e4eec1b8852a6836`.
+
+**Result**
+
+- A fresh clean attempt-3 worktree was created from the exact retained head.
+- Autonomous implementation work was delegated with candidate scope limited to
+  ordinary naive CUDA source under `nanochat/mixers/cuda_kda/`. It must preserve
+  the three retained units, implement chunk forward/backward atomically, use no
+  PTX or optimization, and leave protected code, the README, ledger, supervisor,
+  and runbook untouched.
+- No attempt-3 source change, staged checker, commit, intake, supervisor run, or
+  retention exists yet.
+
+**Next**
+
+- Review the source and narrow direct evidence, stage only the intended candidate
+  files, and require a fresh complete migration checker with runtime FLA-free
+  100% ownership, five distinct operators/kernel symbols, and all four genuine
+  claimed-only sanitizer summaries before exact commit/push and supervisor
+  intake.
