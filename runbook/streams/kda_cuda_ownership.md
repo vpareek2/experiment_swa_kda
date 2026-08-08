@@ -1487,3 +1487,61 @@ git push origin refs/tags/kda-cuda-ownership-controller-timeout-refreeze
   censored naive candidate observation to complete or fail honestly; review all
   five-unit/runtime-FLA-free evidence before retaining the fresh immutable
   milestone.
+
+## 2026-08-08 [agent] reconstruct complete FLA-free milestone
+
+**Context**
+
+- Fresh milestones 2 and 3 retained recurrent and convolution ownership. The
+  final migration reconstruction reran exact chunk candidate `4d1a3b231...`
+  under the extended kernel ceiling rather than copying the old censored result.
+
+**Commands**
+
+```bash
+.venv/bin/research cuda-ownership-supervisor intake \
+  --config configs/research/kda_cuda_ownership.toml \
+  --base-ref 146e9090a6823a9e87c91114e4eec1b8852a6836 \
+  --candidate-ref 4d1a3b231da2c99882324efbda5306a1815e21c7 \
+  --hypothesis "<original verbatim deterministic naive chunk hypothesis>"
+.venv/bin/research cuda-ownership-supervisor run \
+  --config configs/research/kda_cuda_ownership.toml --attempt 3
+.venv/bin/research cuda-ownership-supervisor retain \
+  --config configs/research/kda_cuda_ownership.toml --attempt 3 \
+  --label "naive FLA-free project CUDA milestone" --reason "<fresh evidence>"
+```
+
+**Artifacts**
+
+- Fresh attempt:
+  `runs/cuda-ownership-supervisor/6fdb0ec11d7e/attempt-00003`.
+- Complete candidate-kernel payload SHA-256
+  `cac190f7bea0f915fc7c2d8f5d099868295743ca406e3d29df510b8e2c2236e0`.
+- Authoritative isolated mapped library SHA-256
+  `4bb92fe51b22d181bef08894a0d3a5673fe233fae74c97e71448b51cdf99b4e8`.
+
+**Result**
+
+- The fresh attempt completed 52 protected tests, all 21 runtime checks, exact
+  ownership increase from 40% to 100%, runtime FLA freedom, no forbidden
+  attempts or selective PTX, all five operator traces and independent Nsight
+  symbols, exact SM121 source/library provenance, and genuine zero summaries
+  from all four sanitizer tools.
+- Unlike the old protocol, the naive candidate kernel worker completed rather
+  than being censored: 18 migration rows in 286.865 seconds. At T=1024 its
+  chunk forward/backward median was 6,700.671 ms; maximum regression was
+  2,210.945x. Migration performance is advisory, so this is an honest slowness
+  observation and no speed, memory, stability, or quality improvement claim.
+- Independent review passed. Exact `4d1a3b231...` is retained as fresh milestone
+  4 / `fla_free_naive`, with all five owner units and runtime FLA freedom. The
+  derived lane is now optimization.
+
+**Next**
+
+- Intake only exact pushed child `613b0759...` from this retained parent with
+  its original Nsight-supported hypothesis. Run all strict optimization gates
+  unchanged. The parent kernel worker may take roughly 35 minutes and each of
+  nine parent training blocks roughly 2.5 hours; let them finish within the
+  new 3,600/13,500-second ceilings. Retain only if both kernel workers, all nine
+  alternating pairs, confidence interval, memory, kernel, drift, ownership,
+  correctness, profile, and sanitizer gates pass.
