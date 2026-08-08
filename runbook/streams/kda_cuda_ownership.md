@@ -642,3 +642,112 @@ PYTHONPATH="$COORD" TORCH_EXTENSIONS_DIR=/tmp/kda-state-gradient-controller-cach
 - Commit/tag/push the state-gradient controller, initialize/calibrate its fresh
   ledger, rerun and retain exact recurrent attempt 1 under that protocol, then
   resume the paused convolution candidate and require it to pass the new cases.
+
+## 2026-08-08 [agent] reconstruct recurrent retention and qualify convolution migration
+
+**Context**
+
+- The state-gradient-gated controller is immutable at
+  `56faf5da7f5080c50a22fc666eba32dd6cab9981` under tag
+  `kda-cuda-ownership-controller-state-gradient-gates`; remote `main` and the
+  peeled tag were already verified at that SHA.
+- Its fresh protocol
+  `ba64643fd7fd764bab39f99ea83ecf3805522fab3005516f29079806e32a46cf`
+  calibrated Python and FLA recurrent medians at 0.1708479971 ms and
+  0.0468800012 ms. The superseded `d30336f6...` and `df188a2c...` ledgers
+  remain preserved and were not reused or deleted.
+- Reconstructed attempt 1 was complete and eligible as `correct_bootstrap`, but
+  had not yet advanced the append-only retained head. Attempt 2 remained an
+  uncommitted three-file convolution migration candidate from that recurrent
+  SHA.
+
+**Commands**
+
+```bash
+WORKTREE=../experiment_swa_kda_cuda_attempt_002
+.venv/bin/research cuda-ownership-supervisor summary \
+  --config configs/research/kda_cuda_ownership.toml --attempt 1
+.venv/bin/research cuda-ownership-supervisor retain \
+  --config configs/research/kda_cuda_ownership.toml --attempt 1 \
+  --label "naive recurrent decode bootstrap" \
+  --reason "Reconstructed under the state-gradient-gated controller; protected correctness, 20% native ownership, build/runtime/Nsight evidence, and all four claimed-unit sanitizer gates completed."
+git -C "$WORKTREE" add -- \
+  nanochat/mixers/cuda_kda/__init__.py \
+  nanochat/mixers/cuda_kda/causal_convolution_forward.cu \
+  nanochat/mixers/cuda_kda/causal_convolution_backward.cu
+.venv/bin/research cuda-candidate-check \
+  --config configs/research/kda_cuda_ownership.toml \
+  --worktree "$WORKTREE" \
+  --lane migration \
+  --artifact-dir /tmp/kda-cuda-attempt-002-check-001 \
+  --extension-cache /tmp/kda-cuda-attempt-002-check-001/torch-extensions \
+  --cuda-cache /tmp/kda-cuda-attempt-002-check-001/cuda-cache --sanitizers
+git -C "$WORKTREE" \
+  commit -m "Add naive CUDA causal convolution"
+git -C "$WORKTREE" \
+  push origin HEAD:kda-cuda/convolution-migration-002
+```
+
+**Artifacts**
+
+- Reconstructed authoritative attempt:
+  `runs/cuda-ownership-supervisor/ba64643fd7fd/attempt-00001`; the missing
+  `summary.json` was materialized byte-for-byte from
+  `/tmp/kda-ba64643f-attempt1.json` with SHA-256
+  `d99c2c76038e6bdf13aca4e95c81d5ad8d258eef095b9237286ba904cbce1dfd`.
+- Preserved frozen-tolerance failure:
+  `/tmp/kda-cuda-attempt-002-direct-001/parity.log`.
+- Corrected direct evidence:
+  `/tmp/kda-cuda-attempt-002-direct-002/{exact-t3-after,all-direct-gradients,new-controller-conv-gates}.log`.
+- Complete ledger-free checker:
+  `/tmp/kda-cuda-attempt-002-check-001/summary.json`.
+- Candidate commit `146e9090a6823a9e87c91114e4eec1b8852a6836`, pushed branch
+  `kda-cuda/convolution-migration-002`, exact parent
+  `da1dea938d37618306c8dfaf82b5f06ac8628c6c`.
+
+**Result**
+
+- Reconstructed attempt 1's runtime, Nsight, build, ownership, and all four
+  sanitizer artifacts were independently inspected. The four raw logs report
+  genuine zero-error/zero-hazard summaries, the runtime artifact includes all
+  five state-gradient cases, and no candidate forbidden import was attempted.
+  Retention advanced only the ledger head to recurrent commit `da1dea9...`, 20%
+  ownership, owner set `recurrent_decode`, and derived the `migration` lane; no
+  candidate was merged.
+- The first convolution source, SHA-256
+  `a44674dacc151649c2e19593c037c15fe9a542175baeba5261fd4d70c1cfd03e`,
+  genuinely failed the exact `T=3` sample: 1/42 unequal outputs, maximum
+  absolute difference 0.03125, and maximum relative difference
+  0.0076904296875 at frozen 0.005 tolerances. The evidence remains preserved.
+- Rounding each BF16 product before FP32 reduction and the reduced
+  preactivation to BF16 before FP32 SiLU, then recomputing backward from that
+  same rounded preactivation, fixed the failure without relaxing tolerances.
+  The corrected forward/backward source hashes are
+  `02ef44d8e46d4f0d0ce5d8ae0afa95afbe4d3415362209ff3d29a918aae6d4e6`
+  and `c8b88abdc4fed560d4c64ec0fc5806cd5df59273af397a8d94375f4aefffb98c`;
+  retained recurrent remained byte-identical at
+  `c6c1b5704d062b18c5af93092c380c09ca5d3420d1dfaf2a0c44f1a0bc319f91`.
+- The exact staged snapshot passed the current ledger-free migration checker.
+  Its runtime audit completed 21 checks including all five cache-gradient
+  cases, with exact 40% ownership: recurrent and both convolution units project-
+  owned, both chunk units third-party. It recorded no forbidden candidate import
+  attempts, the isolated-cache library SHA-256
+  `3bd4add77927e9d1fc691df0302717b4fce4c5d7e281b79f95639288e6acd322`,
+  actual `compute_121,sm_121` compiler commands, and all reviewed source hashes.
+- Protected operator tracing observed three distinct `nanochat_kda::` operators;
+  Nsight independently observed recurrent, convolution-forward, and convolution-
+  backward kernel symbols. Memcheck, racecheck, synccheck, and initcheck executed
+  only the three claimed components and reported genuine zero-error/zero-hazard
+  summaries. The recorded staged patch was 20,691 bytes with SHA-256
+  `a68f5bf2c91d11a8897c2fca902cd93d11a4b270641e59c3d27c1f9749dd0b1e`,
+  exactly matching the committed snapshot.
+- Independent static review found no ABI, indexing, gradient, BF16, provenance,
+  scope, or ownership blocker. The candidate branch is pushed, its worktree is
+  clean, and the remote SHA equals the local SHA.
+
+**Next**
+
+- Commit and push this runbook update so the coordinator is clean. Intake exact
+  candidate `146e9090...` from retained base `da1dea9...` with the declared
+  hypothesis, run every protected supervisor phase, and retain only after a
+  complete reviewed `validated_component` ownership-progress decision.
