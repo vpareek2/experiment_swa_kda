@@ -990,3 +990,90 @@ git -C "$WORKTREE" push origin HEAD:kda-cuda/chunk-migration-003
   hypothesis, run and inspect every authoritative supervisor phase, and retain
   the immutable naive fully project-owned CUDA milestone only if eligibility is
   `fla_free_naive`, runtime is FLA-free, and all mandatory evidence completes.
+
+## 2026-08-08 [agent] retain immutable naive FLA-free CUDA milestone
+
+**Context**
+
+- The complete staged checker was diagnostic; the first fully project-owned
+  CUDA backend still required exact clean intake, an authoritative supervisor
+  attempt, explicit evidence review, and append-only retention.
+- Migration performance is observational. The naive chunk backward is expected
+  to be unsuitable for optimization until parallelized, so a frozen performance
+  timeout must be reported as a censored observation rather than a poor score or
+  a correctness failure.
+
+**Commands**
+
+```bash
+.venv/bin/research cuda-ownership-supervisor intake \
+  --config configs/research/kda_cuda_ownership.toml \
+  --base-ref 146e9090a6823a9e87c91114e4eec1b8852a6836 \
+  --candidate-ref 4d1a3b231da2c99882324efbda5306a1815e21c7 \
+  --hypothesis 'A deterministic naive CUDA migration unit can implement chunk forward with one independent thread per [B,H,V] recurrence and chunk backward with one deterministic thread per head, recomputing FP32 state history and reverse-mode adjoints without atomics. This should exactly preserve V-first state/FP32 recurrence semantics, expose distinct chunk forward/backward kernels, make all five components project-owned and runtime FLA-free, while accepting intentionally poor observational performance/memory.'
+.venv/bin/research cuda-ownership-supervisor run \
+  --config configs/research/kda_cuda_ownership.toml --attempt 3
+.venv/bin/research cuda-ownership-supervisor retain \
+  --config configs/research/kda_cuda_ownership.toml --attempt 3 \
+  --label 'naive FLA-free project CUDA milestone' \
+  --reason '<exact reviewed protected evidence and advisory-timeout qualification>'
+.venv/bin/research cuda-ownership-supervisor report \
+  --config configs/research/kda_cuda_ownership.toml --format json
+```
+
+**Artifacts**
+
+- Authoritative attempt:
+  `runs/cuda-ownership-supervisor/ba64643fd7fd/attempt-00003`.
+- Complete materialized run result: `attempt-00003/summary.json`, SHA-256
+  `648dad978e0ded68bfe3ecd0d38edb66468562ab9c4c1177d573b7eab36c1f44`.
+- Candidate performance log is preserved as
+  `attempt-00003/candidate-kernel.log`; the censored run emitted no
+  `candidate-kernel.json`.
+- Retained milestone 4, ordinal 3, commit
+  `4d1a3b231da2c99882324efbda5306a1815e21c7`.
+- Immutable report anchor `fla_free_naive` points to that exact commit and
+  authoritative artifact.
+
+**Result**
+
+- Intake accepted only `__init__.py` and `chunk.cu` from exact direct-child
+  commit `4d1a3b2...`. Its 30,030-byte controller-normalized patch has SHA-256
+  `10837dd19f68a5e374d64efaa745f7092b9971ab37599e30b34b5bd3e809c32a`,
+  exactly matching the committed 30,031-byte binary diff after documented
+  terminal-newline stripping.
+- The authoritative attempt completed 52 protected tests, all 21 runtime checks,
+  ownership profile, all four sanitizers, and the baseline observation.
+  Eligibility is `fla_free_naive`; migration is `migration_ready`; exact
+  ownership is 100% across all five units; runtime is FLA-free; loaded forbidden
+  modules and forbidden candidate attempts are both empty.
+- The authoritative isolated mapped library has SHA-256
+  `12f839d387771707f6905e25cc0933f0f3df503e3c0b95ccac62756e8b22433e`.
+  It binds the exact four `.cu` source hashes and actual
+  `compute_121,sm_121` compiler commands. Five registered operators and all five
+  declared kernel symbols were independently observed by protected tracing and
+  Nsight.
+- Memcheck, synccheck, and initcheck each report zero errors. Racecheck reports
+  zero hazards, errors, and warnings. Each sanitizer ran exactly the five
+  project-owned components and recorded no forbidden import attempt.
+- The candidate kernel observation reached the frozen 180-second limit and
+  emitted no JSON. The controller explicitly treats this as an advisory timeout
+  in migration, so the overall attempt correctly remains complete with
+  performance decision `observed`, `advisory=true`, and a 180-second censored
+  observation. It supports no performance, memory, throughput, quality, or
+  stability claim.
+- Explicit retention advanced only the append-only ledger head. The report now
+  contains immutable `fla_free_naive` anchor commit `4d1a3b2...`, labeled
+  `First complete FLA-free naive CUDA backend`, and derives the `optimization`
+  lane. No Git merge, tag movement, default-backend switch, or quality training
+  occurred.
+
+**Next**
+
+- Commit and push this runbook update. Begin optimization only from exact
+  retained commit `4d1a3b2...` in a fresh worktree, keep all five units
+  project-owned and runtime FLA-free, and choose a profile-supported hypothesis.
+  First remove the naive chunk backward's serial-head trajectory bottleneck so
+  the protected 4k matched candidate observation can complete; then require the
+  full optimization correctness/profile/sanitizer gates and nine alternating
+  matched 4k parent/candidate blocks before any retention claim.
