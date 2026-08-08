@@ -1077,3 +1077,56 @@ git -C "$WORKTREE" push origin HEAD:kda-cuda/chunk-migration-003
   the protected 4k matched candidate observation can complete; then require the
   full optimization correctness/profile/sanitizer gates and nine alternating
   matched 4k parent/candidate blocks before any retention claim.
+
+## 2026-08-08 [agent] profile naive bottleneck and launch first optimization
+
+**Context**
+
+- Milestone 4 is the immutable first complete project-owned CUDA backend and the
+  ledger derives the strict optimization lane.
+- Its migration performance observation was censored, so the first optimization
+  needs a profile-supported single-axis hypothesis without treating the timeout
+  as a numeric score.
+
+**Commands**
+
+```bash
+# Exact retained implementation, one T=65 production-shape forward/backward.
+nsys profile --trace=cuda,nvtx,osrt --sample=none \
+  -o /tmp/kda-naive-profile-001/naive-t65 \
+  .venv/bin/python /tmp/kda-naive-profile-001/profile_naive.py
+nsys stats --report cuda_gpu_kern_sum --format csv \
+  /tmp/kda-naive-profile-001/naive-t65.nsys-rep
+git worktree add -b kda-cuda/chunk-backward-parallel-004 \
+  ../experiment_swa_kda_cuda_attempt_004 \
+  4d1a3b231da2c99882324efbda5306a1815e21c7
+```
+
+**Artifacts**
+
+- Nsight report: `/tmp/kda-naive-profile-001/naive-t65.nsys-rep`.
+- Kernel summary: `/tmp/kda-naive-profile-001/cuda_gpu_kern_sum.csv`.
+- Candidate worktree: `../experiment_swa_kda_cuda_attempt_004`.
+- Branch: `kda-cuda/chunk-backward-parallel-004`; exact base
+  `4d1a3b231da2c99882324efbda5306a1815e21c7`.
+
+**Result**
+
+- Nsight attributes 418.410944 ms, or 99.2% of captured GPU kernel time, to the
+  single-thread-per-head naive chunk-backward kernel at T=65, K=V=128. Chunk
+  forward used 3.249216 ms, or 0.8%. This is profile localization, not a matched
+  optimization result or quality claim.
+- The first optimization candidate was delegated with one primary axis:
+  parallelize chunk backward/state-history work using ordinary project-owned
+  CUDA while preserving all five ownership claims, runtime FLA freedom, exact
+  ABI/math, and sanitizer safety. PTX and unrelated changes remain excluded.
+- No optimization source change, staged checker, commit, intake, matched
+  training block, or retention exists yet.
+
+**Next**
+
+- Require exact direct parity and matched local timing, then a full staged
+  optimization checker with all ownership/profile/sanitizer gates. Before
+  authoritative intake, account explicitly for the retained parent's censored
+  kernel behavior; do not weaken the strict optimization baseline, candidate,
+  nine-pair training, memory, drift, or confidence gates.
