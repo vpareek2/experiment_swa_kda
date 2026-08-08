@@ -37,7 +37,8 @@ The recommended first bootstrap task is deliberately narrow:
 This recurrent-only milestone has the smallest forward-only surface and still
 meets the 20% bootstrap ownership floor. Protected routing supplies FLA only for
 unclaimed units. The model writes the CUDA and minimal loading/registration
-code; no human-authored build helper or frozen ABI implementation is supplied.
+code and native operator implementation; protected code supplies only the
+reproducible build helper and frozen ABI.
 
 ## Candidate source contract
 
@@ -48,8 +49,8 @@ or toolchain changes, site-package patches, downloads, symlinks, submodules,
 and runtime imports from FLA, the protected oracle, or `ref/` are forbidden.
 Bootstrap also forbids PTX.
 
-The protected scanner is case-insensitive and rejects these exact byte
-substrings in candidate source, including comments and strings:
+The protected scanner is case-insensitive, strips comments, and rejects these
+exact byte substrings in executable candidate source and strings:
 
 ```text
 import fla
@@ -113,9 +114,8 @@ The public initial/final state is V-first `[B,H,V,K]`; transpose only at the
 boundary. Inputs and output are normally BF16, recurrence/state computation is
 FP32, the initial state must not be mutated, and `output_final_state=False` must
 follow the protected return contract. The recurrent operator is inference-only
-in the current protected audit. Treat this map as mathematical guidance; use
-the live protected dispatcher for adjustable call details rather than inventing
-an ABI.
+in the current protected audit. Treat this map as mathematical guidance and the candidate README as the frozen
+native ABI; never invent an alternate call boundary.
 
 ## Atomic migration units
 

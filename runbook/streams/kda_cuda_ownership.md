@@ -379,3 +379,58 @@ git worktree add -b kda-cuda/recurrent-bootstrap-001 \
 
 - Require a clean pushed candidate, full ledger-free checker including all four
   sanitizers, and exact handoff. Independently verify it before intake.
+
+
+## 2026-08-08 [agent] repair protected transitional launch blockers
+
+**Context**
+
+- The first staged recurrent candidate compiled and produced complete 20%
+  ownership provenance, but ledger-free checking exposed three deterministic
+  protected-controller defects before any candidate could pass.
+- No candidate had been intaken, so the initialized/calibrated protocol could be
+  preserved as blocked evidence and restarted without rewriting an attempt.
+
+**Commands**
+
+```bash
+.venv/bin/research cuda-candidate-check ...   --artifact-dir /tmp/kda-cuda-attempt-001-check
+.venv/bin/research cuda-candidate-check ...   --artifact-dir /tmp/kda-cuda-attempt-001-check-002
+mv runs/kda-cuda-ownership.sqlite3   runs/kda-cuda-ownership-blocked-d30336f6.sqlite3
+uv run --no-sync python -m pytest -q
+```
+
+**Artifacts**
+
+- First ledger-free failure: `/tmp/kda-cuda-attempt-001-check/summary.json`.
+- Second ledger-free failure:
+  `/tmp/kda-cuda-attempt-001-check-002/summary.json`.
+- Preserved blocked ledger: ignored
+  `runs/kda-cuda-ownership-blocked-d30336f6.sqlite3`; its calibration artifact
+  remains under protocol directory `d30336f61d10`.
+
+**Result**
+
+- The mandatory build helper returned target `12.1` while provenance used a
+  non-canonical lexical `121` check. The helper now reports `sm_121`, and the
+  audit requires both `compute_121` and `sm_121` in the real compiler command.
+- The runtime import blocker deleted/blocked protected FLA needed by explicitly
+  unclaimed transitional units. It now blocks forbidden imports only when a
+  candidate-source frame is active, while allowing protected transitional
+  routing.
+- Profile audit instantiated `_NativeOperatorRecorder` with an unsupported
+  argument. The call now matches the protected recorder API.
+- Regression tests cover scoped import blocking, canonical build receipts,
+  compiler evidence, and recorder invocation. Full validation passed:
+  `174 passed, 10 skipped`.
+- The controller ref is intentionally changed to a new immutable tag, so the
+  previous protocol/ledger is not reused. Candidate sources remain staged and
+  unchanged; direct native-op parity checks passed random/extreme shapes and
+  chained recurrent state with zero BF16 output delta and FP32 state delta at
+  most 3.58e-07.
+
+**Next**
+
+- Commit/tag/push the repaired controller, initialize and calibrate its new
+  protocol, remove the candidate's temporary receipt normalization, and rerun
+  the complete checker with sanitizers.

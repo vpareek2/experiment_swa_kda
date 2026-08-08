@@ -448,3 +448,25 @@ def test_candidate_checker_rejects_protected_readme_change(tmp_path):
     git(root,"add",str(readme.relative_to(root)))
     with pytest.raises(ValueError,match="protected read-only"):
         inspect_staged_candidate(root,config)
+
+
+def test_forbidden_runtime_finder_scopes_blocks_to_candidate_importer(tmp_path):
+    from nanochat.research.cuda_worker import _ForbiddenRuntimeFinder
+    candidate_root=tmp_path/"nanochat/mixers/cuda_kda"; candidate_root.mkdir(parents=True)
+    candidate_file=candidate_root/"dynamic.py"
+    finder=_ForbiddenRuntimeFinder(("fla",),candidate_root)
+    assert finder.find_spec("fla") is None  # protected caller may load transitional fallback
+    code=compile("finder.find_spec('fla')",str(candidate_file),"exec")
+    with pytest.raises(ModuleNotFoundError,match="candidate runtime module forbidden"):
+        exec(code,{"finder":finder})
+    assert finder.attempts==["fla"]
+
+
+def test_profile_recorder_and_sm121_receipt_launch_fixes_are_pinned():
+    worker=(ROOT/"nanochat/research/cuda_worker.py").read_text()
+    helper=(ROOT/"nanochat/research/cuda_build.py").read_text()
+    assert '_NativeOperatorRecorder("nanochat_kda")' not in worker
+    assert 'valid_target=target_arch in {"12.1","sm_121"}' in worker
+    assert '"compute_121" in compiler_command and "sm_121" in compiler_command' in worker
+    assert worker.count('_ForbiddenRuntimeFinder(config.ownership.forbid_runtime_modules, root / config.campaign.candidate_paths[0])')==2
+    assert '"target_arch": "sm_121"' in helper

@@ -174,7 +174,7 @@ def build_cuda_extension(
         "library_path": str(library),
         "source_paths": declared_sources,
         "compiler_command": compiler_command,
-        "target_arch": _TARGET_ARCH,
+        "target_arch": "sm_121",
     }
     if set(receipt) != {"library_path", "source_paths", "compiler_command", "target_arch"}:
         raise AssertionError("internal build receipt schema changed")

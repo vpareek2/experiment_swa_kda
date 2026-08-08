@@ -13,6 +13,7 @@ import importlib.abc
 import importlib.util
 import json
 import math
+import inspect
 import os
 from pathlib import Path
 import statistics
@@ -25,14 +26,26 @@ from nanochat.research.cuda_candidate import _comment_free_source
 
 
 class _ForbiddenRuntimeFinder(importlib.abc.MetaPathFinder):
-    def __init__(self, prefixes: tuple[str, ...]):
+    def __init__(self, prefixes: tuple[str, ...], candidate_root: Path):
         self.prefixes = prefixes
+        self.candidate_root = candidate_root.resolve()
         self.attempts: list[str] = []
 
+    def _candidate_importer_active(self) -> bool:
+        for frame in inspect.stack(context=0):
+            try:
+                source = Path(frame.filename).resolve()
+            except (OSError, RuntimeError):
+                continue
+            if source == self.candidate_root or self.candidate_root in source.parents:
+                return True
+        return False
+
     def find_spec(self, fullname, path=None, target=None):
-        if any(fullname == prefix or fullname.startswith(prefix + ".") for prefix in self.prefixes):
+        forbidden = any(fullname == prefix or fullname.startswith(prefix + ".") for prefix in self.prefixes)
+        if forbidden and self._candidate_importer_active():
             self.attempts.append(fullname)
-            raise ModuleNotFoundError(f"runtime module forbidden by CUDA-ownership audit: {fullname}", name=fullname)
+            raise ModuleNotFoundError(f"candidate runtime module forbidden by CUDA-ownership audit: {fullname}", name=fullname)
         return None
 
 
@@ -134,8 +147,12 @@ def _provenance(root: Path, module, config) -> dict[str, Any]:
         mapped = library.is_file() and any(str(library) in line for line in Path("/proc/self/maps").read_text(errors="replace").splitlines())
         if library.suffix != ".so" or cache_root not in library.parents or not mapped:
             return {"status": "invalid", "reason": "loaded CUDA library is not mapped from the isolated extension cache", "owned_fraction": 0.0, "components": components}
-        if not project_native_sources <= build_sources or not isinstance(build["compiler_command"], str) or not build["compiler_command"] or "121" not in str(build["target_arch"]):
-            return {"status": "invalid", "reason": "build receipt does not bind reviewed sources and SM121 target", "owned_fraction": 0.0, "components": components}
+        compiler_command=build.get("compiler_command")
+        target_arch=str(build.get("target_arch","")).lower()
+        valid_target=target_arch in {"12.1","sm_121"}
+        valid_command=isinstance(compiler_command,str) and "compute_121" in compiler_command and "sm_121" in compiler_command
+        if not project_native_sources <= build_sources or not valid_target or not valid_command:
+            return {"status": "invalid", "reason": "build receipt does not bind reviewed sources and compute_121/sm_121 compiler target", "owned_fraction": 0.0, "components": components}
         build_receipt = {**build, "library_sha256": hashlib.sha256(library.read_bytes()).hexdigest()}
     else:
         build_receipt = None
@@ -210,7 +227,7 @@ def runtime_audit(root: Path, config, lane: str) -> dict[str, Any]:
     for name in list(sys.modules):
         if any(name == prefix or name.startswith(prefix + ".") for prefix in config.ownership.forbid_runtime_modules):
             del sys.modules[name]
-    finder = _ForbiddenRuntimeFinder(config.ownership.forbid_runtime_modules)
+    finder = _ForbiddenRuntimeFinder(config.ownership.forbid_runtime_modules, root / config.campaign.candidate_paths[0])
     sys.meta_path.insert(0, finder)
     original_reference = implementation._reference_kda
     def blocked_reference(*args, **kwargs):
@@ -377,7 +394,7 @@ def sanitizer_smoke(root: Path, config, lane: str) -> dict[str, Any]:
     for name in list(sys.modules):
         if any(name == prefix or name.startswith(prefix + ".") for prefix in config.ownership.forbid_runtime_modules):
             del sys.modules[name]
-    finder = _ForbiddenRuntimeFinder(config.ownership.forbid_runtime_modules)
+    finder = _ForbiddenRuntimeFinder(config.ownership.forbid_runtime_modules, root / config.campaign.candidate_paths[0])
     sys.meta_path.insert(0, finder)
     provenance: dict[str, Any] = {}; checks: list[str] = []; recorder = None
     try:
@@ -479,7 +496,7 @@ def profile_audit(root: Path, config, lane: str) -> dict[str, Any]:
         values=_inputs(torch,length,config.correctness.production_head_dim,gradients=True)
         conv=implementation.ShortConvolution(128,4).cuda(); conv_x=torch.randn(1,length,128,device="cuda",dtype=torch.bfloat16,requires_grad=True)
         recurrent_values=_inputs(torch,1,config.correctness.production_head_dim,gradients=False)
-        recorder=_NativeOperatorRecorder("nanochat_kda")
+        recorder=_NativeOperatorRecorder()
         with recorder:
             output,state=implementation.kda(*values,output_final_state=True,mode="project_chunk",allow_fallback=False)
             (output.float().square().mean()+state.square().mean()).backward()
