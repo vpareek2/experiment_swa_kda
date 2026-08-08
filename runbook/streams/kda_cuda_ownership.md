@@ -1130,3 +1130,84 @@ git worktree add -b kda-cuda/chunk-backward-parallel-004 \
   authoritative intake, account explicitly for the retained parent's censored
   kernel behavior; do not weaken the strict optimization baseline, candidate,
   nine-pair training, memory, drift, or confidence gates.
+
+## 2026-08-08 [agent] qualify and preserve parallel chunk-backward candidate
+
+**Context**
+
+- The retained naive profile localized 99.2% of T=65 GPU kernel time to the
+  one-thread-per-head chunk-backward kernel. Attempt 4 changes only that primary
+  axis while preserving the complete five-unit project-owned backend.
+- Exact hypothesis prepared for intake:
+  `Nsight localized 99.2% of retained T=65 GPU kernel time (418.410944 ms) in the one-thread-per-head chunk backward kernel. Replacing that launch with one 128-thread block per head while preserving sequential time, V-first FP32 state recurrence, phase barriers, and deterministic ordered reductions should expose independent value-row, key-column, and state-matrix work, preserve all five project-owned/runtime-FLA-free correctness and sanitizer gates, leave the dominant history workspace unchanged, and let the strict 4k candidate observation complete.`
+
+**Commands**
+
+```bash
+.venv/bin/research cuda-candidate-check \
+  --config configs/research/kda_cuda_ownership.toml \
+  --worktree ../experiment_swa_kda_cuda_attempt_004 \
+  --lane optimization \
+  --artifact-dir /tmp/kda-cuda-attempt-004-check-001/artifact \
+  --extension-cache /tmp/kda-cuda-attempt-004-check-001/torch-extensions \
+  --cuda-cache /tmp/kda-cuda-attempt-004-check-001/cuda-cache \
+  --sanitizers
+git -C ../experiment_swa_kda_cuda_attempt_004 commit \
+  -m "Parallelize CUDA chunk KDA backward"
+git -C ../experiment_swa_kda_cuda_attempt_004 push -u origin \
+  kda-cuda/chunk-backward-parallel-004
+```
+
+**Artifacts**
+
+- Direct/runtime/timing/profile diagnostics:
+  `/tmp/kda-cuda-attempt-004-direct-001`,
+  `/tmp/kda-cuda-attempt-004-runtime-002`,
+  `/tmp/kda-cuda-attempt-004-timing-001`, and
+  `/tmp/kda-cuda-attempt-004-profile-001`.
+- Full ledger-free checker:
+  `/tmp/kda-cuda-attempt-004-check-001/artifact`; summary SHA-256
+  `5f16181e4d2a095750a7b88091d463efe4df324e298e2cbaaf1b01490f795126`.
+- Exact one-file staged patch was 17,476 bytes, SHA-256
+  `b0692916b06b7051396e924373f55f346331daf656258dc011c9e7e30c0e3003`.
+- Candidate source `chunk.cu` SHA-256
+  `ca75d9102f44f202227d4ff25d67181d6ed6b6d3fa5beb33bb51c7183dc1564d`;
+  checker isolated library SHA-256
+  `b59a2979f49d242a853540082aaef3cd4b005c87a921907b9c9b03a5763f8a10`.
+- Candidate commit `613b0759d3b954cae984274b267a83a5c4ac46ff`, exact parent
+  `4d1a3b231da2c99882324efbda5306a1815e21c7`, pushed branch
+  `kda-cuda/chunk-backward-parallel-004`.
+
+**Result**
+
+- The source keeps time sequential but uses a 128-thread block per head to
+  parallelize independent value rows, key columns, and V-by-K adjoint updates.
+  Barriers separate every dependency; reductions are deterministic and no
+  atomics, PTX, FLA route, or extra full-history workspace was introduced.
+- Direct oracle comparisons passed all boundaries, unequal B/H/K/V, nonzero
+  initial state, independent cotangents, tiny normalization, and noncontiguous
+  prefixes. Matched local chunk-backward medians improved from 414.931 to 7.507
+  ms at T=65, 1628.804 to 29.593 ms at T=256, and 6657.708 to 129.976 ms at
+  T=1024, with identical peak allocations. These are diagnostic operator
+  measurements, not protected optimization or training evidence.
+- The full optimization checker completed all 21 runtime checks, exact 1.0
+  ownership, runtime FLA freedom, five operator and five Nsight symbols,
+  provenance, and genuine zero memcheck/racecheck/synccheck/initcheck summaries.
+  Two independent read-only reviews found no staging or checker blocker.
+- Commit and remote branch identity were verified; the candidate worktree is
+  clean. Nothing was merged and the default backend remains unchanged.
+- A frozen-gate entry problem remains separate from candidate validity: the
+  exact retained parent already exhausted migration's 180-second kernel worker
+  at at most T=1024/25 iterations, while optimization demands T=4096/50. Direct
+  evidence measures the parent at 6.658 seconds for one T=1024 backward. The
+  supervisor requires both parent and candidate kernel workers to complete
+  before any of nine matched blocks, and the program freezes those timeouts.
+  This cannot be bypassed or treated as a numeric score.
+
+**Next**
+
+- Intake the exact pushed child and run the authoritative supervisor unchanged
+  to materialize the protected outcome. If the retained-parent kernel worker
+  times out as predicted, record attempt 4 as invalid with exact censored
+  evidence, do not retain or claim optimization, and stop rather than weaken a
+  frozen timeout or skip the nine matched blocks.
