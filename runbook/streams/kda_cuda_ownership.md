@@ -1428,3 +1428,62 @@ git push origin refs/tags/kda-cuda-ownership-controller-timeout-refreeze
   verbatim hypotheses but new evidence-backed retention reasons. Stop on any
   mismatch. Only after the fresh FLA-free milestone is retained may exact
   candidate `613b0759...` re-enter optimization.
+
+## 2026-08-08 [agent] reconstruct recurrent and convolution milestones
+
+**Context**
+
+- The fresh timeout-refreeze ledger was calibrated and contained only its
+  foundation. Reconstruction reruns exact historical candidate commits and
+  hypotheses; it does not import decisions or artifacts from the old ledger.
+
+**Commands**
+
+```bash
+# Attempt 1: exact foundation -> recurrent-only candidate.
+.venv/bin/research cuda-ownership-supervisor intake ... \
+  --base-ref 0d7d3be43baad65bf6effc8dff3ea6ce9daf27b8 \
+  --candidate-ref da1dea938d37618306c8dfaf82b5f06ac8628c6c
+.venv/bin/research cuda-ownership-supervisor run ... --attempt 1
+.venv/bin/research cuda-ownership-supervisor retain ... --attempt 1 \
+  --label "naive recurrent decode bootstrap"
+
+# Attempt 2: retained recurrent -> causal-convolution atomic unit.
+.venv/bin/research cuda-ownership-supervisor intake ... \
+  --base-ref da1dea938d37618306c8dfaf82b5f06ac8628c6c \
+  --candidate-ref 146e9090a6823a9e87c91114e4eec1b8852a6836
+.venv/bin/research cuda-ownership-supervisor run ... --attempt 2
+.venv/bin/research cuda-ownership-supervisor retain ... --attempt 2 \
+  --label "naive causal convolution migration"
+```
+
+**Artifacts**
+
+- Fresh attempt 1:
+  `runs/cuda-ownership-supervisor/6fdb0ec11d7e/attempt-00001`.
+- Fresh attempt 2:
+  `runs/cuda-ownership-supervisor/6fdb0ec11d7e/attempt-00002`.
+
+**Result**
+
+- Attempt 1 completed 52 protected tests, all 20 applicable runtime checks,
+  recurrent-only 20% ownership, isolated SM121 receipt, one operator/Nsight
+  symbol, transitional FLA only for unclaimed units, all four zero sanitizer
+  summaries, and complete advisory timing. Independent review passed; exact
+  `da1dea938...` is retained as milestone 2 / `correct_bootstrap`.
+- Attempt 2 completed 52 tests, all 21 runtime checks, strict ownership increase
+  to 40% by adding the convolution forward/backward atomic pair, three exact
+  operators/Nsight symbols and receipts, FLA only for unclaimed chunk units,
+  all four zero sanitizer summaries, and complete advisory timing. Independent
+  review passed; exact `146e9090...` is retained as milestone 3 /
+  `validated_component`.
+- Neither retention used advisory performance as a veto or claim. No candidate
+  was merged and the default backend was not changed.
+
+**Next**
+
+- Intake exact `4d1a3b231...` from retained `146e9090...` with its original
+  chunk hypothesis. Under the 3,600-second kernel ceiling, require the formerly
+  censored naive candidate observation to complete or fail honestly; review all
+  five-unit/runtime-FLA-free evidence before retaining the fresh immutable
+  milestone.
