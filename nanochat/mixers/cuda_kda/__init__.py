@@ -1,31 +1,47 @@
-"""Candidate-owned native CUDA KDA backend boundary.
-
-The foundation is deliberately fail-closed. Autoresearch replaces this module
-and adds tracked CUDA/build sources in this package. ``provenance()`` is an
-immutable claim consumed by protected routing: each atomic unit is either
-``project`` or ``third_party``. Protected code calls FLA only for unclaimed
-units during bootstrap/migration; optimization requires every unit project.
-"""
+"""Minimal loader and provenance for the native recurrent decode unit."""
 from __future__ import annotations
+
 from typing import Any
 
+_RECEIPT: dict[str, object] | None = None
+_SOURCE = "nanochat/mixers/cuda_kda/recurrent_decode.cu"
 _COMPONENTS = (
-    "chunk_forward", "chunk_backward", "recurrent_decode",
-    "causal_convolution_forward", "causal_convolution_backward",
+    "chunk_forward",
+    "chunk_backward",
+    "recurrent_decode",
+    "causal_convolution_forward",
+    "causal_convolution_backward",
 )
 
 
 def prepare() -> None:
-    raise NotImplementedError("project-owned CUDA KDA backend is not implemented")
+    global _RECEIPT
+    if _RECEIPT is not None:
+        return
+    from nanochat.research.cuda_build import build_cuda_extension
+
+    _RECEIPT = build_cuda_extension([_SOURCE], name="nanochat_kda_recurrent")
 
 
 def provenance() -> dict[str, Any]:
+    components = {
+        name: {
+            "owner": "third_party",
+            "sources": [],
+            "kernel_symbols": [],
+            "torch_operator": None,
+        }
+        for name in _COMPONENTS
+    }
+    components["recurrent_decode"] = {
+        "owner": "project",
+        "sources": [_SOURCE],
+        "kernel_symbols": ["nanochat_kda_recurrent_decode_kernel"],
+        "torch_operator": "nanochat_kda::recurrent_decode",
+    }
     return {
         "schema_version": 1,
-        "components": {
-            name: {"owner": "third_party", "sources": [], "kernel_symbols": [], "torch_operator": None}
-            for name in _COMPONENTS
-        },
-        "build": None,
+        "components": components,
+        "build": None if _RECEIPT is None else dict(_RECEIPT),
         "selective_ptx": [],
     }
