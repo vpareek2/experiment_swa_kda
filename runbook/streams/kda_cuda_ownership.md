@@ -870,3 +870,123 @@ git worktree add -b kda-cuda/chunk-migration-003 \
   100% ownership, five distinct operators/kernel symbols, and all four genuine
   claimed-only sanitizer summaries before exact commit/push and supervisor
   intake.
+
+## 2026-08-08 [agent] qualify complete naive CUDA backend
+
+**Context**
+
+- Attempt 3 adds the last atomic unit, native `chunk_forward` plus
+  `chunk_backward`, while preserving the retained recurrent and convolution
+  units. Correctness and honest ownership remain the migration gates;
+  performance is observational and the implementation intentionally uses a
+  serial, memory-heavy naive backward.
+- Candidate direct testing and the first staged checker exposed two genuine
+  candidate correctness/compatibility defects. Their artifacts and caches are
+  preserved rather than reused.
+
+**Commands**
+
+```bash
+WORKTREE=../experiment_swa_kda_cuda_attempt_003
+git -C "$WORKTREE" add -- \
+  nanochat/mixers/cuda_kda/__init__.py \
+  nanochat/mixers/cuda_kda/chunk.cu
+.venv/bin/research cuda-candidate-check \
+  --config configs/research/kda_cuda_ownership.toml \
+  --worktree "$WORKTREE" --lane migration \
+  --artifact-dir /tmp/kda-cuda-attempt-003-check-001 \
+  --extension-cache /tmp/kda-cuda-attempt-003-check-001/torch-extensions \
+  --cuda-cache /tmp/kda-cuda-attempt-003-check-001/cuda-cache --sanitizers
+# After candidate-only fixes and fresh direct tests:
+.venv/bin/research cuda-candidate-check \
+  --config configs/research/kda_cuda_ownership.toml \
+  --worktree "$WORKTREE" --lane migration \
+  --artifact-dir /tmp/kda-cuda-attempt-003-check-002 \
+  --extension-cache /tmp/kda-cuda-attempt-003-check-002/torch-extensions \
+  --cuda-cache /tmp/kda-cuda-attempt-003-check-002/cuda-cache --sanitizers
+git -C "$WORKTREE" commit -m "Add naive CUDA chunk KDA"
+git -C "$WORKTREE" push origin HEAD:kda-cuda/chunk-migration-003
+```
+
+**Artifacts**
+
+- Original normal direct evidence and harness-import failure:
+  `/tmp/kda-attempt-003-direct-20260808-a`.
+- Genuine tiny-normalization-gradient failure:
+  `/tmp/kda-attempt-003-direct-tiny-001/tiny.log`; corrected exact-source pass:
+  `/tmp/kda-attempt-003-direct-tiny-003/tiny.log`.
+- Final exact-source normal parity, cotangent matrix, noncontiguous input, and
+  production-shape safety evidence:
+  `/tmp/kda-attempt-003-direct-20260808-c`,
+  `/tmp/kda-attempt-003-direct-cotangents-003`, and
+  `/tmp/kda-attempt-003-direct-noncontiguous-001`.
+- Preserved failed checker: `/tmp/kda-cuda-attempt-003-check-001/summary.json`.
+- Complete final checker: `/tmp/kda-cuda-attempt-003-check-002/summary.json`.
+- Clean pushed candidate commit `4d1a3b231da2c99882324efbda5306a1815e21c7`,
+  exact parent `146e9090a6823a9e87c91114e4eec1b8852a6836`, branch
+  `kda-cuda/chunk-migration-003`.
+
+**Result**
+
+- The initial chunk implementation used the projection-form normalization
+  derivative even when `F.normalize` clamps a tiny norm at epsilon. A genuine
+  BF16 tiny-norm case failed 9/48 query-gradient elements with maximum absolute
+  difference 4,194,304 and maximum relative difference 0.134765625. The raw
+  failure remains preserved.
+- The candidate fixed the derivative by suppressing the projection term below
+  the `1e-12` norm clamp while retaining the `1/eps` linear derivative. The
+  exact final tiny-norm evidence passes all gradients; Q/K/V/raw/beta were exact,
+  with maximum A/dt absolute deltas below `3e-11`.
+- The first full checker then failed validly during the protected prefix-
+  causality case with `RuntimeError: q must be contiguous CUDA bfloat16`; profile
+  and sanitizers were skipped. The current protected audit passes B>1 prefix
+  views whose leading-length slices are noncontiguous. The failed staged source
+  SHA-256 was
+  `88a443a349e8dd8465fec4c5c55d58c13a14b243890d17a8ad1360f9570ce052`
+  and its 29,347-byte staged patch SHA-256 was
+  `c825f45212453a085aaf34ee9b761abc027ca92ac006280a88ef6b98e090faad`.
+- The candidate-only fix safely accepts the protected views by materializing
+  private contiguous activation copies inside the native forward/backward
+  wrappers and returning contiguous shape-correct gradients. A direct B=2,
+  H=2 noncontiguous prefix forward/backward comparison then passed without
+  changing any numerical, ownership, or protected gate.
+- Exact final source hashes are
+  `8e0d83f9a4349f9e1d045de7e02056a43bdbf74536a2b2d06e0b10309b5fb53c`
+  for `__init__.py` and
+  `67c2d2f38ab471cd35c8d426ee481ea65b63d02f5613a988086344be4d2563fa`
+  for `chunk.cu`. README and all three retained source files remain byte-
+  identical. Final normal boundary/state parity through T=257, unequal K/V,
+  seven public gradients, initial-state gradient, independent output/state/both
+  cotangents, two-dimensional dt bias, None final cotangent, and production T=65
+  safety all passed frozen tolerances.
+- The fresh final checker completed every phase. Runtime completed 21 checks,
+  owned fraction is exactly 1.0, `migration_ready=true`, `runtime_fla_free=true`,
+  no FLA module remained loaded or executed, and no forbidden candidate import
+  was attempted. All five components are honestly project-owned.
+- Protected operator tracing and Nsight independently observed five distinct
+  operators and the five declared recurrent, convolution-forward,
+  convolution-backward, chunk-forward, and chunk-backward kernel symbols. The
+  isolated library SHA-256 is
+  `4ca61a85ea9d6a4716c57163a9649ecfc2a05a677d6b99e117fb3be2b44558eb`;
+  its receipt records actual `compute_121,sm_121` commands and all exact source
+  hashes.
+- Memcheck, racecheck, synccheck, and initcheck each executed all five claimed
+  units only. Raw logs report zero errors; racecheck reports zero hazards,
+  errors, and warnings. The exact final staged patch is 30,031 bytes with
+  SHA-256 `e70f250ce86ad981549398482eb48d845553df9652dba2c8d4d2edfd660464fb`.
+- Candidate commit parent and remote branch SHA were independently verified and
+  the worktree is clean. This is a qualified diagnostic handoff, not yet an
+  authoritative campaign result or retained FLA-free milestone.
+- Two additional preserved failures were diagnostic-script defects rather than
+  candidate failures: an incorrect protected-module import in the first script,
+  and a state-only comparison that treated an oracle `None` gradient as
+  different from the native ABI's required explicit zero tensor. Corrected fresh
+  scripts passed; no gate or candidate math was weakened.
+
+**Next**
+
+- Commit and push this runbook update so the coordinator is clean. Intake exact
+  candidate `4d1a3b2...` from retained base `146e9090...` with the mechanistic
+  hypothesis, run and inspect every authoritative supervisor phase, and retain
+  the immutable naive fully project-owned CUDA milestone only if eligibility is
+  `fla_free_naive`, runtime is FLA-free, and all mandatory evidence completes.
