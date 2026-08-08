@@ -1,0 +1,110 @@
+schema = "kda_cuda_ownership"
+schema_version = 2
+
+[campaign]
+name = "kda-cuda-ownership"
+artifact_root = "runs/cuda-ownership-supervisor"
+ledger_path = "runs/kda-cuda-ownership.sqlite3"
+max_attempts = 24
+seed = 42
+candidate_paths = ["nanochat/mixers/cuda_kda/"]
+foundation_ref = "kda-cuda-ownership-foundation"
+cumulative_performance_anchor_ref = "0b4b24773c2696c23338d7600101d7072b592aa9"
+max_patch_bytes = 2000000
+
+[ownership]
+metadata_callable = "kda_backend_provenance"
+required_components = ["chunk_forward", "chunk_backward", "recurrent_decode", "causal_convolution_forward", "causal_convolution_backward"]
+component_weights = [0.25, 0.35, 0.20, 0.10, 0.10]
+atomic_units = [["chunk_forward", "chunk_backward"], ["recurrent_decode"], ["causal_convolution_forward", "causal_convolution_backward"]]
+majority_core_components = ["chunk_forward", "chunk_backward", "recurrent_decode"]
+project_source_roots = ["nanochat/mixers/cuda_kda/"]
+source_extensions = [".py", ".cu", ".cuh", ".cpp", ".cc", ".h", ".hpp", ".ptx"]
+native_cuda_extensions = [".cu", ".cuh"]
+minimum_project_owned_fraction = 0.500001
+forbid_runtime_modules = ["fla"]
+forbid_runtime_fla_for_optimization = true
+allow_fla_offline_oracle = true
+
+[correctness]
+tests = [
+  "tests/test_kda_operator.py",
+  "tests/test_kda_layer.py",
+  "tests/test_kda_cuda.py",
+  "tests/test_kda_integration.py",
+]
+pytest_timeout_seconds = 360.0
+runtime_audit_timeout_seconds = 180.0
+compute_sanitizer_timeout_seconds = 300.0
+require_compute_sanitizer = true
+sanitizer_tools = ["memcheck", "racecheck", "synccheck", "initcheck"]
+boundary_lengths = [1, 2, 3, 4, 63, 64, 65, 127, 128, 129, 257]
+production_head_dim = 128
+forward_atol = 0.005
+forward_rtol = 0.005
+gradient_atol = 0.02
+gradient_rtol = 0.02
+
+[bootstrap]
+enabled = true
+maximum_sequence_length = 256
+timed_iterations = 10
+minimum_owned_fraction = 0.10
+performance_advisory = true
+allow_fla_for_unclaimed_components = true
+forbid_selective_ptx = true
+
+[migration]
+enabled = true
+maximum_sequence_length = 1024
+timed_iterations = 25
+minimum_ownership_increase = 0.000000001
+performance_advisory = true
+allow_fla_for_unclaimed_components = true
+require_strict_owner_superset = true
+
+[optimization]
+enabled = true
+require_runtime_fla_free = true
+require_all_components_project = true
+require_full_training = true
+
+[reporting]
+canonical_operation = "chunk_forward"
+canonical_length = 256
+retain_raw_attempts = true
+require_python_anchor = true
+require_fla_anchor = true
+historical_context_manifest = "configs/research/archive/kda_training_speed_context.json"
+historical_context_sha256 = "79d0384d516407ac4b6d36b20dbc317af7468921867560d0641b87510c6bc85f"
+
+[measurement]
+sequence_length = 4096
+device_batch_size = 2
+total_batch_size = 32768
+depth = 6
+head_dim = 128
+warmup_steps = 2
+timed_steps = 5
+discovery_paired_blocks = 9
+promotion_paired_blocks = 15
+block_timeout_seconds = 180.0
+confidence_level = 0.95
+discovery_effect_fraction = 0.0075
+retention_margin_fraction = 0.0075
+promotion_cumulative_fraction = 0.03
+max_peak_memory_regression_fraction = 0.03
+max_kernel_latency_regression_fraction = 0.05
+max_baseline_drift_fraction = 0.01
+execution_mode = "eager"
+
+[kernel_gates]
+enabled = true
+sequence_lengths = [1, 64, 65, 256, 1024, 4096]
+warmup_iterations = 10
+timed_iterations = 50
+timeout_seconds = 180.0
+profile_max_bytes = 262144
+profile_rows = 40
+require_profile = true
+selective_ptx_min_latency_improvement = 0.02

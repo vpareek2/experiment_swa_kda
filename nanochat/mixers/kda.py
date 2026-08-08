@@ -60,6 +60,34 @@ class RMSNormGated(nn.Module):
 
 
 _FLA_CAUSAL_CONV1D: Callable | None = None
+_PROJECT_PROVENANCE: dict | None = None
+_PROJECT_RUNTIME_EVENTS: list[dict[str, str]] = []
+
+
+def reset_project_runtime_events() -> None:
+    _PROJECT_RUNTIME_EVENTS.clear()
+
+
+def project_runtime_events() -> list[dict[str, str]]:
+    return list(_PROJECT_RUNTIME_EVENTS)
+
+
+def _record_project_runtime(component: str, backend: str) -> None:
+    _PROJECT_RUNTIME_EVENTS.append({"component": component, "backend": backend})
+
+
+def _project_component_owned(*components: str) -> bool:
+    global _PROJECT_PROVENANCE
+    if _PROJECT_PROVENANCE is None:
+        _PROJECT_PROVENANCE = _load_project_backend().provenance()
+    claims = _PROJECT_PROVENANCE.get("components", {})
+    return all(claims.get(component, {}).get("owner") == "project" for component in components)
+
+
+def _record_backward(output: torch.Tensor, component: str, backend: str) -> torch.Tensor:
+    if output.requires_grad:
+        output.register_hook(lambda gradient: (_record_project_runtime(component, backend), gradient)[1])
+    return output
 
 
 def _load_fla_causal_conv1d() -> Callable:
@@ -111,6 +139,7 @@ class ShortConvolution(nn.Conv1d):
         state: torch.Tensor | None = None,
         *,
         output_final_state: bool = False,
+        backend: str = "fla_triton",
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         if x.ndim != 3 or x.shape[-1] != self.in_channels:
             raise ValueError(f"x must have shape [B,T,{self.in_channels}]")
@@ -128,17 +157,36 @@ class ShortConvolution(nn.Conv1d):
             output = x.new_empty(batch, 0, channels)
             return output, current if output_final_state else None
 
+        if backend == "project_cuda" and not x.is_cuda:
+            raise RuntimeError("project CUDA causal convolution cannot fall back on CPU")
         if x.is_cuda:
-            op = _load_fla_causal_conv1d()
-            return op(
-                x,
-                weight=self.weight.squeeze(1).to(dtype=x.dtype),
-                bias=None,
-                initial_state=None if state is None else current,
-                output_final_state=output_final_state,
-                activation="silu",
-                backend="triton",
+            use_project = backend == "project_cuda" and _project_component_owned(
+                "causal_convolution_forward", "causal_convolution_backward"
             )
+            if backend not in {"fla_triton", "project_cuda"}:
+                raise ValueError(f"unknown CUDA short-convolution backend: {backend}")
+            if use_project:
+                output, final_state = _project_operator("causal_convolution_forward")(
+                    x, self.weight.squeeze(1).to(dtype=x.dtype),
+                    None if state is None else current, output_final_state,
+                )
+                selected = "project"
+            else:
+                op = _load_fla_causal_conv1d()
+                output, final_state = op(
+                    x,
+                    weight=self.weight.squeeze(1).to(dtype=x.dtype),
+                    bias=None,
+                    initial_state=None if state is None else current,
+                    output_final_state=output_final_state,
+                    activation="silu",
+                    backend="triton",
+                )
+                selected = "fla"
+            if backend == "project_cuda":
+                _record_project_runtime("causal_convolution_forward", selected)
+                output = _record_backward(output, "causal_convolution_backward", selected)
+            return output, final_state
 
         # Every recurrent step first discards the oldest cached value, appends
         # the new token, and takes a width-sized dot product.  All of those
@@ -315,10 +363,42 @@ def _load_fla_ops() -> tuple[Callable, Callable]:
     return _FLA_OPS
 
 
-def prepare_kda_backend() -> None:
-    """Fail early and stabilize FLA imports before compiling a KDA model."""
+def _load_project_backend():
+    """Load only the protected candidate ABI, never an offline reference tree."""
 
-    _load_fla_ops()
+    from nanochat.mixers import cuda_kda
+    return cuda_kda
+
+
+def _project_operator(component: str):
+    entry=kda_backend_provenance().get("components",{}).get(component,{})
+    name=entry.get("torch_operator")
+    if entry.get("owner")!="project" or not isinstance(name,str) or "::" not in name:
+        raise RuntimeError(f"project CUDA component has no protected operator binding: {component}")
+    namespace,operator=name.split("::",1)
+    return getattr(getattr(torch.ops,namespace),operator)
+
+
+def kda_backend_provenance() -> dict:
+    """Return the candidate claim consumed and independently checked by the protected audit."""
+
+    global _PROJECT_PROVENANCE
+    if _PROJECT_PROVENANCE is None:
+        _PROJECT_PROVENANCE = _load_project_backend().provenance()
+    return _PROJECT_PROVENANCE
+
+
+def prepare_kda_backend(backend: str = "fla_triton") -> None:
+    """Fail early and stabilize the explicitly requested CUDA backend."""
+
+    if backend == "fla_triton":
+        _load_fla_ops()
+    elif backend == "project_cuda":
+        global _PROJECT_PROVENANCE
+        _load_project_backend().prepare()
+        _PROJECT_PROVENANCE = _load_project_backend().provenance()
+    else:
+        raise ValueError(f"unknown optimized KDA backend: {backend}")
 
 
 def _optimized_backend_reason(
@@ -410,13 +490,52 @@ def kda(
     """Run KDA through the requested backend.
 
     ``reference`` always uses the correctness implementation. ``chunk`` and
-    ``recurrent`` select the pinned FLA Triton kernels when their CUDA/BF16
+    ``recurrent`` select the pinned FLA Triton kernels, while ``project_chunk``
+    and ``project_recurrent`` use the fail-closed project ABI, when their CUDA/BF16
     contract is satisfied. Unsupported calls use the reference only when
     ``allow_fallback=True``; kernel failures are never swallowed.
     """
 
-    if mode not in {"reference", "chunk", "recurrent"}:
+    if mode not in {"reference", "chunk", "recurrent", "project_chunk", "project_recurrent"}:
         raise ValueError(f"unknown KDA mode: {mode}")
+    if mode.startswith("project_"):
+        # Validate the immutable public contract in protected code before
+        # entering candidate-owned glue, then fail closed on every mismatch.
+        _validate_operator_inputs(q, k, v, raw_gate, beta_logits, initial_state)
+        _gate_shapes(raw_gate, A_log, dt_bias)
+        reason = _optimized_backend_reason(q, k, v, raw_gate, beta_logits, A_log, dt_bias, initial_state, lower_bound=lower_bound)
+        if mode == "project_recurrent" and torch.is_grad_enabled() and any(tensor.requires_grad for tensor in (q, k, v, raw_gate, beta_logits, A_log, dt_bias)):
+            reason = "project recurrent KDA is inference-only"
+        if reason is not None:
+            raise RuntimeError(f"project CUDA KDA backend unavailable: {reason}")
+        requested = mode.removeprefix("project_")
+        if requested == "chunk":
+            owned = _project_component_owned("chunk_forward", "chunk_backward")
+            forward_component, backward_component = "chunk_forward", "chunk_backward"
+        else:
+            owned = _project_component_owned("recurrent_decode")
+            forward_component, backward_component = "recurrent_decode", None
+        if owned:
+            resolved_scale=float(scale if scale is not None else q.shape[-1] ** -0.5)
+            output, final_state = _project_operator(forward_component)(
+                q, k, v, raw_gate, beta_logits, A_log, dt_bias,
+                initial_state, output_final_state, float(lower_bound), resolved_scale,
+            )
+            selected = "project"
+        else:
+            output, final_state = _run_fla_kda(
+                q, k, v, raw_gate, beta_logits, A_log, dt_bias,
+                initial_state=initial_state,
+                output_final_state=output_final_state,
+                mode=requested,
+                lower_bound=lower_bound,
+                scale=scale,
+            )
+            selected = "fla"
+        _record_project_runtime(forward_component, selected)
+        if backward_component is not None:
+            output = _record_backward(output, backward_component, selected)
+        return output, final_state
     if mode != "reference":
         reason = _optimized_backend_reason(
             q, k, v, raw_gate, beta_logits, A_log, dt_bias, initial_state,
@@ -525,14 +644,15 @@ class KimiDeltaAttention(nn.Module):
         k_state = None if state is None else state.k_conv
         v_state = None if state is None else state.v_conv
         memory = None if state is None else state.memory
+        convolution_backend = "project_cuda" if requested_mode.startswith("project_") else "fla_triton"
         q, q_final = self.q_conv1d(
-            self.q_proj(hidden_states), q_state, output_final_state=want_state
+            self.q_proj(hidden_states), q_state, output_final_state=want_state, backend=convolution_backend
         )
         k, k_final = self.k_conv1d(
-            self.k_proj(hidden_states), k_state, output_final_state=want_state
+            self.k_proj(hidden_states), k_state, output_final_state=want_state, backend=convolution_backend
         )
         v, v_final = self.v_conv1d(
-            self.v_proj(hidden_states), v_state, output_final_state=want_state
+            self.v_proj(hidden_states), v_state, output_final_state=want_state, backend=convolution_backend
         )
 
         q = q.reshape(batch, length, self.num_heads, self.head_dim)

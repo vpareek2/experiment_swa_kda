@@ -8,6 +8,8 @@ import sys
 
 from nanochat.research.artifacts import atomic_write_json
 from nanochat.research.config import ConfigError, apply_candidate, load_config
+from nanochat.research.cuda_config import CudaCampaignConfigError, load_cuda_campaign_config
+from nanochat.research.cuda_supervisor import (calibrate_anchors as cuda_calibrate, campaign_report as cuda_report, initialize as cuda_initialize, intake as cuda_intake, recover_interrupted as cuda_recover, render_campaign_report as render_cuda_report, retain as cuda_retain, run_attempt as cuda_run_attempt, summary as cuda_summary, verify_release as cuda_verify_release)
 from nanochat.research.decision import aggregate_objectives, calibrate_objectives
 from nanochat.research.probe import run_memory_probe
 from nanochat.research.protected import initialize_supervisor, verify_protected
@@ -75,6 +77,51 @@ def build_parser() -> argparse.ArgumentParser:
     speed_view.add_argument("--config", default="configs/research/kda_training_speed.toml")
     speed_view.add_argument("--attempt", type=int)
     speed_view.add_argument("--ledger")
+
+    cuda = sub.add_parser("cuda-ownership-supervisor", help="manage protected project-owned KDA CUDA migration")
+    cuda_sub = cuda.add_subparsers(dest="cuda_command", required=True)
+    cuda_init = cuda_sub.add_parser("init", help="create or verify the independent CUDA-ownership ledger")
+    cuda_init.add_argument("--config", default="configs/research/kda_cuda_ownership.toml")
+    cuda_init.add_argument("--ledger")
+    cuda_cal = cuda_sub.add_parser("calibrate", help="freeze Python-reference and FLA operator anchors before intake")
+    cuda_cal.add_argument("--config", default="configs/research/kda_cuda_ownership.toml")
+    cuda_cal.add_argument("--ledger")
+    cuda_intake_parser = cuda_sub.add_parser("intake", help="record one freely chosen committed CUDA hypothesis in the derived lane")
+    cuda_intake_parser.add_argument("--config", default="configs/research/kda_cuda_ownership.toml")
+    cuda_intake_parser.add_argument("--base-ref", required=True)
+    cuda_intake_parser.add_argument("--candidate-ref", required=True)
+    cuda_intake_parser.add_argument("--hypothesis", required=True)
+    cuda_intake_parser.add_argument("--ledger")
+    cuda_run = cuda_sub.add_parser("run", help="run correctness, ownership, kernel, and interleaved performance gates")
+    cuda_run.add_argument("--config", default="configs/research/kda_cuda_ownership.toml")
+    cuda_run.add_argument("--attempt", type=int, required=True)
+    cuda_run.add_argument("--ledger")
+    cuda_retain_parser = cuda_sub.add_parser("retain", help="append one human-approved immutable milestone")
+    cuda_retain_parser.add_argument("--config", default="configs/research/kda_cuda_ownership.toml")
+    cuda_retain_parser.add_argument("--attempt", type=int, required=True)
+    cuda_retain_parser.add_argument("--label", required=True)
+    cuda_retain_parser.add_argument("--reason", required=True)
+    cuda_retain_parser.add_argument("--commit-ref")
+    cuda_retain_parser.add_argument("--ledger")
+    cuda_release = cuda_sub.add_parser("verify-release", help="run fixed-FLA cumulative promotion for a retained milestone")
+    cuda_release.add_argument("--config", default="configs/research/kda_cuda_ownership.toml")
+    cuda_release.add_argument("--milestone", type=int, required=True)
+    cuda_release.add_argument("--ledger")
+    cuda_report_parser = cuda_sub.add_parser("report", help="render the complete naive-to-optimized lineage")
+    cuda_report_parser.add_argument("--config", default="configs/research/kda_cuda_ownership.toml")
+    cuda_report_parser.add_argument("--ledger")
+    cuda_report_parser.add_argument("--format", choices=("json","markdown"), default="json")
+    cuda_report_parser.add_argument("--output")
+    cuda_report_parser.add_argument("--exclude-invalid", action="store_true")
+    cuda_recover_parser = cuda_sub.add_parser("recover", help="terminally invalidate an interrupted testing transition")
+    cuda_recover_parser.add_argument("--config", default="configs/research/kda_cuda_ownership.toml")
+    cuda_recover_parser.add_argument("--attempt", type=int, required=True)
+    cuda_recover_parser.add_argument("--reason", required=True)
+    cuda_recover_parser.add_argument("--ledger")
+    cuda_view = cuda_sub.add_parser("summary", help="render separate migration and performance evidence")
+    cuda_view.add_argument("--config", default="configs/research/kda_cuda_ownership.toml")
+    cuda_view.add_argument("--attempt", type=int)
+    cuda_view.add_argument("--ledger")
 
     report_parser = sub.add_parser("report", help="render a comparison from summary JSON files")
     report_parser.add_argument("summaries", nargs="+")
@@ -197,6 +244,41 @@ def main(argv=None) -> int:
             if args.speed_command == "summary":
                 _json(speed_summary(root, config, args.attempt, args.ledger))
                 return 0
+        if args.command == "cuda-ownership-supervisor":
+            config = load_cuda_campaign_config(args.config)
+            if args.cuda_command == "init":
+                _json(cuda_initialize(root, config, args.ledger))
+                return 0
+            if args.cuda_command == "calibrate":
+                _json(cuda_calibrate(root, config, args.ledger))
+                return 0
+            if args.cuda_command == "intake":
+                result = cuda_intake(root, config, args.base_ref, args.candidate_ref, args.hypothesis, args.ledger)
+                _json(result)
+                return 0 if result["status"] == "accepted" else 1
+            if args.cuda_command == "run":
+                result = cuda_run_attempt(root, config, args.attempt, args.ledger)
+                _json(result)
+                return 0 if result["status"] == "complete" else 1
+            if args.cuda_command == "retain":
+                _json(cuda_retain(root, config, args.attempt, args.label, args.reason, args.commit_ref, args.ledger))
+                return 0
+            if args.cuda_command == "verify-release":
+                result = cuda_verify_release(root, config, args.milestone, args.ledger)
+                _json(result)
+                return 0 if result["status"] == "complete" else 1
+            if args.cuda_command == "report":
+                result = cuda_report(root, config, args.ledger, include_invalid=not args.exclude_invalid)
+                rendered = json.dumps(result, indent=2, sort_keys=True, allow_nan=False) + "\n" if args.format == "json" else render_cuda_report(result)
+                if args.output: Path(args.output).write_text(rendered, encoding="utf-8")
+                else: print(rendered, end="")
+                return 0
+            if args.cuda_command == "recover":
+                _json(cuda_recover(root, config, args.attempt, args.reason, args.ledger))
+                return 0
+            if args.cuda_command == "summary":
+                _json(cuda_summary(root, config, args.attempt, args.ledger))
+                return 0
         if args.command == "report":
             report = render_report(_load_summaries(args.summaries))
             if args.output:
@@ -234,7 +316,7 @@ def main(argv=None) -> int:
                 )
                 print(format_command(command))
                 return 0
-    except (ArithmeticError, ConfigError, FileNotFoundError, RuntimeError, ValueError) as error:
+    except (ArithmeticError, ConfigError, CudaCampaignConfigError, FileNotFoundError, RuntimeError, ValueError) as error:
         print(f"research error: {error}", file=sys.stderr)
         return 2
     return 2

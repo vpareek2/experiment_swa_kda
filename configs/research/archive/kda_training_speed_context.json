@@ -1,0 +1,28 @@
+{
+  "anchor_commit": "0b4b24773c2696c23338d7600101d7072b592aa9",
+  "campaign_protocol_sha256": "c50c1dfdddc62b332d0f61ffb6671327958cf27e8c1c38d27ae500694f3f0332",
+  "comparison_compatible": false,
+  "completed_attempts": 9,
+  "dry_run_protocol_sha256": "fed6455c6f2d3e5aa32eca99281dca8b4b1bff0af3d741e2beead2acc270f3a3",
+  "note": "Descriptive context only; never combined arithmetically with CUDA-ownership measurements.",
+  "retained": [
+    {
+      "attempt": 1,
+      "candidate_commit": "a503132",
+      "intervention": "vectorized short convolution",
+      "tag": "kda-speed-retained-001-20260807",
+      "tag_commit": "9598a21c16b955edaba3d732e37cb126f0679f56"
+    },
+    {
+      "attempt": 6,
+      "candidate_commit": "70c734f",
+      "intervention": "FLA Triton causal convolutions",
+      "tag": "kda-speed-retained-006-20260807",
+      "tag_commit": "00351ea5008c25c00f9c9ad860bfd2d45ee16735"
+    }
+  ],
+  "schema": "kda_speed_historical_context",
+  "schema_version": 1,
+  "source": "runbook/streams/kda_training_speed.md final supervisor audit",
+  "terminal_recorded_training_tokens_per_second_approx": 44100.0
+}

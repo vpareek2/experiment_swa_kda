@@ -6,10 +6,11 @@ maximize a single visible number.
 ## Mode selection
 
 The default program below governs architecture-quality research. When a
-supervisor explicitly assigns the protected KDA training-speed loop, read and
-follow `program_kda_training_speed.md` instead for the candidate task. That
-mode has a deliberately narrower systems-only objective and does not authorize
-quality training, general evaluation, or direct edits by the supervisor.
+supervisor explicitly assigns the completed protected KDA training-speed loop,
+read and follow `program_kda_training_speed.md`. When it assigns the staged KDA
+CUDA-ownership loop, read and follow `program_kda_cuda_ownership.md` instead.
+Those modes have systems-only objectives and do not authorize quality training,
+general evaluation, or direct candidate edits by the supervisor.
 
 1. Read `AGENTS.md`, `runbook/index.md`, and the active architecture/evaluation
    streams. Verify `research doctor` and the current frontier artifacts.

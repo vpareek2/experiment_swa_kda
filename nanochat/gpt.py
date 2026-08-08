@@ -161,7 +161,7 @@ class Block(nn.Module):
         super().__init__()
         self.mixer_type = compute_mixer_types(config)[layer_idx]
         self.kda_backend = getattr(config, "kda_backend", "reference")
-        if self.kda_backend not in {"reference", "fla_triton"}:
+        if self.kda_backend not in {"reference", "fla_triton", "project_cuda"}:
             raise ValueError(f"unknown KDA backend: {self.kda_backend}")
         if self.mixer_type == "K":
             self.attn = KimiDeltaAttention(
@@ -170,7 +170,7 @@ class Block(nn.Module):
                 head_dim=config.n_embd // config.n_head,
                 conv_size=4,
                 layer_idx=layer_idx,
-                mode="chunk" if self.kda_backend == "fla_triton" else "reference",
+                mode=("project_chunk" if self.kda_backend == "project_cuda" else ("chunk" if self.kda_backend == "fla_triton" else "reference")),
                 allow_fallback=False,
             )
         else:
@@ -180,11 +180,15 @@ class Block(nn.Module):
     def forward(self, x, ve, cos_sin, window_size, kv_cache):
         if self.mixer_type == "K":
             state = None if kv_cache is None else kv_cache.get_kda_state(self.attn.layer_idx)
-            optimized = self.kda_backend == "fla_triton" and x.is_cuda
-            if not optimized:
-                mode = "reference"
-            else:
+            if self.kda_backend == "project_cuda":
+                if not x.is_cuda:
+                    raise RuntimeError("project_cuda KDA is CUDA-only and cannot fall back")
+                suffix = "recurrent" if kv_cache is not None and x.shape[1] == 1 else "chunk"
+                mode = f"project_{suffix}"
+            elif self.kda_backend == "fla_triton" and x.is_cuda:
                 mode = "recurrent" if kv_cache is not None and x.shape[1] == 1 else "chunk"
+            else:
+                mode = "reference"
             mixed, state = self.attn(
                 norm(x),
                 state=state,

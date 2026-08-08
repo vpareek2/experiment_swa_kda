@@ -27,6 +27,9 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 include = ["nanochat*"]
 
+[tool.setuptools.package-data]
+"nanochat.mixers.cuda_kda" = ["*.cu", "*.cuh", "*.cpp", "*.cc", "*.h", "*.hpp", "*.ptx", "*.json", "**/*.cu", "**/*.cuh", "**/*.cpp", "**/*.cc", "**/*.h", "**/*.hpp", "**/*.ptx", "**/*.json"]
+
 [dependency-groups]
 dev = [
     "ipykernel>=7.1.0",

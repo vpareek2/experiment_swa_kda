@@ -58,7 +58,7 @@ parser.add_argument("--max-seq-len", type=int, default=2048, help="max context l
 parser.add_argument("--window-pattern", type=str, default="SSSL", help="sliding window pattern tiled across layers: L=full, S=half context (e.g. 'SSL')")
 parser.add_argument("--sliding-window", type=int, default=None, help="explicit left-context size for S layers (default preserves legacy quarter-context rule)")
 parser.add_argument("--force-final-full", action=argparse.BooleanOptionalAction, default=True, help="force the final layer to use full attention")
-parser.add_argument("--kda-backend", choices=["reference", "fla_triton"], default="fla_triton", help="KDA execution backend for K layers")
+parser.add_argument("--kda-backend", choices=["reference", "fla_triton", "project_cuda"], default="fla_triton", help="KDA execution backend for K layers")
 # Training horizon (only one used, in order of precedence)
 parser.add_argument("--num-iterations", type=int, default=-1, help="explicit number of optimization steps (-1 = disable)")
 parser.add_argument("--target-flops", type=float, default=-1.0, help="calculate num_iterations to reach target_flops (-1 = disable)")
@@ -108,8 +108,11 @@ else:
 print0(f"COMPUTE_DTYPE: {COMPUTE_DTYPE} ({COMPUTE_DTYPE_REASON})")
 if "K" in args.window_pattern.upper() and args.kda_backend == "fla_triton" and device_type == "cuda":
     selected_ptxas = configure_triton_ptxas(required=True)
-    prepare_kda_backend()
+    prepare_kda_backend("fla_triton")
     print0(f"KDA backend: fla_triton | Triton ptxas: {selected_ptxas}")
+elif "K" in args.window_pattern.upper() and args.kda_backend == "project_cuda" and device_type == "cuda":
+    prepare_kda_backend("project_cuda")
+    print0("KDA backend: project_cuda")
 
 # wandb logging init
 use_dummy_wandb = args.run == "dummy" or not master_process
@@ -719,7 +722,7 @@ if master_process:
         "kda_backend_requested": args.kda_backend,
         "kda_backend_resolved": (
             "unused" if "K" not in orig_model.mixer_types else
-            ("fla_triton" if args.kda_backend == "fla_triton" and device_type == "cuda" else "reference")
+            (args.kda_backend if args.kda_backend in {"fla_triton", "project_cuda"} and device_type == "cuda" else "reference")
         ),
         "kda_fallback_allowed": False,
         "kda_layer_count": orig_model.mixer_types.count("K"),

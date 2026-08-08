@@ -12,6 +12,7 @@ quality or end-to-end efficiency result is claimed yet.
 - [Architecture](streams/architecture.md)
 - [Evaluation and autoresearch](streams/evaluation.md)
 - [KDA training-speed autoresearch](streams/kda_training_speed.md)
+- [KDA CUDA-ownership autoresearch](streams/kda_cuda_ownership.md)
 
 ## References
 
