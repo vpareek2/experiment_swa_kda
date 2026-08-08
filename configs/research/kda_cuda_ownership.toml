@@ -9,7 +9,7 @@ max_attempts = 24
 seed = 42
 candidate_paths = ["nanochat/mixers/cuda_kda/"]
 foundation_ref = "kda-cuda-ownership-launch-foundation"
-controller_ref = "kda-cuda-ownership-controller-transitional-fix"
+controller_ref = "kda-cuda-ownership-controller-state-gradient-gates"
 cumulative_performance_anchor_ref = "0b4b24773c2696c23338d7600101d7072b592aa9"
 max_patch_bytes = 2000000
 

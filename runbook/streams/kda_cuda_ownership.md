@@ -586,3 +586,59 @@ git worktree add -b kda-cuda/convolution-migration-002 \
 
 - Require a clean pushed strict ownership superset and genuine runtime/Nsight/all-
   sanitizer checker pass before authoritative migration intake.
+
+
+## 2026-08-08 [agent] add protected convolution cache-gradient gates
+
+**Context**
+
+- Independent attempt-2 review found that the protected runtime audit compared
+  convolution output gradients only at `T=65,W=4`; the sanitizer mixed final
+  state into the loss but checked only gradient presence.
+- A candidate with a dropped or misindexed `grad_final_state` contribution could
+  therefore pass every existing protected gate, especially for `T<W` cache
+  tails. Attempt 2 was paused before checker execution or intake.
+
+**Commands**
+
+```bash
+mv runs/kda-cuda-ownership.sqlite3 \
+  runs/kda-cuda-ownership-pre-state-gradients-df188a2c.sqlite3
+uv run --no-sync python -m pytest -q
+# Protected worker runtime audit against retained recurrent milestone:
+PYTHONPATH="$COORD" TORCH_EXTENSIONS_DIR=/tmp/kda-state-gradient-controller-cache \
+  "$COORD/.venv/bin/python" "$COORD/nanochat/research/cuda_worker.py" \
+  runtime-audit --implementation-root "$RETAINED_WORKTREE" \
+  --lane migration --config "$COORD/configs/research/kda_cuda_ownership.toml" \
+  --output /tmp/kda-state-gradient-controller-runtime.json
+```
+
+**Artifacts**
+
+- Preserved superseded ledger:
+  `runs/kda-cuda-ownership-pre-state-gradients-df188a2c.sqlite3`, including the
+  authoritative retained recurrent attempt.
+- Direct protected validation:
+  `/tmp/kda-state-gradient-controller-runtime.json`.
+
+**Result**
+
+- Protected runtime audit now numerically compares convolution output, weight,
+  x, and initial-state gradients against the independent oracle for five cases:
+  `T=2<W`, `T=4=W`, `T=5>W` without initial state, `T=65>W`, and
+  `T=3` with `output_final_state=False`.
+- Requested final-state cases mix a nonzero cache-tail cotangent into the loss;
+  the false-state case forces the `None` final-state/cotangent ABI. Every initial
+  cache is checked for bitwise nonmutation.
+- Full validation passed: `175 passed, 10 skipped`. A real protected migration
+  runtime audit against retained recurrent commit `da1dea9...` completed all 21
+  checks, including all five new cache-gradient cases through protected FLA.
+- The controller ref is changed again intentionally. The `df188a2c...` ledger is
+  preserved but will not be reused; the recurrent milestone must be reconstructed
+  under the newly pinned protocol before attempt 2 can proceed.
+
+**Next**
+
+- Commit/tag/push the state-gradient controller, initialize/calibrate its fresh
+  ledger, rerun and retain exact recurrent attempt 1 under that protocol, then
+  resume the paused convolution candidate and require it to pass the new cases.

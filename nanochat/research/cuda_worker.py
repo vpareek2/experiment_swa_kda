@@ -250,22 +250,44 @@ def runtime_audit(root: Path, config, lane: str) -> dict[str, Any]:
         implementation.reset_project_runtime_events()
         operator_recorder=_NativeOperatorRecorder(); operator_recorder.__enter__()
 
-        # Protected hybrid causal-convolution routing, including gradients and cache.
+        # Protected hybrid causal-convolution routing, including numerical
+        # output/cache gradients on both sides of the cache-width boundary.
         torch.manual_seed(991)
-        conv = implementation.ShortConvolution(32, 4).cuda()
-        conv_x = torch.randn(2, 65, 32, device="cuda", dtype=torch.bfloat16, requires_grad=True)
-        conv_initial = torch.randn(2, 32, 4, device="cuda", dtype=torch.bfloat16); conv_snapshot = conv_initial.clone()
-        expected_x = conv_x.detach().clone().requires_grad_(True)
-        expected_weight = conv.weight.detach().squeeze(1).to(torch.bfloat16).requires_grad_(True)
-        conv_actual, conv_state = conv(conv_x, conv_initial, output_final_state=True, backend="project_cuda")
-        conv_expected, expected_conv_state = oracle.causal_depthwise_conv(expected_x, expected_weight, initial_state=conv_initial)
-        torch.testing.assert_close(conv_actual, conv_expected, atol=config.correctness.forward_atol, rtol=config.correctness.forward_rtol)
-        torch.testing.assert_close(conv_state, expected_conv_state, atol=config.correctness.forward_atol, rtol=config.correctness.forward_rtol)
-        conv_actual.float().square().mean().backward(); conv_expected.float().square().mean().backward()
-        torch.testing.assert_close(conv_x.grad, expected_x.grad, atol=config.correctness.gradient_atol, rtol=config.correctness.gradient_rtol)
-        torch.testing.assert_close(conv.weight.grad.squeeze(1).to(torch.bfloat16), expected_weight.grad, atol=config.correctness.gradient_atol, rtol=config.correctness.gradient_rtol)
-        torch.testing.assert_close(conv_initial, conv_snapshot, atol=0, rtol=0)
-        checks.append({"kind": "causal_convolution_forward_backward_cache", "length": 65})
+        convolution_cases=(
+            (65, True, True),   # T > W, mixed output and final-cache gradient
+            (2, True, True),    # T < W, final cache contains initial-state and x tails
+            (4, True, True),    # T == W boundary
+            (5, False, True),   # T > W with no initial state
+            (3, True, False),   # explicit output_final_state=False / None cotangent
+        )
+        for conv_length,with_initial,return_state in convolution_cases:
+            conv = implementation.ShortConvolution(32, 4).cuda()
+            conv_x = torch.randn(2, conv_length, 32, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+            conv_initial=(torch.randn(2,32,4,device="cuda",dtype=torch.bfloat16,requires_grad=True) if with_initial else None)
+            conv_snapshot=None if conv_initial is None else conv_initial.detach().clone()
+            expected_x=conv_x.detach().clone().requires_grad_(True)
+            expected_initial=None if conv_initial is None else conv_initial.detach().clone().requires_grad_(True)
+            expected_weight=conv.weight.detach().squeeze(1).to(torch.bfloat16).requires_grad_(True)
+            conv_actual,conv_state=conv(conv_x,conv_initial,output_final_state=return_state,backend="project_cuda")
+            conv_expected,expected_conv_state=oracle.causal_depthwise_conv(expected_x,expected_weight,initial_state=expected_initial)
+            torch.testing.assert_close(conv_actual,conv_expected,atol=config.correctness.forward_atol,rtol=config.correctness.forward_rtol)
+            if return_state:
+                if conv_state is None: raise AssertionError("causal convolution omitted requested final state")
+                torch.testing.assert_close(conv_state,expected_conv_state,atol=config.correctness.forward_atol,rtol=config.correctness.forward_rtol)
+                actual_loss=conv_actual.float().square().mean()+0.37*conv_state.float().square().mean()
+                expected_loss=conv_expected.float().square().mean()+0.37*expected_conv_state.float().square().mean()
+            else:
+                if conv_state is not None: raise AssertionError("causal convolution returned an unrequested final state")
+                actual_loss=conv_actual.float().square().mean()
+                expected_loss=conv_expected.float().square().mean()
+            actual_loss.backward(); expected_loss.backward()
+            torch.testing.assert_close(conv_x.grad,expected_x.grad,atol=config.correctness.gradient_atol,rtol=config.correctness.gradient_rtol)
+            torch.testing.assert_close(conv.weight.grad.squeeze(1).to(torch.bfloat16),expected_weight.grad,atol=config.correctness.gradient_atol,rtol=config.correctness.gradient_rtol)
+            if conv_initial is not None:
+                torch.testing.assert_close(conv_initial,conv_snapshot,atol=0,rtol=0)
+                if conv_initial.grad is None or expected_initial.grad is None: raise AssertionError("causal convolution omitted initial-state gradient")
+                torch.testing.assert_close(conv_initial.grad,expected_initial.grad,atol=config.correctness.gradient_atol,rtol=config.correctness.gradient_rtol)
+            checks.append({"kind":"causal_convolution_forward_backward_cache_gradient","length":conv_length,"initial_state":with_initial,"output_final_state":return_state})
 
         layer = implementation.KimiDeltaAttention(128, 1, 128, mode="project_chunk", allow_fallback=False).cuda()
         hidden = torch.randn(2, 4, 128, device="cuda", dtype=torch.bfloat16, requires_grad=True)

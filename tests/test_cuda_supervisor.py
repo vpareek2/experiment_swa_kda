@@ -470,3 +470,12 @@ def test_profile_recorder_and_sm121_receipt_launch_fixes_are_pinned():
     assert '"compute_121" in compiler_command and "sm_121" in compiler_command' in worker
     assert worker.count('_ForbiddenRuntimeFinder(config.ownership.forbid_runtime_modules, root / config.campaign.candidate_paths[0])')==2
     assert '"target_arch": "sm_121"' in helper
+
+
+def test_protected_convolution_gradient_cases_cover_cache_boundaries_and_none_state():
+    worker=(ROOT/"nanochat/research/cuda_worker.py").read_text()
+    assert "convolution_cases" in worker
+    for case in ("(65, True, True)","(2, True, True)","(4, True, True)","(5, False, True)","(3, True, False)"):
+        assert case in worker
+    assert "conv_initial.grad" in worker and "expected_initial.grad" in worker
+    assert "causal_convolution_forward_backward_cache_gradient" in worker
