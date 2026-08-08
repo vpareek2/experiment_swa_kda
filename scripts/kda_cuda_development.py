@@ -12,6 +12,7 @@ import ast
 from dataclasses import asdict
 from datetime import datetime, timezone
 import hashlib
+import importlib
 import json
 import math
 import os
@@ -363,7 +364,7 @@ def production_worker(implementation_root: Path, output: Path) -> int:
         if Path.cwd().resolve() != root:
             raise RuntimeError("production helper cwd must equal its implementation root")
         import torch
-        import nanochat.mixers.kda as implementation
+        implementation = importlib.import_module("nanochat.mixers.kda")
         module_path = Path(implementation.__file__).resolve()
         if root != module_path and root not in module_path.parents:
             raise RuntimeError(f"loaded KDA dispatcher outside implementation root: {module_path}")
