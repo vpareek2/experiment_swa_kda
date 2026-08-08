@@ -140,8 +140,8 @@ __global__ void nanochat_kda_chunk_backward_kernel(
     __nv_bfloat16* dv,
     __nv_bfloat16* draw_gate,
     __nv_bfloat16* dbeta_logits,
-    float* dA_log,
-    float* ddt_bias,
+    float* dA_log_partial,
+    float* ddt_bias_partial,
     float* dinitial_state,
     float* state_history,
     float* residual_history,
@@ -155,10 +155,12 @@ __global__ void nanochat_kda_chunk_backward_kernel(
     int64_t value_dim,
     float lower_bound,
     float scale) {
-  const int64_t h = blockIdx.x;
-  if (h >= heads) {
+  const int64_t block = blockIdx.x;
+  if (block >= batch * heads) {
     return;
   }
+  const int64_t b = block / heads;
+  const int64_t h = block - b * heads;
   const int64_t lane = threadIdx.x;
   const int64_t lanes = blockDim.x;
   extern __shared__ float reduction[];
@@ -169,15 +171,20 @@ __global__ void nanochat_kda_chunk_backward_kernel(
   __shared__ float beta_shared;
   __shared__ float query_dot_shared;
   __shared__ float key_dot_shared;
-  __shared__ float head_A_gradient_shared;
+  __shared__ float batch_A_gradient_shared;
 
   if (lane == 0) {
-    head_A_gradient_shared = 0.0f;
+    batch_A_gradient_shared = 0.0f;
+  }
+  const int64_t parameter_base = (b * heads + h) * key_dim;
+  for (int64_t key = lane; key < key_dim; key += lanes) {
+    ddt_bias_partial[parameter_base + key] = 0.0f;
   }
   __syncthreads();
 
   const float a = expf(A_log[h]);
-  for (int64_t b = 0; b < batch; ++b) {
+  // Each block owns one independent (batch, head) recurrence.
+  {
     const int64_t matrix_count = value_dim * key_dim;
     for (int64_t linear = lane; linear < matrix_count; linear += lanes) {
       const int64_t value = linear / key_dim;
@@ -416,13 +423,13 @@ __global__ void nanochat_kda_chunk_backward_kernel(
             gate_sigmoid * (1.0f - gate_sigmoid);
         const float raw_gradient = activated_gradient * a;
         draw_gate[q_base + key] = __float2bfloat16_rn(raw_gradient);
-        ddt_bias[h * key_dim + key] += raw_gradient;
+        ddt_bias_partial[parameter_base + key] += raw_gradient;
         reduction[key] = raw_gradient * biased_gate;
       }
       __syncthreads();
       if (lane == 0) {
         for (int64_t key = 0; key < key_dim; ++key) {
-          head_A_gradient_shared += reduction[key];
+          batch_A_gradient_shared += reduction[key];
         }
       }
       __syncthreads();
@@ -440,8 +447,44 @@ __global__ void nanochat_kda_chunk_backward_kernel(
     __syncthreads();
   }
   if (lane == 0) {
-    dA_log[h] = head_A_gradient_shared;
+    dA_log_partial[b * heads + h] = batch_A_gradient_shared;
   }
+}
+
+__global__ void nanochat_kda_reduce_A_log_gradient_kernel(
+    const float* partial,
+    float* gradient,
+    int64_t batch,
+    int64_t heads) {
+  const int64_t h = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (h >= heads) {
+    return;
+  }
+  float sum = 0.0f;
+  for (int64_t batch_index = 0; batch_index < batch; ++batch_index) {
+    sum += partial[batch_index * heads + h];
+  }
+  gradient[h] = sum;
+}
+
+__global__ void nanochat_kda_reduce_dt_bias_gradient_kernel(
+    const float* partial,
+    float* gradient,
+    int64_t batch,
+    int64_t heads,
+    int64_t key_dim) {
+  const int64_t linear = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  const int64_t count = heads * key_dim;
+  if (linear >= count) {
+    return;
+  }
+  const int64_t h = linear / key_dim;
+  const int64_t key = linear - h * key_dim;
+  float sum = 0.0f;
+  for (int64_t batch_index = 0; batch_index < batch; ++batch_index) {
+    sum += partial[(batch_index * heads + h) * key_dim + key];
+  }
+  gradient[linear] = sum;
 }
 
 void check_activation(
@@ -612,7 +655,10 @@ chunk_backward_cuda(
   at::Tensor draw_gate = at::empty(raw_gate.sizes(), raw_gate.options());
   at::Tensor dbeta_logits = at::empty(beta_logits.sizes(), beta_logits.options());
   at::Tensor dA_log = at::empty_like(A_log);
-  at::Tensor ddt_bias = at::zeros_like(dt_bias);
+  at::Tensor ddt_bias = at::empty_like(dt_bias);
+  at::Tensor dA_log_partial = at::empty({batch, heads}, A_log.options());
+  at::Tensor ddt_bias_partial = at::empty(
+      {batch, heads, key_dim}, A_log.options());
   c10::optional<at::Tensor> dinitial_state = c10::nullopt;
   float* dinitial_pointer = nullptr;
   if (initial_state.has_value()) {
@@ -630,12 +676,14 @@ chunk_backward_cuda(
   at::Tensor residual_adjoint = at::empty(
       {batch, heads, value_dim}, A_log.options());
 
-  if (heads > 0) {
-    const int threads = 128;
+  const int threads = 128;
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream(q.get_device());
+  const int64_t recurrence_count = batch * heads;
+  if (recurrence_count > 0) {
     const size_t shared_bytes = static_cast<size_t>(
         key_dim > value_dim ? key_dim : value_dim) * sizeof(float);
-    nanochat_kda_chunk_backward_kernel<<<static_cast<int>(heads), threads, shared_bytes,
-        at::cuda::getCurrentCUDAStream(q.get_device())>>>(
+    nanochat_kda_chunk_backward_kernel<<<
+        static_cast<int>(recurrence_count), threads, shared_bytes, stream>>>(
         reinterpret_cast<const __nv_bfloat16*>(contiguous_q.data_ptr<at::BFloat16>()),
         reinterpret_cast<const __nv_bfloat16*>(contiguous_k.data_ptr<at::BFloat16>()),
         reinterpret_cast<const __nv_bfloat16*>(contiguous_v.data_ptr<at::BFloat16>()),
@@ -652,8 +700,8 @@ chunk_backward_cuda(
         reinterpret_cast<__nv_bfloat16*>(dv.data_ptr<at::BFloat16>()),
         reinterpret_cast<__nv_bfloat16*>(draw_gate.data_ptr<at::BFloat16>()),
         reinterpret_cast<__nv_bfloat16*>(dbeta_logits.data_ptr<at::BFloat16>()),
-        dA_log.data_ptr<float>(),
-        ddt_bias.data_ptr<float>(),
+        dA_log_partial.data_ptr<float>(),
+        ddt_bias_partial.data_ptr<float>(),
         dinitial_pointer,
         state_history.data_ptr<float>(),
         residual_history.data_ptr<float>(),
@@ -662,6 +710,20 @@ chunk_backward_cuda(
         residual_adjoint.data_ptr<float>(),
         batch, length, heads, key_dim, value_dim,
         static_cast<float>(lower_bound), static_cast<float>(scale));
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+  }
+  if (heads > 0) {
+    const int blocks = static_cast<int>((heads + threads - 1) / threads);
+    nanochat_kda_reduce_A_log_gradient_kernel<<<blocks, threads, 0, stream>>>(
+        dA_log_partial.data_ptr<float>(), dA_log.data_ptr<float>(), batch, heads);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+  }
+  const int64_t dt_bias_count = heads * key_dim;
+  if (dt_bias_count > 0) {
+    const int blocks = static_cast<int>((dt_bias_count + threads - 1) / threads);
+    nanochat_kda_reduce_dt_bias_gradient_kernel<<<blocks, threads, 0, stream>>>(
+        ddt_bias_partial.data_ptr<float>(), ddt_bias.data_ptr<float>(),
+        batch, heads, key_dim);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
   }
   return {dq, dk, dv, draw_gate, dbeta_logits, dA_log, ddt_bias, dinitial_state};
