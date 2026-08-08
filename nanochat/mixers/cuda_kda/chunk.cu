@@ -1,0 +1,618 @@
+#include <ATen/ATen.h>
+#include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAGuard.h>
+#include <c10/cuda/CUDAException.h>
+#include <torch/library.h>
+
+#include <cuda_bf16.h>
+#include <cuda_runtime.h>
+
+#include <tuple>
+
+namespace {
+
+__device__ __forceinline__ float chunk_sigmoid(float value) {
+  if (value >= 0.0f) {
+    const float exponential = expf(-value);
+    return 1.0f / (1.0f + exponential);
+  }
+  const float exponential = expf(value);
+  return exponential / (1.0f + exponential);
+}
+
+__device__ __forceinline__ int64_t q_index(
+    int64_t b, int64_t t, int64_t h, int64_t k,
+    int64_t length, int64_t heads, int64_t key_dim) {
+  return (((b * length + t) * heads + h) * key_dim + k);
+}
+
+__device__ __forceinline__ int64_t v_index(
+    int64_t b, int64_t t, int64_t h, int64_t v,
+    int64_t length, int64_t heads, int64_t value_dim) {
+  return (((b * length + t) * heads + h) * value_dim + v);
+}
+
+__device__ __forceinline__ int64_t state_index(
+    int64_t b, int64_t h, int64_t v, int64_t k,
+    int64_t heads, int64_t value_dim, int64_t key_dim) {
+  return (((b * heads + h) * value_dim + v) * key_dim + k);
+}
+
+__device__ __forceinline__ int64_t history_index(
+    int64_t b, int64_t h, int64_t t, int64_t v, int64_t k,
+    int64_t heads, int64_t length, int64_t value_dim, int64_t key_dim) {
+  return (((((b * heads + h) * (length + 1) + t) * value_dim + v) * key_dim) + k);
+}
+
+__global__ void nanochat_kda_chunk_forward_kernel(
+    const __nv_bfloat16* q,
+    const __nv_bfloat16* k,
+    const __nv_bfloat16* v,
+    const __nv_bfloat16* raw_gate,
+    const __nv_bfloat16* beta_logits,
+    const float* A_log,
+    const float* dt_bias,
+    const float* initial_state,
+    __nv_bfloat16* output,
+    float* state,
+    int64_t batch,
+    int64_t length,
+    int64_t heads,
+    int64_t key_dim,
+    int64_t value_dim,
+    float lower_bound,
+    float scale) {
+  const int64_t linear = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  const int64_t count = batch * heads * value_dim;
+  if (linear >= count) {
+    return;
+  }
+  const int64_t value = linear % value_dim;
+  const int64_t h = (linear / value_dim) % heads;
+  const int64_t b = linear / (heads * value_dim);
+  const int64_t state_base = state_index(
+      b, h, value, 0, heads, value_dim, key_dim);
+
+  for (int64_t key = 0; key < key_dim; ++key) {
+    state[state_base + key] = initial_state == nullptr
+        ? 0.0f
+        : initial_state[state_base + key];
+  }
+
+  const float a = expf(A_log[h]);
+  for (int64_t token = 0; token < length; ++token) {
+    float q_square_sum = 0.0f;
+    float k_square_sum = 0.0f;
+    const int64_t q_base = q_index(
+        b, token, h, 0, length, heads, key_dim);
+    for (int64_t key = 0; key < key_dim; ++key) {
+      const float q_value = __bfloat162float(q[q_base + key]);
+      const float k_value = __bfloat162float(k[q_base + key]);
+      q_square_sum += q_value * q_value;
+      k_square_sum += k_value * k_value;
+    }
+    const float q_inverse_norm = rsqrtf(fmaxf(q_square_sum, 1.0e-24f));
+    const float k_inverse_norm = rsqrtf(fmaxf(k_square_sum, 1.0e-24f));
+
+    float prediction = 0.0f;
+    for (int64_t key = 0; key < key_dim; ++key) {
+      const float gate_input = __bfloat162float(raw_gate[q_base + key]);
+      const float decay = lower_bound * chunk_sigmoid(
+          a * (gate_input + dt_bias[h * key_dim + key]));
+      const float decayed_state = state[state_base + key] * expf(decay);
+      state[state_base + key] = decayed_state;
+      prediction += __bfloat162float(k[q_base + key]) *
+          k_inverse_norm * decayed_state;
+    }
+
+    const int64_t value_offset = v_index(
+        b, token, h, value, length, heads, value_dim);
+    const float residual = __bfloat162float(v[value_offset]) - prediction;
+    const int64_t beta_offset = (b * length + token) * heads + h;
+    const float beta = chunk_sigmoid(__bfloat162float(beta_logits[beta_offset]));
+    float output_value = 0.0f;
+    for (int64_t key = 0; key < key_dim; ++key) {
+      const float normalized_key = __bfloat162float(k[q_base + key]) * k_inverse_norm;
+      const float updated_state = state[state_base + key] +
+          beta * normalized_key * residual;
+      state[state_base + key] = updated_state;
+      const float normalized_query = __bfloat162float(q[q_base + key]) *
+          q_inverse_norm * scale;
+      output_value += normalized_query * updated_state;
+    }
+    output[value_offset] = __float2bfloat16_rn(output_value);
+  }
+}
+
+__global__ void nanochat_kda_chunk_backward_kernel(
+    const __nv_bfloat16* q,
+    const __nv_bfloat16* k,
+    const __nv_bfloat16* v,
+    const __nv_bfloat16* raw_gate,
+    const __nv_bfloat16* beta_logits,
+    const float* A_log,
+    const float* dt_bias,
+    const float* initial_state,
+    const __nv_bfloat16* grad_output,
+    const float* grad_final_state,
+    __nv_bfloat16* dq,
+    __nv_bfloat16* dk,
+    __nv_bfloat16* dv,
+    __nv_bfloat16* draw_gate,
+    __nv_bfloat16* dbeta_logits,
+    float* dA_log,
+    float* ddt_bias,
+    float* dinitial_state,
+    float* state_history,
+    float* residual_history,
+    float* state_adjoint,
+    float* normalized_adjoint,
+    float* residual_adjoint,
+    int64_t batch,
+    int64_t length,
+    int64_t heads,
+    int64_t key_dim,
+    int64_t value_dim,
+    float lower_bound,
+    float scale) {
+  const int64_t h = blockIdx.x;
+  if (h >= heads || threadIdx.x != 0) {
+    return;
+  }
+
+  float head_A_gradient = 0.0f;
+  const float a = expf(A_log[h]);
+  for (int64_t b = 0; b < batch; ++b) {
+    for (int64_t value = 0; value < value_dim; ++value) {
+      for (int64_t key = 0; key < key_dim; ++key) {
+        const int64_t history = history_index(
+            b, h, 0, value, key, heads, length, value_dim, key_dim);
+        const int64_t state = state_index(
+            b, h, value, key, heads, value_dim, key_dim);
+        state_history[history] = initial_state == nullptr
+            ? 0.0f
+            : initial_state[state];
+      }
+    }
+
+    for (int64_t token = 0; token < length; ++token) {
+      const int64_t q_base = q_index(
+          b, token, h, 0, length, heads, key_dim);
+      float k_square_sum = 0.0f;
+      for (int64_t key = 0; key < key_dim; ++key) {
+        const float key_value = __bfloat162float(k[q_base + key]);
+        k_square_sum += key_value * key_value;
+      }
+      const float k_inverse_norm = rsqrtf(fmaxf(k_square_sum, 1.0e-24f));
+      const int64_t beta_offset = (b * length + token) * heads + h;
+      const float beta = chunk_sigmoid(__bfloat162float(beta_logits[beta_offset]));
+
+      for (int64_t value = 0; value < value_dim; ++value) {
+        float prediction = 0.0f;
+        for (int64_t key = 0; key < key_dim; ++key) {
+          const float gate_input = __bfloat162float(raw_gate[q_base + key]);
+          const float decay = lower_bound * chunk_sigmoid(
+              a * (gate_input + dt_bias[h * key_dim + key]));
+          const float previous = state_history[history_index(
+              b, h, token, value, key, heads, length, value_dim, key_dim)];
+          prediction += __bfloat162float(k[q_base + key]) * k_inverse_norm *
+              previous * expf(decay);
+        }
+        const int64_t value_offset = v_index(
+            b, token, h, value, length, heads, value_dim);
+        const float residual = __bfloat162float(v[value_offset]) - prediction;
+        residual_history[value_offset] = residual;
+        for (int64_t key = 0; key < key_dim; ++key) {
+          const float gate_input = __bfloat162float(raw_gate[q_base + key]);
+          const float decay = lower_bound * chunk_sigmoid(
+              a * (gate_input + dt_bias[h * key_dim + key]));
+          const float previous = state_history[history_index(
+              b, h, token, value, key, heads, length, value_dim, key_dim)];
+          const float normalized_key = __bfloat162float(k[q_base + key]) * k_inverse_norm;
+          state_history[history_index(
+              b, h, token + 1, value, key, heads, length, value_dim, key_dim)] =
+              previous * expf(decay) + beta * normalized_key * residual;
+        }
+      }
+    }
+
+    for (int64_t value = 0; value < value_dim; ++value) {
+      for (int64_t key = 0; key < key_dim; ++key) {
+        const int64_t state = state_index(
+            b, h, value, key, heads, value_dim, key_dim);
+        state_adjoint[state] = grad_final_state == nullptr
+            ? 0.0f
+            : grad_final_state[state];
+      }
+    }
+
+    for (int64_t token = length; token-- > 0;) {
+      const int64_t q_base = q_index(
+          b, token, h, 0, length, heads, key_dim);
+      float q_square_sum = 0.0f;
+      float k_square_sum = 0.0f;
+      for (int64_t key = 0; key < key_dim; ++key) {
+        const float query_value = __bfloat162float(q[q_base + key]);
+        const float key_value = __bfloat162float(k[q_base + key]);
+        q_square_sum += query_value * query_value;
+        k_square_sum += key_value * key_value;
+      }
+      const float q_inverse_norm = rsqrtf(fmaxf(q_square_sum, 1.0e-24f));
+      const float k_inverse_norm = rsqrtf(fmaxf(k_square_sum, 1.0e-24f));
+      const int64_t beta_offset = (b * length + token) * heads + h;
+      const float beta = chunk_sigmoid(__bfloat162float(beta_logits[beta_offset]));
+
+      for (int64_t value = 0; value < value_dim; ++value) {
+        const int64_t value_offset = v_index(
+            b, token, h, value, length, heads, value_dim);
+        const float output_gradient = __bfloat162float(grad_output[value_offset]);
+        for (int64_t key = 0; key < key_dim; ++key) {
+          const int64_t state = state_index(
+              b, h, value, key, heads, value_dim, key_dim);
+          const float normalized_query = __bfloat162float(q[q_base + key]) *
+              q_inverse_norm * scale;
+          state_adjoint[state] += output_gradient * normalized_query;
+        }
+      }
+
+      float query_dot = 0.0f;
+      for (int64_t key = 0; key < key_dim; ++key) {
+        float normalized_gradient = 0.0f;
+        for (int64_t value = 0; value < value_dim; ++value) {
+          const int64_t value_offset = v_index(
+              b, token, h, value, length, heads, value_dim);
+          const int64_t history = history_index(
+              b, h, token + 1, value, key, heads, length, value_dim, key_dim);
+          normalized_gradient += __bfloat162float(grad_output[value_offset]) *
+              state_history[history];
+        }
+        normalized_adjoint[q_base + key] = normalized_gradient;
+        query_dot += normalized_gradient *
+            (__bfloat162float(q[q_base + key]) * q_inverse_norm);
+      }
+      for (int64_t key = 0; key < key_dim; ++key) {
+        const float normalized_query = __bfloat162float(q[q_base + key]) * q_inverse_norm;
+        const float projection = q_square_sum > 1.0e-24f
+            ? normalized_query * query_dot
+            : 0.0f;
+        const float input_gradient = scale * q_inverse_norm *
+            (normalized_adjoint[q_base + key] - projection);
+        dq[q_base + key] = __float2bfloat16_rn(input_gradient);
+      }
+
+      float beta_gradient = 0.0f;
+      for (int64_t value = 0; value < value_dim; ++value) {
+        float gradient = 0.0f;
+        const float residual = residual_history[v_index(
+            b, token, h, value, length, heads, value_dim)];
+        for (int64_t key = 0; key < key_dim; ++key) {
+          const int64_t state = state_index(
+              b, h, value, key, heads, value_dim, key_dim);
+          const float normalized_key = __bfloat162float(k[q_base + key]) * k_inverse_norm;
+          gradient += state_adjoint[state] * beta * normalized_key;
+          beta_gradient += state_adjoint[state] * normalized_key * residual;
+        }
+        residual_adjoint[(b * heads + h) * value_dim + value] = gradient;
+        dv[v_index(b, token, h, value, length, heads, value_dim)] =
+            __float2bfloat16_rn(gradient);
+      }
+
+      float key_dot = 0.0f;
+      for (int64_t key = 0; key < key_dim; ++key) {
+        const float gate_input = __bfloat162float(raw_gate[q_base + key]);
+        const float decay = lower_bound * chunk_sigmoid(
+            a * (gate_input + dt_bias[h * key_dim + key]));
+        const float decay_exponential = expf(decay);
+        float normalized_gradient = 0.0f;
+        for (int64_t value = 0; value < value_dim; ++value) {
+          const int64_t state = state_index(
+              b, h, value, key, heads, value_dim, key_dim);
+          const float residual = residual_history[v_index(
+              b, token, h, value, length, heads, value_dim)];
+          const float residual_gradient = residual_adjoint[
+              (b * heads + h) * value_dim + value];
+          const float previous = state_history[history_index(
+              b, h, token, value, key, heads, length, value_dim, key_dim)];
+          normalized_gradient += state_adjoint[state] * beta * residual -
+              residual_gradient * previous * decay_exponential;
+        }
+        normalized_adjoint[q_base + key] = normalized_gradient;
+        key_dot += normalized_gradient *
+            (__bfloat162float(k[q_base + key]) * k_inverse_norm);
+      }
+      for (int64_t key = 0; key < key_dim; ++key) {
+        const float normalized_key = __bfloat162float(k[q_base + key]) * k_inverse_norm;
+        const float projection = k_square_sum > 1.0e-24f
+            ? normalized_key * key_dot
+            : 0.0f;
+        const float input_gradient = k_inverse_norm *
+            (normalized_adjoint[q_base + key] - projection);
+        dk[q_base + key] = __float2bfloat16_rn(input_gradient);
+      }
+
+      for (int64_t key = 0; key < key_dim; ++key) {
+        const float gate_input = __bfloat162float(raw_gate[q_base + key]);
+        const float biased_gate = gate_input + dt_bias[h * key_dim + key];
+        const float gate_sigmoid = chunk_sigmoid(a * biased_gate);
+        const float decay = lower_bound * gate_sigmoid;
+        const float decay_exponential = expf(decay);
+        float decay_gradient = 0.0f;
+        const float normalized_key = __bfloat162float(k[q_base + key]) * k_inverse_norm;
+        for (int64_t value = 0; value < value_dim; ++value) {
+          const int64_t state = state_index(
+              b, h, value, key, heads, value_dim, key_dim);
+          const float residual_gradient = residual_adjoint[
+              (b * heads + h) * value_dim + value];
+          const float previous = state_history[history_index(
+              b, h, token, value, key, heads, length, value_dim, key_dim)];
+          const float decayed_state = previous * decay_exponential;
+          const float decayed_gradient = state_adjoint[state] -
+              residual_gradient * normalized_key;
+          decay_gradient += decayed_gradient * decayed_state;
+          state_adjoint[state] = decayed_gradient * decay_exponential;
+        }
+        const float activated_gradient = decay_gradient * lower_bound *
+            gate_sigmoid * (1.0f - gate_sigmoid);
+        const float raw_gradient = activated_gradient * a;
+        draw_gate[q_base + key] = __float2bfloat16_rn(raw_gradient);
+        ddt_bias[h * key_dim + key] += raw_gradient;
+        head_A_gradient += raw_gradient * biased_gate;
+      }
+
+      dbeta_logits[beta_offset] = __float2bfloat16_rn(
+          beta_gradient * beta * (1.0f - beta));
+    }
+
+    if (dinitial_state != nullptr) {
+      for (int64_t value = 0; value < value_dim; ++value) {
+        for (int64_t key = 0; key < key_dim; ++key) {
+          const int64_t state = state_index(
+              b, h, value, key, heads, value_dim, key_dim);
+          dinitial_state[state] = state_adjoint[state];
+        }
+      }
+    }
+  }
+  dA_log[h] = head_A_gradient;
+}
+
+void check_activation(
+    const at::Tensor& tensor,
+    const at::Tensor& reference,
+    const char* name) {
+  TORCH_CHECK(tensor.is_cuda(), name, " must be a CUDA tensor");
+  TORCH_CHECK(tensor.device() == reference.device(), name, " must be on the same device as q");
+  TORCH_CHECK(tensor.scalar_type() == at::kBFloat16, name, " must be bfloat16");
+}
+
+void validate_chunk_inputs(
+    const at::Tensor& q,
+    const at::Tensor& k,
+    const at::Tensor& v,
+    const at::Tensor& raw_gate,
+    const at::Tensor& beta_logits,
+    const at::Tensor& A_log,
+    const at::Tensor& dt_bias,
+    const c10::optional<at::Tensor>& initial_state) {
+  TORCH_CHECK(q.is_cuda() && q.scalar_type() == at::kBFloat16,
+              "q must be CUDA bfloat16");
+  TORCH_CHECK(q.dim() == 4, "q must have shape [B, T, H, K]");
+  check_activation(k, q, "k");
+  check_activation(v, q, "v");
+  check_activation(raw_gate, q, "raw_gate");
+  check_activation(beta_logits, q, "beta_logits");
+  TORCH_CHECK(k.sizes() == q.sizes() && raw_gate.sizes() == q.sizes(),
+              "q, k, and raw_gate shapes must match");
+  TORCH_CHECK(v.dim() == 4 && v.size(0) == q.size(0) && v.size(1) == q.size(1) &&
+                  v.size(2) == q.size(2),
+              "v must match q in B, T, and H");
+  TORCH_CHECK(beta_logits.dim() == 3 && beta_logits.size(0) == q.size(0) &&
+                  beta_logits.size(1) == q.size(1) && beta_logits.size(2) == q.size(2),
+              "beta_logits must have shape [B, T, H]");
+  TORCH_CHECK(A_log.is_cuda() && A_log.device() == q.device() && A_log.is_contiguous() &&
+                  A_log.scalar_type() == at::kFloat && A_log.numel() == q.size(2),
+              "A_log must be contiguous CUDA float32 [H]");
+  TORCH_CHECK(dt_bias.is_cuda() && dt_bias.device() == q.device() && dt_bias.is_contiguous() &&
+                  dt_bias.scalar_type() == at::kFloat &&
+                  dt_bias.numel() == q.size(2) * q.size(3),
+              "dt_bias must be contiguous CUDA float32 with H*K elements");
+  if (initial_state.has_value()) {
+    const at::Tensor& state = *initial_state;
+    TORCH_CHECK(state.is_cuda() && state.device() == q.device() && state.is_contiguous() &&
+                    state.scalar_type() == at::kFloat,
+                "initial_state must be contiguous CUDA float32");
+    TORCH_CHECK(state.dim() == 4 && state.size(0) == q.size(0) &&
+                    state.size(1) == q.size(2) && state.size(2) == v.size(3) &&
+                    state.size(3) == q.size(3),
+                "initial_state must have shape [B, H, V, K]");
+  }
+}
+
+std::tuple<at::Tensor, c10::optional<at::Tensor>> chunk_forward_cuda(
+    const at::Tensor& q,
+    const at::Tensor& k,
+    const at::Tensor& v,
+    const at::Tensor& raw_gate,
+    const at::Tensor& beta_logits,
+    const at::Tensor& A_log,
+    const at::Tensor& dt_bias,
+    const c10::optional<at::Tensor>& initial_state,
+    bool output_final_state,
+    double lower_bound,
+    double scale) {
+  validate_chunk_inputs(q, k, v, raw_gate, beta_logits, A_log, dt_bias, initial_state);
+  const int64_t batch = q.size(0);
+  const int64_t length = q.size(1);
+  const int64_t heads = q.size(2);
+  const int64_t key_dim = q.size(3);
+  const int64_t value_dim = v.size(3);
+
+  c10::cuda::CUDAGuard device_guard(q.device());
+  const at::Tensor contiguous_q = q.contiguous();
+  const at::Tensor contiguous_k = k.contiguous();
+  const at::Tensor contiguous_v = v.contiguous();
+  const at::Tensor contiguous_raw_gate = raw_gate.contiguous();
+  const at::Tensor contiguous_beta_logits = beta_logits.contiguous();
+  at::Tensor output = at::empty({batch, length, heads, value_dim}, v.options());
+  at::Tensor state = at::empty(
+      {batch, heads, value_dim, key_dim}, q.options().dtype(at::kFloat));
+  const float* initial_pointer = initial_state.has_value()
+      ? initial_state->data_ptr<float>()
+      : nullptr;
+  const int64_t count = batch * heads * value_dim;
+  if (count > 0) {
+    const int threads = 128;
+    const int blocks = static_cast<int>((count + threads - 1) / threads);
+    nanochat_kda_chunk_forward_kernel<<<blocks, threads, 0,
+        at::cuda::getCurrentCUDAStream(q.get_device())>>>(
+        reinterpret_cast<const __nv_bfloat16*>(contiguous_q.data_ptr<at::BFloat16>()),
+        reinterpret_cast<const __nv_bfloat16*>(contiguous_k.data_ptr<at::BFloat16>()),
+        reinterpret_cast<const __nv_bfloat16*>(contiguous_v.data_ptr<at::BFloat16>()),
+        reinterpret_cast<const __nv_bfloat16*>(contiguous_raw_gate.data_ptr<at::BFloat16>()),
+        reinterpret_cast<const __nv_bfloat16*>(contiguous_beta_logits.data_ptr<at::BFloat16>()),
+        A_log.data_ptr<float>(),
+        dt_bias.data_ptr<float>(),
+        initial_pointer,
+        reinterpret_cast<__nv_bfloat16*>(output.data_ptr<at::BFloat16>()),
+        state.data_ptr<float>(),
+        batch, length, heads, key_dim, value_dim,
+        static_cast<float>(lower_bound), static_cast<float>(scale));
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+  }
+  c10::optional<at::Tensor> final_state = c10::nullopt;
+  if (output_final_state) {
+    final_state = state;
+  }
+  return {output, final_state};
+}
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor,
+           at::Tensor, at::Tensor, c10::optional<at::Tensor>>
+chunk_backward_cuda(
+    const at::Tensor& q,
+    const at::Tensor& k,
+    const at::Tensor& v,
+    const at::Tensor& raw_gate,
+    const at::Tensor& beta_logits,
+    const at::Tensor& A_log,
+    const at::Tensor& dt_bias,
+    const c10::optional<at::Tensor>& initial_state,
+    const at::Tensor& output,
+    const c10::optional<at::Tensor>& final_state,
+    const at::Tensor& grad_output,
+    const c10::optional<at::Tensor>& grad_final_state,
+    double lower_bound,
+    double scale) {
+  validate_chunk_inputs(q, k, v, raw_gate, beta_logits, A_log, dt_bias, initial_state);
+  check_activation(output, q, "output");
+  check_activation(grad_output, q, "grad_output");
+  TORCH_CHECK(output.sizes() == v.sizes() && grad_output.sizes() == v.sizes(),
+              "output and grad_output must have shape [B, T, H, V]");
+  const int64_t batch = q.size(0);
+  const int64_t length = q.size(1);
+  const int64_t heads = q.size(2);
+  const int64_t key_dim = q.size(3);
+  const int64_t value_dim = v.size(3);
+  if (final_state.has_value()) {
+    TORCH_CHECK(final_state->is_cuda() && final_state->device() == q.device() &&
+                    final_state->is_contiguous() && final_state->scalar_type() == at::kFloat &&
+                    final_state->sizes() == at::IntArrayRef({batch, heads, value_dim, key_dim}),
+                "final_state must be contiguous CUDA float32 [B, H, V, K]");
+  }
+  const float* grad_final_pointer = nullptr;
+  at::Tensor contiguous_grad_final;
+  if (grad_final_state.has_value()) {
+    TORCH_CHECK(final_state.has_value(), "grad_final_state requires final_state");
+    TORCH_CHECK(grad_final_state->is_cuda() && grad_final_state->device() == q.device() &&
+                    grad_final_state->scalar_type() == at::kFloat &&
+                    grad_final_state->sizes() == at::IntArrayRef({batch, heads, value_dim, key_dim}),
+                "grad_final_state must be CUDA float32 [B, H, V, K]");
+    contiguous_grad_final = grad_final_state->contiguous();
+    grad_final_pointer = contiguous_grad_final.data_ptr<float>();
+  }
+  const at::Tensor contiguous_grad_output = grad_output.contiguous();
+
+  c10::cuda::CUDAGuard device_guard(q.device());
+  const at::Tensor contiguous_q = q.contiguous();
+  const at::Tensor contiguous_k = k.contiguous();
+  const at::Tensor contiguous_v = v.contiguous();
+  const at::Tensor contiguous_raw_gate = raw_gate.contiguous();
+  const at::Tensor contiguous_beta_logits = beta_logits.contiguous();
+  at::Tensor dq = at::empty(q.sizes(), q.options());
+  at::Tensor dk = at::empty(k.sizes(), k.options());
+  at::Tensor dv = at::empty(v.sizes(), v.options());
+  at::Tensor draw_gate = at::empty(raw_gate.sizes(), raw_gate.options());
+  at::Tensor dbeta_logits = at::empty(beta_logits.sizes(), beta_logits.options());
+  at::Tensor dA_log = at::empty_like(A_log);
+  at::Tensor ddt_bias = at::zeros_like(dt_bias);
+  c10::optional<at::Tensor> dinitial_state = c10::nullopt;
+  float* dinitial_pointer = nullptr;
+  if (initial_state.has_value()) {
+    dinitial_state = at::empty_like(*initial_state);
+    dinitial_pointer = dinitial_state->data_ptr<float>();
+  }
+
+  at::Tensor state_history = at::empty(
+      {batch, heads, length + 1, value_dim, key_dim}, A_log.options());
+  at::Tensor residual_history = at::empty(
+      {batch, length, heads, value_dim}, A_log.options());
+  at::Tensor state_adjoint = at::empty(
+      {batch, heads, value_dim, key_dim}, A_log.options());
+  at::Tensor normalized_adjoint = at::empty(q.sizes(), A_log.options());
+  at::Tensor residual_adjoint = at::empty(
+      {batch, heads, value_dim}, A_log.options());
+
+  if (heads > 0) {
+    nanochat_kda_chunk_backward_kernel<<<static_cast<int>(heads), 1, 0,
+        at::cuda::getCurrentCUDAStream(q.get_device())>>>(
+        reinterpret_cast<const __nv_bfloat16*>(contiguous_q.data_ptr<at::BFloat16>()),
+        reinterpret_cast<const __nv_bfloat16*>(contiguous_k.data_ptr<at::BFloat16>()),
+        reinterpret_cast<const __nv_bfloat16*>(contiguous_v.data_ptr<at::BFloat16>()),
+        reinterpret_cast<const __nv_bfloat16*>(contiguous_raw_gate.data_ptr<at::BFloat16>()),
+        reinterpret_cast<const __nv_bfloat16*>(contiguous_beta_logits.data_ptr<at::BFloat16>()),
+        A_log.data_ptr<float>(),
+        dt_bias.data_ptr<float>(),
+        initial_state.has_value() ? initial_state->data_ptr<float>() : nullptr,
+        reinterpret_cast<const __nv_bfloat16*>(
+            contiguous_grad_output.data_ptr<at::BFloat16>()),
+        grad_final_pointer,
+        reinterpret_cast<__nv_bfloat16*>(dq.data_ptr<at::BFloat16>()),
+        reinterpret_cast<__nv_bfloat16*>(dk.data_ptr<at::BFloat16>()),
+        reinterpret_cast<__nv_bfloat16*>(dv.data_ptr<at::BFloat16>()),
+        reinterpret_cast<__nv_bfloat16*>(draw_gate.data_ptr<at::BFloat16>()),
+        reinterpret_cast<__nv_bfloat16*>(dbeta_logits.data_ptr<at::BFloat16>()),
+        dA_log.data_ptr<float>(),
+        ddt_bias.data_ptr<float>(),
+        dinitial_pointer,
+        state_history.data_ptr<float>(),
+        residual_history.data_ptr<float>(),
+        state_adjoint.data_ptr<float>(),
+        normalized_adjoint.data_ptr<float>(),
+        residual_adjoint.data_ptr<float>(),
+        batch, length, heads, key_dim, value_dim,
+        static_cast<float>(lower_bound), static_cast<float>(scale));
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+  }
+  return {dq, dk, dv, draw_gate, dbeta_logits, dA_log, ddt_bias, dinitial_state};
+}
+
+}  // namespace
+
+TORCH_LIBRARY_FRAGMENT(nanochat_kda, m) {
+  m.def("chunk_forward(Tensor q, Tensor k, Tensor v, Tensor raw_gate, "
+        "Tensor beta_logits, Tensor A_log, Tensor dt_bias, Tensor? initial_state, "
+        "bool output_final_state, float lower_bound, float scale) "
+        "-> (Tensor output, Tensor? final_state)");
+  m.def("chunk_backward(Tensor q, Tensor k, Tensor v, Tensor raw_gate, "
+        "Tensor beta_logits, Tensor A_log, Tensor dt_bias, Tensor? initial_state, "
+        "Tensor output, Tensor? final_state, Tensor grad_output, "
+        "Tensor? grad_final_state, float lower_bound, float scale) -> "
+        "(Tensor dq, Tensor dk, Tensor dv, Tensor draw_gate, "
+        "Tensor dbeta_logits, Tensor dA_log, Tensor ddt_bias, "
+        "Tensor? dinitial_state)");
+}
+
+TORCH_LIBRARY_IMPL(nanochat_kda, CUDA, m) {
+  m.impl("chunk_forward", &chunk_forward_cuda);
+  m.impl("chunk_backward", &chunk_backward_cuda);
+}
