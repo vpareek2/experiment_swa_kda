@@ -1545,3 +1545,63 @@ git push origin refs/tags/kda-cuda-ownership-controller-timeout-refreeze
   new 3,600/13,500-second ceilings. Retain only if both kernel workers, all nine
   alternating pairs, confidence interval, memory, kernel, drift, ownership,
   correctness, profile, and sanitizer gates pass.
+
+## 2026-08-08 [agent] terminate impractical naive-parent replay
+
+**Context**
+
+- The timeout-only protocol successfully removed the 180-second entry deadlock,
+  but the exact sizing diagnostic showed the retained naive parent needs about
+  2.5 hours for one seven-step block. Repeating that parent nine times would
+  consume roughly 22 hours before considering later candidates.
+- The human explicitly rejected that evaluation strategy and directed immediate
+  termination and redesign. This supersedes continuing the costly replay; it
+  does not authorize treating partial work as a result or retaining attempt 4.
+
+**Commands**
+
+```bash
+# Supervisor and worker owned distinct process groups.
+kill -TERM -- -312660
+kill -TERM -- -313575
+.venv/bin/research cuda-ownership-supervisor recover \
+  --config configs/research/kda_cuda_ownership.toml --attempt 4 \
+  --reason "Human-directed termination ... no baseline JSON or paired block"
+```
+
+**Artifacts**
+
+- Interrupted fresh attempt:
+  `runs/cuda-ownership-supervisor/6fdb0ec11d7e/attempt-00004`.
+- Fresh timeout-refreeze ledger SHA-256 after terminal recovery:
+  `8fcf16b48f9b5bb844e69970dd3ce4cdca066a1c08425b83d2fbf5405281f556`.
+
+**Result**
+
+- SIGTERM to the supervisor group stopped PID 312660. Its bounded kernel worker
+  had its own session, survived as an orphan, and was then explicitly stopped by
+  process group 313575. No supervisor, worker, trainer, compiler, sanitizer, or
+  GPU compute process remains.
+- Candidate correctness, runtime audit, ownership profile, and all four
+  sanitizer phases had completed. The naive baseline kernel worker was stopped
+  after about 14 minutes, emitted no `baseline-kernel.json`, and created no
+  phase row. Zero paired blocks exist.
+- Protected recovery terminally records fresh attempt 4 as `invalid`,
+  `not_retainable`, with null summary/milestone and an exact human-directed
+  interruption reason. The partial baseline is censored diagnostic work, not a
+  score or performance comparison.
+- The fresh retained head remains exact `4d1a3b231...`, ownership 1.0 and runtime
+  FLA-free. Exact candidate `613b0759...` remains pushed and checker-qualified
+  but is not retained or merged. The original ledger remains byte-identical at
+  SHA-256 `14bce91dee58aaa21a59c87be24eb37b821472d8711ce2fc310553d77331267c`.
+- The internal monitoring heartbeat was cancelled after termination.
+
+**Next**
+
+- Do not rerun the fixed nine-pair naive-parent strategy. Redesign the first
+  optimization transition so the deliberately pathological correctness anchor
+  is not replayed for roughly 22 hours. Preserve exact candidate correctness,
+  ownership, provenance, sanitizer, full candidate-kernel, and full candidate
+  training evidence; distinguish any bridge eligibility from a statistical
+  optimization-retention claim. Obtain explicit agreement on the new comparison
+  and decision rule before another protected protocol freeze.
