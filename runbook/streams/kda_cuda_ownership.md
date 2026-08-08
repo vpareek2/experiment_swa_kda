@@ -280,3 +280,53 @@ uv build --out-dir /tmp/nanochat-build-check
 - Commit this launch foundation, create immutable launch-foundation and
   controller tags, push and verify their peeled remote SHAs, then perform a
   temporary initialization smoke before the configured ledger is created.
+
+
+## 2026-08-08 [agent] publish and verify immutable CUDA launch refs
+
+**Context**
+
+- Launch hardening had passed the full suite, native SM121 preflight, four
+  sanitizers, packaging, and a clean controller commit.
+
+**Commands**
+
+```bash
+git tag -a kda-cuda-ownership-launch-foundation 0d7d3be... \
+  -m "Launch-ready KDA CUDA ownership candidate foundation"
+git tag -a kda-cuda-ownership-controller 0d7d3be... \
+  -m "Pinned KDA CUDA ownership protected controller"
+git push origin main
+git push origin refs/tags/kda-cuda-ownership-foundation \
+  refs/tags/kda-cuda-ownership-launch-foundation \
+  refs/tags/kda-cuda-ownership-controller
+research cuda-ownership-supervisor init \
+  --ledger /tmp/kda-cuda-launch-smoke.sqlite3
+research cuda-ownership-supervisor summary \
+  --ledger /tmp/kda-cuda-launch-smoke.sqlite3
+```
+
+**Artifacts**
+
+- The temporary initialization ledger was deleted. The configured ledger under
+  `runs/` remains uninitialized.
+
+**Result**
+
+- Launch foundation and protected controller both peel to
+  `0d7d3be43baad65bf6effc8dff3ea6ce9daf27b8`.
+- The original immutable foundation remains
+  `07d8996eb0fe104e6b07d9a5ae4f2aa31e9f49e6` and was not moved.
+- Remote `main` and all three peeled tag SHAs were independently verified.
+- Temporary initialization pinned controller and launch foundation `0d7d3be...`,
+  fixed cumulative FLA anchor `0b4b24773c2696c23338d7600101d7072b592aa9`,
+  revision 2, and protocol
+  `d30336f61d10a40740667c81f37a7916f93b7f8634a3e7584a35ce68ca99aa24`.
+  Summary reported uncalibrated anchors, the foundation milestone, and
+  `bootstrap` as the next lane.
+
+**Next**
+
+- Initialize the configured ledger and calibrate its anchors only when the
+  campaign is explicitly started. Attempt 1 should branch from the launch
+  foundation and implement only naive native-CUDA `recurrent_decode`.
