@@ -493,3 +493,57 @@ uv run --no-sync python -m pytest -q
 - Intake the exact candidate/hypothesis, run the protected bootstrap supervisor,
   inspect the complete saved artifact, and retain only if eligibility is
   `correct_bootstrap`.
+
+
+## 2026-08-08 [agent] retain correct recurrent CUDA bootstrap
+
+**Context**
+
+- Candidate `da1dea9...` had a clean, independently verified staged handoff, but
+  retention required a separate authoritative supervisor attempt.
+
+**Commands**
+
+```bash
+.venv/bin/research cuda-ownership-supervisor intake \
+  --base-ref 0d7d3be43baad65bf6effc8dff3ea6ce9daf27b8 \
+  --candidate-ref da1dea938d37618306c8dfaf82b5f06ac8628c6c \
+  --hypothesis '<verbatim candidate hypothesis>'
+.venv/bin/research cuda-ownership-supervisor run --attempt 1
+.venv/bin/research cuda-ownership-supervisor retain --attempt 1 \
+  --label 'naive recurrent decode bootstrap' \
+  --reason '<reviewed protected evidence>'
+```
+
+**Artifacts**
+
+- Authoritative attempt:
+  `runs/cuda-ownership-supervisor/df188a2c3f05/attempt-00001`.
+- Final summary is stored in the append-only ledger and materialized as
+  `attempt-00001/summary.json` for direct artifact inspection.
+- Retained milestone 2, ordinal 1, commit
+  `da1dea938d37618306c8dfaf82b5f06ac8628c6c`.
+
+**Result**
+
+- Every authoritative phase completed: protected tests, 16-check runtime audit,
+  Nsight ownership profile, memcheck, racecheck, synccheck, initcheck, and
+  baseline/candidate bounded kernel observations.
+- Decision was `correct_bootstrap`: ownership progressed from 0% to 20% with
+  exactly `recurrent_decode` project-owned. Runtime correctly remained non-FLA-
+  free because chunk and convolution are explicitly unclaimed.
+- The registered operator, actual SM121 compiler command, mapped-library SHA,
+  tracked source SHA, native runtime events, and GPU kernel symbol were bound in
+  saved evidence. No forbidden candidate import was attempted.
+- Recurrent length-1 median was 0.044976 ms versus the matched Python baseline
+  0.172656 ms. Performance is observational in bootstrap and was not used for
+  retention; other measurements include transitional FLA units and are not
+  attributed to the recurrent intervention.
+- The ledger head now derives the `migration` lane. No Git merge or default-
+  backend switch was performed.
+
+**Next**
+
+- Start a fresh candidate from retained commit `da1dea9...` and add the smaller
+  remaining atomic unit: native causal-convolution forward plus backward. Keep
+  recurrent ownership and leave chunk forward/backward unclaimed.
