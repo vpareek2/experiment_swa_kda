@@ -1366,3 +1366,65 @@ git -C ../experiment_swa_kda_cuda_attempt_004 push -u origin \
   initialize only `runs/kda-cuda-ownership-timeout-refreeze.sqlite3`. Calibrate
   fresh anchors and rerun the exact retained milestone chain; never copy old
   SQLite rows or reuse old artifacts.
+
+## 2026-08-08 [agent] freeze and calibrate extended-timeout protocol
+
+**Context**
+
+- The timeout-only diff passed 40 focused supervisor tests and the full suite
+  with 177 passed and 10 skipped. An independent pre-tag review returned PASS.
+- The corrected canonical config comparison reported exactly four changes from
+  the old ledger: controller ref, ledger path, kernel ceiling, and training-block
+  ceiling. No experimental payload or decision gate changed.
+
+**Commands**
+
+```bash
+git commit -m "Refreeze CUDA ownership timeouts"
+git tag -a kda-cuda-ownership-controller-timeout-refreeze \
+  c74bc7553d7c518899f71daef9a33b3464d08e2a \
+  -m "Protected KDA CUDA timeout-only re-freeze"
+git push origin main
+git push origin refs/tags/kda-cuda-ownership-controller-timeout-refreeze
+.venv/bin/research cuda-ownership-supervisor init \
+  --config configs/research/kda_cuda_ownership.toml
+.venv/bin/research cuda-ownership-supervisor calibrate \
+  --config configs/research/kda_cuda_ownership.toml
+```
+
+**Artifacts**
+
+- Immutable controller commit/tag:
+  `c74bc7553d7c518899f71daef9a33b3464d08e2a` /
+  `kda-cuda-ownership-controller-timeout-refreeze`.
+- New protocol SHA:
+  `6fdb0ec11d7efb82ae67bf39997f3601eae08026f5ec12f719f21f1c7c916e7c`.
+- Fresh ledger: `runs/kda-cuda-ownership-timeout-refreeze.sqlite3`.
+- Fresh anchor calibration:
+  `runs/cuda-ownership-supervisor/6fdb0ec11d7e/anchor-calibrations/attempt-0001`;
+  calibration summary SHA-256
+  `8be236ed23a4468d9e4a6bb7207f7ec916da580c9bba4493832f747e3156dbc4`.
+
+**Result**
+
+- Remote `main` and the annotated tag were pushed and the tag peels exactly to
+  `c74bc755...`. Every `CONTROLLER_PATHS` byte in the coordinator matches that
+  immutable tag.
+- Fresh initialization pinned unchanged foundation
+  `0d7d3be43baad65bf6effc8dff3ea6ce9daf27b8`, unchanged cumulative anchor
+  `0b4b24773c2696c23338d7600101d7072b592aa9`, and controller `c74bc755...`.
+- Python and FLA anchors completed in the new namespace. The new ledger is
+  independent and initially 122,880 bytes after calibration. The old ledger
+  remains 647,168 bytes with unchanged SHA-256
+  `14bce91dee58aaa21a59c87be24eb37b821472d8711ce2fc310553d77331267c`.
+- No candidate evidence has yet been imported or copied. The fresh retained head
+  is the unchanged protected foundation, and reconstruction must rerun every
+  candidate under this protocol.
+
+**Next**
+
+- Reconstruct the exact retained chain with fresh intake/run/review/retain:
+  `da1dea938...`, then `146e9090...`, then `4d1a3b231...`. Use the original
+  verbatim hypotheses but new evidence-backed retention reasons. Stop on any
+  mismatch. Only after the fresh FLA-free milestone is retained may exact
+  candidate `613b0759...` re-enter optimization.
