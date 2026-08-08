@@ -547,3 +547,42 @@ uv run --no-sync python -m pytest -q
 - Start a fresh candidate from retained commit `da1dea9...` and add the smaller
   remaining atomic unit: native causal-convolution forward plus backward. Keep
   recurrent ownership and leave chunk forward/backward unclaimed.
+
+
+## 2026-08-08 [agent] launch causal-convolution migration attempt
+
+**Context**
+
+- Retained milestone 2 owns recurrent decode only and derives the migration lane.
+- The smaller remaining atomic unit is causal-convolution forward plus backward;
+  choosing it preserves incremental educational ownership evidence before the
+  larger chunk autograd unit.
+
+**Commands**
+
+```bash
+git worktree add -b kda-cuda/convolution-migration-002 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_002 \
+  da1dea938d37618306c8dfaf82b5f06ac8628c6c
+```
+
+**Artifacts**
+
+- Candidate worktree:
+  `/home/veer/Master/projects/experiment_swa_kda_cuda_attempt_002`.
+- Candidate branch: `kda-cuda/convolution-migration-002`.
+
+**Result**
+
+- Autonomous candidate `attempt2-convolution` was launched from the exact
+  retained SHA. Its scope is naive native convolution forward/backward, including
+  cache-tail gradients, while preserving recurrent ownership and leaving both
+  chunk components unclaimed.
+- Independent no-edit reviewer `attempt2-reviewer` was launched for ABI, indexing,
+  gradient, provenance, profile, and sanitizer review.
+- No attempt-2 candidate has been checked, committed, intaken, run, or retained.
+
+**Next**
+
+- Require a clean pushed strict ownership superset and genuine runtime/Nsight/all-
+  sanitizer checker pass before authoritative migration intake.
