@@ -1211,3 +1211,84 @@ git -C ../experiment_swa_kda_cuda_attempt_004 push -u origin \
   times out as predicted, record attempt 4 as invalid with exact censored
   evidence, do not retain or claim optimization, and stop rather than weaken a
   frozen timeout or skip the nine matched blocks.
+
+## 2026-08-08 [agent] preserve strict optimization entry failure
+
+**Context**
+
+- The exact checker-qualified and pushed attempt-4 candidate was intaken to
+  exercise the frozen optimization supervisor without changing or bypassing any
+  parent, kernel, training, timeout, memory, drift, or confidence gate.
+- The retained parent is intentionally the immutable naive milestone. Its
+  migration kernel observation had already been censored at 180 seconds.
+
+**Commands**
+
+```bash
+.venv/bin/research cuda-ownership-supervisor intake \
+  --config configs/research/kda_cuda_ownership.toml \
+  --base-ref 4d1a3b231da2c99882324efbda5306a1815e21c7 \
+  --candidate-ref 613b0759d3b954cae984274b267a83a5c4ac46ff \
+  --hypothesis "<verbatim profile-supported hypothesis above>"
+.venv/bin/research cuda-ownership-supervisor run \
+  --config configs/research/kda_cuda_ownership.toml --attempt 4
+.venv/bin/research cuda-ownership-supervisor summary \
+  --config configs/research/kda_cuda_ownership.toml
+```
+
+**Artifacts**
+
+- Authoritative attempt:
+  `runs/cuda-ownership-supervisor/ba64643fd7fd/attempt-00004`.
+- Candidate kernel payload SHA-256
+  `a319cf1d14f704c2731347e2118faad8596be03685a9620b59e0d3582c4a9af2`.
+- Runtime audit SHA-256
+  `d6c75798cd7377b614af130010691832a9a577d6288e9331c281f56c01df9d5d`;
+  ownership profile SHA-256
+  `a90136d3719a871cfbf69896fc4baffd55b27ae033134a4aff25475e94127243`.
+- Authoritative isolated mapped library SHA-256
+  `694fbdcf1ea81dfdc312237aaae360466f1d4330b5adf4e31a8e0eae17facd83`.
+- Intake normalized patch SHA-256
+  `fcc11b13153fed7fab7a7162f49cf02cd840979f08c95cf6a004a289356e8950`.
+
+**Result**
+
+- Intake accepted attempt 4 in the optimization lane from exact milestone 4.
+  Candidate `613b0759...` has exact parent `4d1a3b2...` and changes only
+  `nanochat/mixers/cuda_kda/chunk.cu`.
+- All mandatory pre-timing candidate evidence completed: 52 protected tests,
+  all 21 runtime checks, exact 1.0 ownership, runtime FLA freedom, five operator
+  traces, five Nsight kernel symbols, complete SM121 build/source/library
+  provenance, and genuine zero memcheck/racecheck/synccheck/initcheck results.
+- The exact retained-parent kernel worker then timed out after the frozen 180.0
+  seconds and emitted no `baseline-kernel.json`. This is a censored invalid
+  worker, not a numeric baseline score. The candidate worker completed all 22
+  rows and 50 samples per row; its protected but unpaired T=4096 medians were
+  193.697 ms for chunk forward and 727.902 ms for chunk forward/backward.
+- Because optimization requires both kernel workers to complete before matched
+  training, the supervisor launched zero of the nine required paired blocks.
+  No paired confidence interval, peak-memory comparison, kernel-regression
+  comparison, or baseline-drift measurement exists.
+- The authoritative terminal row is exactly `status=invalid`,
+  `migration_decision=invalid`, `performance_decision=invalid`,
+  `eligibility_decision=not_retainable`, with reason `protected
+  correctness/safety/evidence gate failed`; summary and milestone id are null.
+  An independent reviewer confirmed retention is categorically forbidden.
+- The retained head and immutable naive anchor remain
+  `4d1a3b231da2c99882324efbda5306a1815e21c7`, all five units owned,
+  ownership 1.0, runtime FLA-free; the derived lane remains optimization.
+  Candidate and coordinator worktrees are clean, remote refs are verified, and
+  no supervisor, worker, sanitizer, compiler, or GPU process remains.
+
+**Next**
+
+- Stop the current frozen optimization lane. Every new candidate would inherit
+  the same exact retained baseline, and the protected supervisor requires that
+  baseline's stricter T=4096/50 kernel worker to complete before block 0. A
+  retry, advisory reinterpretation, shortened payload, raised timeout, skipped
+  parent, or retention would weaken/change the frozen protocol.
+- Preserve attempt 4 and branch `kda-cuda/chunk-backward-parallel-004` as
+  diagnostic evidence only. Do not retain, rerun, merge, score, or claim an
+  optimized backend. Further work requires explicit human authorization for a
+  protected protocol redesign and re-freeze; the complete naive project-owned,
+  runtime-FLA-free milestone remains the valid campaign result.
