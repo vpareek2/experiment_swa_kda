@@ -330,3 +330,52 @@ research cuda-ownership-supervisor summary \
 - Initialize the configured ledger and calibrate its anchors only when the
   campaign is explicitly started. Attempt 1 should branch from the launch
   foundation and implement only naive native-CUDA `recurrent_decode`.
+
+
+## 2026-08-08 [agent] initialize campaign and launch recurrent bootstrap attempt
+
+**Context**
+
+- The user explicitly authorized the protected CUDA autoresearch campaign to run
+  autonomously overnight.
+- The coordinator was clean at pushed `main`; the configured campaign ledger did
+  not yet exist and no GPU process was active.
+
+**Commands**
+
+```bash
+.venv/bin/research cuda-ownership-supervisor init \
+  --config configs/research/kda_cuda_ownership.toml
+.venv/bin/research cuda-ownership-supervisor calibrate \
+  --config configs/research/kda_cuda_ownership.toml
+git worktree add -b kda-cuda/recurrent-bootstrap-001 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_001 \
+  kda-cuda-ownership-launch-foundation
+```
+
+**Artifacts**
+
+- Ledger: ignored `runs/kda-cuda-ownership.sqlite3`.
+- Calibration:
+  `runs/cuda-ownership-supervisor/d30336f61d10/anchor-calibrations/attempt-0001`.
+- Candidate worktree:
+  `/home/veer/Master/projects/experiment_swa_kda_cuda_attempt_001`.
+
+**Result**
+
+- Initialization pinned launch foundation/controller
+  `0d7d3be43baad65bf6effc8dff3ea6ce9daf27b8`, fixed cumulative FLA anchor
+  `0b4b24773c2696c23338d7600101d7072b592aa9`, and protocol
+  `d30336f61d10a40740667c81f37a7916f93b7f8634a3e7584a35ce68ca99aa24`.
+- Python and FLA anchors calibrated successfully. Comparable length-1 recurrent
+  medians were 0.170736 ms (Python) and 0.046528 ms (FLA); complete per-shape
+  evidence remains in the calibration artifact.
+- Autonomous candidate `attempt1-recurrent` was launched from the exact retained
+  base with scope limited to a naive native-CUDA `recurrent_decode`; chunk,
+  convolution, PTX, optimization, and supervisor actions are excluded.
+- No candidate has yet been intaken, run, or retained.
+
+**Next**
+
+- Require a clean pushed candidate, full ledger-free checker including all four
+  sanitizers, and exact handoff. Independently verify it before intake.
