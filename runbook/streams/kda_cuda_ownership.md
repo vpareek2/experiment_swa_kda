@@ -1605,3 +1605,87 @@ kill -TERM -- -313575
   training evidence; distinguish any bridge eligibility from a statistical
   optimization-retention claim. Obtain explicit agreement on the new comparison
   and decision rule before another protected protocol freeze.
+
+## 2026-08-08 [agent] replace per-edit confirmation with an overnight development funnel
+
+**Context**
+
+- The human rejected spending about 95% of kernel-development time in the
+  confirmation evaluator and authorized an immediate fast loop. Pure kernel
+  measurement and one bounded full-model throughput block are now the normal
+  development gates; the nine-pair confirmation suite is reserved for a
+  plateau, a major strategy boundary, a roughly four-hour checkpoint, or the
+  final candidate.
+- The exact naive parent has already been measured at great cost. It must never
+  run in the inner loop again. Exact `613b0759...` is the non-official
+  development baseline because it is project-owned/runtime-FLA-free,
+  checker-qualified, and has complete kernel and exact 4k model-throughput
+  diagnostics. This designation makes no quality or confirmation claim and
+  does not change the official retained milestone.
+
+**Commands**
+
+```bash
+# Create the first fast-loop worktree from the checker-qualified implementation.
+git worktree add -b kda-cuda/batch-parallel-backward-005 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_005 613b0759...
+uv run --no-sync python -m pytest -q tests/test_kda_cuda_development.py
+# Result: 13 passed
+```
+
+**Artifacts**
+
+- Fast-loop policy: `runs/kda-cuda-development/development-policy.json`, SHA-256
+  `dec9c1cce7ec4456b333ec6c5e1e1df07c2e4026883b9b94d8ce05bc55ef848f`.
+- Development-baseline manifest:
+  `runs/kda-cuda-development/baseline/613b0759.json`, SHA-256
+  `1b5636aa0824e5ebafae231a203227adcb4dbe7d1a96e502679b0fb90ba42ff9`.
+- Slow-loop presentation archive:
+  `runs/kda-cuda-development/evidence/slow-loop-archive-001/index.json`,
+  initial SHA-256
+  `25114ba28a0d2a7901a6af090ca20769c5135a673f0f625be9dbe3811f0dd2dc`.
+  It copies key timing, Nsight, checker, and timeout-sizing files from ephemeral
+  roots and references both authoritative ledgers/supervisor namespaces. The
+  seven-step diagnostic logs were recovered from the immutable session JSONL
+  after revived persisted file handles re-truncated the original `/tmp` logs;
+  this limitation is explicit and the diagnostic remains non-conclusion-bearing.
+- Public/offline reference manifest:
+  `runs/kda-cuda-development/reference-sources.json`. Exact local pins include
+  FlashKDA `1ce47ea3...`, FLA `a3edffc3...`, and MIT Lethe
+  `e3ed0ccb...`; none may be runtime-imported by a candidate.
+
+**Result**
+
+- Added `scripts/kda_cuda_development.py`, a non-conclusion-bearing append-only
+  Level-1 harness. It refuses artifact collisions, captures both worktrees'
+  commit/status/diff/source hashes and all subprocess logs, keeps each root in
+  an isolated process/cache, safely terminates process groups, runs protected
+  candidate runtime audit, and measures exact production B=2, H=3, K=V=128 at
+  T=256/1024/4096 with three warmups and ten samples.
+- Level 1 advances only when T=4096 forward+backward improves at least 3%, every
+  important latency row is within 5%, peak allocation is within 3%, and the
+  audit/process payloads are complete. Its subprocess ceiling is 300 seconds.
+- Level 2 is deliberately not auto-launched: the harness records a fresh UUID
+  namespace and exact baseline/candidate six-layer 4k trainer commands in an
+  explicitly alternating order. One baseline/candidate block is used only for
+  a Level-1 winner and requires at least 2% model-throughput improvement,
+  finite steps, and peak memory within 3%.
+- Online/local review agrees that the low-risk first change is B*H backward
+  parallelism with deterministic per-batch parameter-gradient partials. The
+  larger non-naive direction is a project-owned CUDA chunkwise WY/UT training
+  path modeled from the published KDA/DeltaNet equations and offline FLA
+  structure: C=64 gives 384 independent chunk CTAs at the target shape and
+  replaces roughly 1.5 GiB of per-token FP32 history with compact chunk
+  boundaries. Lethe corroborates a reverse state-adjoint scan plus WY VJP but
+  its SM100 `tcgen05`/TMEM implementation cannot run on GB10 SM121.
+
+**Next**
+
+- Complete attempt 5's single-axis B*H backward split, run the fast Level-1
+  artifact once, and run one bounded Level-2 baseline/candidate pair only if it
+  clears Level 1. Preserve the attempt regardless of outcome.
+- Continue with shared invariant hoisting as a separate low-risk axis. In
+  parallel, design the C=64 ordinary-CUDA WY/UT path from equations/offline
+  references rather than repeatedly polishing the token-serial algorithm.
+- Never launch the naive parent or the nine-pair confirmation suite in the
+  inner loop. Confirm only at the agreed sparse cadence.
