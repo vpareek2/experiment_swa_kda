@@ -28,7 +28,8 @@ class CampaignConfig:
     max_attempts: int = 24
     seed: int = 42
     candidate_paths: tuple[str, ...] = ("nanochat/mixers/cuda_kda/",)
-    foundation_ref: str = "kda-cuda-ownership-foundation"
+    foundation_ref: str = "kda-cuda-ownership-launch-foundation"
+    controller_ref: str = "kda-cuda-ownership-controller"
     cumulative_performance_anchor_ref: str = "0b4b24773c2696c23338d7600101d7072b592aa9"
     max_patch_bytes: int = 2_000_000
 
@@ -221,8 +222,8 @@ def validate_cuda_campaign_config(config: KdaCudaCampaignConfig) -> None:
     bootstrap, migration, optimization, reporting = config.bootstrap, config.migration, config.optimization, config.reporting
     if not campaign.ledger_path or not campaign.artifact_root or not campaign.candidate_paths or campaign.max_attempts <= 0 or campaign.max_patch_bytes <= 0:
         raise CudaCampaignConfigError("campaign paths and positive attempt budget are required")
-    if not campaign.foundation_ref or not campaign.cumulative_performance_anchor_ref:
-        raise CudaCampaignConfigError("campaign foundation and cumulative performance refs are required")
+    if not campaign.foundation_ref or not campaign.controller_ref or not campaign.cumulative_performance_anchor_ref:
+        raise CudaCampaignConfigError("campaign foundation, controller, and cumulative performance refs are required")
     if not ownership.required_components or len(ownership.required_components) != len(ownership.component_weights):
         raise CudaCampaignConfigError("ownership components and weights must be non-empty and aligned")
     if len(set(ownership.required_components)) != len(ownership.required_components):

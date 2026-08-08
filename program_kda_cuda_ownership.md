@@ -4,183 +4,304 @@
 
 Show, with immutable evidence, how autonomous research moves KDA from its
 sequential PyTorch oracle through a naive native-CUDA bootstrap to an optimized,
-FLA-free, project-owned backend. The end state is stronger than the minimum
-ownership goal: all five frozen KDA capabilities are project-owned, while
-selective PTX is accepted only after a measured CUDA-path A/B.
+FLA-free, project-owned backend. The end state is all five frozen KDA
+capabilities project-owned, with selective PTX only after a measured CUDA-path
+A/B.
 
 This is backend systems research. It does not evaluate or claim language-model
-quality. Read `AGENTS.md`, this file, `runbook/streams/kda_cuda_ownership.md`,
-and the latest `research cuda-ownership-supervisor summary` before working.
-The completed speed campaign is read-only historical context and is never
-arithmetically combined with this campaign.
+quality. Read `AGENTS.md`, this file,
+`runbook/streams/kda_cuda_ownership.md`, and the latest coordinator-produced
+summary before working. The completed speed campaign is read-only historical
+context and is never arithmetically combined with this campaign.
 
-## Roles and hypothesis freedom
+## Roles and source ownership
 
-The Prime parent owns the protected ledger, retained-milestone head, worktrees,
-commands, evidence, and runbook. A child owns exactly one committed candidate
-in its assigned worktree. The supervisor derives the maturity lane from the
-retained head; within that lane, the model chooses its own mechanistic
-hypothesis. There is no supervisor-authored menu or rotation of attempt
-categories.
+The coordinator owns the protected interpreter, CLI, worker, ledger,
+retained-milestone head, worktrees, evidence, and runbook. A candidate child
+owns exactly one committed change in its assigned worktree and edits only
+`nanochat/mixers/cuda_kda/`. The supervisor derives the lane from the retained
+head; within that lane the model chooses its own mechanistic hypothesis.
 
-The first child receives one deliberate instruction: **write the simplest
-correct naive project-owned CUDA implementation for at least one atomic unit;
-optimize nothing and use no PTX.** The model writes this code, not the human.
+The coordinator tree must remain clean for conclusion-bearing work. Candidates
+must not edit protected routing, workers, tests, config, evaluation code, or the
+runbook. They may read `nanochat/mixers/cuda_kda/README.md`, but **must not edit
+or stage that README**. It is protected onboarding documentation despite living
+inside the candidate directory.
 
-## Frozen Git and source contract
+The recommended first bootstrap task is deliberately narrow:
 
-After review, commit this protected foundation and create the immutable tag
-`kda-cuda-ownership-foundation`. Never move it or any `kda-speed-*` tag. Every
-candidate branches from the current human-retained milestone and is pushed
-before intake. The coordinator remains clean. Never checkout/reset/clean/rebase,
-force-push, automatically merge, or automatically move a tag.
+> Implement the simplest correct naive native-CUDA `recurrent_decode` atomic
+> unit only. Optimize nothing, use no PTX, and leave every other component
+> explicitly third-party.
 
-Candidates edit only `nanochat/mixers/cuda_kda/`. Tracked `.cu/.cuh`, C++/header,
-Python build glue, JSON claims, and selectively justified PTX are allowed.
-Generated `.so/.o/.a/.cubin`, dependency/toolchain changes, site-package
-patches, downloads, and runtime imports from FLA, the protected reference, or
-`ref/` are forbidden.
+This recurrent-only milestone has the smallest forward-only surface and still
+meets the 20% bootstrap ownership floor. Protected routing supplies FLA only for
+unclaimed units. The model writes the CUDA and minimal loading/registration
+code; no human-authored build helper or frozen ABI implementation is supplied.
 
-A project-owned claim requires tracked native CUDA source, an isolated-cache
-loaded library hash, an SM121 build receipt, a registered `nanochat_kda::` CUDA
-operator whose return values are consumed directly by protected routing,
-expected kernel symbols, and protected runtime dispatch evidence.
-Python/Triton wrappers do not inflate native-CUDA ownership.
+## Candidate source contract
+
+Allowed candidate artifacts are tracked `.py`, `.cu`, `.cuh`, `.cpp`, `.cc`,
+`.h`, `.hpp`, `.ptx`, and `.json` sources under
+`nanochat/mixers/cuda_kda/`. Generated `.so`, `.o`, `.a`, `.cubin`, dependency
+or toolchain changes, site-package patches, downloads, symlinks, submodules,
+and runtime imports from FLA, the protected oracle, or `ref/` are forbidden.
+Bootstrap also forbids PTX.
+
+The protected scanner is case-insensitive and rejects these exact byte
+substrings in candidate source, including comments and strings:
+
+```text
+import fla
+from fla
+_run_fla
+_fla_ops
+_fla_causal_conv1d
+_reference_kda
+tests.kda_oracle
+/ref/
+tcgen05
+tmem
+```
+
+Python executable source additionally may not contain `torch.library` or
+`from torch import library`; registration must originate in the loaded native
+extension. The audit strips comments before checking these tokens, so harmless
+explanatory comments are allowed. SM121 does not support the forbidden
+instruction-family tokens above.
+
+A project-owned claim ultimately requires tracked native CUDA source, an
+isolated-cache loaded library hash, an SM121 build receipt, a registered
+`nanochat_kda::` CUDA operator whose returned tensors protected routing consumes,
+expected kernel symbols, and protected runtime/profile evidence. Python or
+Triton wrappers do not inflate CUDA ownership. The operator namespace, names, argument order, returns, shapes, dtypes, and
+build-receipt contract in the candidate README are frozen protected ABI. If the
+protected dispatcher and guide disagree, stop and ask the coordinator to
+clarify the boundary.
+
+## Math and protected source map
+
+Use these read-only sources instead of guessing the recurrence:
+
+- `tests/kda_oracle.py`: independent canonical math, V-first public state,
+  convolution cache convention, and full-layer composition.
+- `nanochat/mixers/kda.py`: protected production dispatch and autograd boundary;
+  read it to see what a claimed operator must return, never edit it.
+- `nanochat/research/cuda_worker.py`: protected runtime, source, ownership,
+  boundary, gradient, profile, and sanitizer checks.
+- `configs/research/kda_cuda_ownership.toml`: frozen lanes, shapes, tolerances,
+  timeouts, and component weights.
+- `nanochat/mixers/cuda_kda/README.md`: read-only frozen native ABI, build
+  helper contract, and provenance schema.
+- `ref/FlashKDA/`: offline reference context only. Never import it, add it to
+  provenance, or mention its runtime path in candidate source.
+
+For each token, in FP32 recurrence math:
+
+```text
+q_hat = normalize(q) * resolved_scale
+k_hat = normalize(k)
+decay = lower_bound * sigmoid(exp(A_log) * (raw_gate + dt_bias))
+beta  = sigmoid(beta_logits)
+S     = S * exp(decay)                         # internal K-first [B,H,K,V]
+pred  = k_hat @ S
+S     = S + (beta * k_hat) outer (v - pred)
+out   = q_hat @ S
+```
+
+The public initial/final state is V-first `[B,H,V,K]`; transpose only at the
+boundary. Inputs and output are normally BF16, recurrence/state computation is
+FP32, the initial state must not be mutated, and `output_final_state=False` must
+follow the protected return contract. The recurrent operator is inference-only
+in the current protected audit. Treat this map as mathematical guidance; use
+the live protected dispatcher for adjustable call details rather than inventing
+an ABI.
 
 ## Atomic migration units
 
-Forward/backward capabilities that share one autograd boundary migrate together:
+Forward/backward capabilities sharing an autograd boundary migrate together:
 
-1. `chunk_forward` + `chunk_backward` (weight 60%)
-2. `recurrent_decode` (weight 20%)
-3. `causal_convolution_forward` + `causal_convolution_backward` (weight 20%)
+1. `chunk_forward` + `chunk_backward` (60%)
+2. `recurrent_decode` (20%)
+3. `causal_convolution_forward` + `causal_convolution_backward` (20%)
 
-Protected routing calls the candidate only for claimed units. During bootstrap
-and migration it calls protected FLA only for explicitly unclaimed units. A
-claimed unit resolving to FLA is invalid. The optimization lane requires every
-unit project-owned and observes zero runtime FLA.
+Bootstrap needs at least one whole unit. Migration requires a strict ownership
+superset of the retained parent. Optimization requires all units project-owned
+and zero observed runtime FLA.
 
-## One-time launch preparation
+## Worktree onboarding and ledger-free candidate check
 
-From the reviewed clean foundation commit:
+A candidate worktree intentionally does not get its own environment. Reuse the
+coordinator's interpreter and current protected worker. Do not run `uv sync`,
+do not create a candidate `.venv`, and do not invoke `research` from the
+candidate worktree: doing so can select candidate/stale protected code.
+
+The checker executes exactly the staged snapshot, so it rejects any unstaged or
+untracked file anywhere in the candidate worktree. Stage only candidate sources,
+then return to the coordinator for the command:
 
 ```bash
-git tag -a kda-cuda-ownership-foundation -m "Protected KDA CUDA-ownership autoresearch foundation" <foundation-commit>
-research cuda-ownership-supervisor init --config configs/research/kda_cuda_ownership.toml
-research cuda-ownership-supervisor calibrate --config configs/research/kda_cuda_ownership.toml
-research cuda-ownership-supervisor summary --config configs/research/kda_cuda_ownership.toml
+WORKTREE=/absolute/path/to/candidate-worktree
+COORDINATOR=/absolute/path/to/clean/coordinator
+LANE=bootstrap
+
+# Candidate worktree: inspect, then stage the intended source snapshot.
+git -C "$WORKTREE" status --short
+git -C "$WORKTREE" add -- nanochat/mixers/cuda_kda
+
+# Coordinator: shared environment + current protected worker.
+cd "$COORDINATOR"
+uv run --no-sync research cuda-candidate-check \
+  --config configs/research/kda_cuda_ownership.toml \
+  --worktree "$WORKTREE" --lane "$LANE"
 ```
 
-Calibration saves bounded, comparison-compatible sequential-PyTorch and retained
-FLA operator anchors. It does not modify either implementation.
-
-## Candidate cycle
+By default artifacts and both compiler caches are created under an isolated
+`/tmp/nanochat-cuda-candidate-*` directory and retained for diagnosis. A caller
+may instead provide a new or empty directory and caches outside the worktree:
 
 ```bash
-research cuda-ownership-supervisor intake \
+cd "$COORDINATOR"
+uv run --no-sync research cuda-candidate-check \
+  --worktree "$WORKTREE" --lane "$LANE" \
+  --artifact-dir /tmp/kda-check-recurrent \
+  --extension-cache /tmp/kda-check-recurrent/torch-extensions \
+  --cuda-cache /tmp/kda-check-recurrent/cuda-cache \
+  --sanitizers
+```
+
+The protected command performs staged-source/scope checks, builds during the
+runtime audit, runs the protected runtime audit, then runs the bounded ownership
+profile. `--sanitizers` additionally runs memcheck, racecheck, synccheck, and
+initcheck. It neither initializes nor reads/writes the campaign ledger and
+cannot retain a result. A preflight pass is diagnostic only: committed intake
+and the full supervisor run remain authoritative.
+
+## Commit and exact handoff
+
+After the checker passes, inspect the diff, commit the exact staged tree, push
+the candidate branch, and send one handoff. Do not merge or retain it yourself.
+
+```bash
+git -C "$WORKTREE" diff --cached --check
+git -C "$WORKTREE" commit -m "Implement naive CUDA recurrent decode"
+git -C "$WORKTREE" push <remote> HEAD:<candidate-branch>
+git -C "$WORKTREE" rev-parse HEAD
+git -C "$WORKTREE" status --short
+```
+
+Use this exact handoff schema (write `none` rather than omitting a field):
+
+```text
+CUDA_CANDIDATE_HANDOFF
+lane: <bootstrap|migration|optimization>
+worktree: <absolute path>
+branch: <pushed branch>
+base_sha: <40-hex retained parent>
+candidate_sha: <40-hex committed candidate>
+hypothesis: <mechanism and predicted correctness/profile observable>
+changed_paths: <comma-separated paths>
+checker_summary: <absolute .../summary.json>
+sanitizers: <passed|not-run|failed>
+known_issues: <none or exact issue>
+worktree_status: <clean or exact porcelain output>
+```
+
+The coordinator verifies the SHA and base before using the hypothesis verbatim
+for intake.
+
+## Coordinator launch and candidate cycle
+
+From the reviewed clean foundation commit, the coordinator alone runs:
+
+```bash
+git tag -a kda-cuda-ownership-foundation \
+  -m "Protected KDA CUDA-ownership autoresearch foundation" <foundation-commit>
+uv run --no-sync research cuda-ownership-supervisor init \
+  --config configs/research/kda_cuda_ownership.toml
+uv run --no-sync research cuda-ownership-supervisor calibrate \
+  --config configs/research/kda_cuda_ownership.toml
+uv run --no-sync research cuda-ownership-supervisor summary \
+  --config configs/research/kda_cuda_ownership.toml
+```
+
+After a valid handoff:
+
+```bash
+uv run --no-sync research cuda-ownership-supervisor intake \
   --base-ref <current-retained-commit> \
   --candidate-ref <pushed-candidate-sha> \
   --hypothesis "<model-chosen mechanism and predicted observables>"
-research cuda-ownership-supervisor run --attempt <id>
-research cuda-ownership-supervisor summary --attempt <id>
+uv run --no-sync research cuda-ownership-supervisor run --attempt <id>
+uv run --no-sync research cuda-ownership-supervisor summary --attempt <id>
 ```
 
-Intake rejects a base other than the current retained head. After reviewing a
-milestone-eligible result, the human/supervising parent appends it explicitly:
+Human-reviewed retention is explicit:
 
 ```bash
-research cuda-ownership-supervisor retain --attempt <id> \
+uv run --no-sync research cuda-ownership-supervisor retain --attempt <id> \
   --label "<short milestone label>" --reason "<evidence-backed reason>"
 ```
 
 `retain` changes only the append-only ledger head. It does not merge, tag, or
-edit Git. Invalid, rejected, and non-retained attempts remain visible forever.
-A stale parallel attempt cannot advance the head.
+edit Git. Invalid, rejected, stale, and non-retained attempts remain visible.
 
-## Derived lanes
+## Derived lane decisions
 
 ### Bootstrap
 
-- No retained CUDA candidate exists.
-- At least one atomic unit must become verified native CUDA.
-- Strong correctness and all four sanitizer tools are mandatory.
-- Kernel timing is bounded and observational; a timeout is saved explicitly as
-  a censored observation and does not invalidate otherwise correct code.
-- Crashes, NaNs, malformed evidence, and correctness/safety failures are invalid.
-- FLA is allowed only for unclaimed units.
-- PTX is forbidden.
-- Retainable decision: `correct_bootstrap`.
+At least one atomic unit must become verified native CUDA. Correctness,
+ownership, build, profile, and all supervisor sanitizer checks are mandatory.
+Kernel timing is bounded and observational: a performance timeout is a saved
+censored observation, not a correctness win or loss. PTX is forbidden.
+Retainable decision: `correct_bootstrap`.
 
 ### Migration
 
-- Each retained candidate must be a strict ownership superset of its parent.
-- Claimed units use project CUDA; unclaimed units may still use protected FLA.
-- Correctness, source/binary/operator receipts, sanitizers, and bounded profiles
-  remain mandatory. Performance remains observational.
-- Retainable decisions: `validated_component`, then `fla_free_naive` when all
-  units are project-owned and no FLA executes.
-- The first `fla_free_naive` milestone becomes the immutable naive-CUDA speed
-  anchor for the educational waterfall.
+Each retained candidate is a strict ownership superset. Claimed units use
+project CUDA; only unclaimed units may use protected FLA. Correctness, receipts,
+sanitizers, and profiles remain mandatory; performance remains observational.
+Retainable decisions are `validated_component`, then `fla_free_naive` when all
+units are project-owned and no FLA executes. The first complete milestone is
+the immutable naive-CUDA speed anchor.
 
 ### Optimization
 
-- Opens only after a retained complete FLA-free naive backend.
-- All units must remain project-owned; any FLA execution is invalid.
-- Parent and candidate both run `project_cuda` in nine alternating A/B, B/A
-  4k-training blocks, with two warmups and five timed steps per process.
-- The paired log-ratio 95% Student-t interval resolves 0.75% effects; peak
-  allocation, kernel-latency, and one-percent baseline-drift limits apply.
-- Only a statistically improved, resource-safe candidate is milestone-eligible
-  as `optimization_retained`.
+All units remain project-owned and FLA-free. Parent and candidate run nine
+alternating A/B, B/A 4k-training blocks. The paired log-ratio 95% Student-t
+interval resolves the frozen effect, while memory, kernel-latency, and baseline
+drift gates apply. Only a statistically improved and resource-safe candidate
+is eligible as `optimization_retained`.
 
-## Correctness, safety, profiling, and PTX
+## Deadline and timeout distinctions
 
-Every lane validates independent-oracle outputs, V-first FP32 state, tile and
-recurrence boundaries, unequal K/V dimensions, nonzero-state nonmutation,
-causality, extreme gates, output/state gradients, complete-layer gradients, and
-chunk/recurrent equivalence. Compute Sanitizer memcheck, racecheck, synccheck,
-and initcheck are mandatory.
+- A candidate-agent handoff deadline is a coordination deadline. When reached,
+  stop starting work, terminate owned foreground jobs, and hand off exact state;
+  do not leave background GPU or compiler processes.
+- Checker runtime/profile and sanitizer timeouts come from the frozen config and
+  bound individual subprocesses. Extending an agent deadline does not extend
+  these protected subprocess limits.
+- In bootstrap/migration, only bounded *performance* timeout is observational.
+  Build, runtime, correctness, profile, NaN, crash, and sanitizer timeout/failure
+  are invalid preflight or campaign results.
+- Optimization training-block and release deadlines are supervisor gates and
+  cannot be replaced by a candidate check or a longer agent turn.
 
-Microbenchmarks retain raw decode, chunk forward/backward, and causal-convolution
-forward/backward samples. Profiles are bounded key averages, capped at 256 KiB,
-and never export Chrome traces.
-
-Bootstrap forbids PTX. Later PTX needs an exact declaration, SM guard, ordinary
-CUDA fallback, source/build evidence, disabled-PTX correctness, and at least the
-frozen 2% same-commit latency benefit. `tcgen05` and TMEM remain forbidden on
-SM121.
-
-## Educational anchors and report
+## Reporting and fixed-anchor release
 
 ```bash
-research cuda-ownership-supervisor report --format json
-research cuda-ownership-supervisor report --format markdown --output cuda-journey.md
+uv run --no-sync research cuda-ownership-supervisor report --format json
+uv run --no-sync research cuda-ownership-supervisor report \
+  --format markdown --output cuda-journey.md
+uv run --no-sync research cuda-ownership-supervisor verify-release --milestone <id>
 ```
 
-The report retains all raw attempts and shows compatible per-shape speedups
-against the sequential Python anchor, FLA operator anchor, first bootstrap,
-first complete FLA-free naive backend, and direct parent. Ownership changes are
-reported as explicit components and percentage points.
+The report preserves all attempts and compatible per-shape anchors. Chained
+optimization point estimates are illustrative only, never gates or confidence
+intervals. Release verification uses fifteen fixed-anchor interleaved pairs and
+requires all ownership/safety/resource gates plus a lower 95% throughput bound
+of at least +3%.
 
-Chained retained optimization point estimates are illustrative only—never a
-gate or confidence interval. Historical speed evidence is a hash-pinned,
-non-comparison-compatible context section and is never multiplied into the
-CUDA campaign.
-
-## Fixed-anchor release verification
-
-After retaining a complete milestone:
-
-```bash
-research cuda-ownership-supervisor verify-release --milestone <id>
-```
-
-This appends a separate immutable release run: fifteen interleaved pairs compare
-that exact project-CUDA milestone directly against clean fixed anchor
-`0b4b24773c2696c23338d7600101d7072b592aa9`. Promotion requires all ownership,
-safety, resource gates and a lower 95% throughput-confidence bound of at least
-+3%. It never overwrites discovery evidence.
-
-Switching the default backend remains a separate human-reviewed release step
+Switching the default backend remains a separate human-reviewed release action
 after protected integration and the current general-LM evaluation plan. The
-inner loop never launches quality training by itself.
+CUDA ownership loop never launches quality training itself.

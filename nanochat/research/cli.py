@@ -9,6 +9,8 @@ import sys
 from nanochat.research.artifacts import atomic_write_json
 from nanochat.research.config import ConfigError, apply_candidate, load_config
 from nanochat.research.cuda_config import CudaCampaignConfigError, load_cuda_campaign_config
+from nanochat.research.cuda_candidate import run_cuda_candidate_check
+from nanochat.research.cuda_preflight import run_cuda_preflight, run_cuda_preflight_sanitizers
 from nanochat.research.cuda_supervisor import (calibrate_anchors as cuda_calibrate, campaign_report as cuda_report, initialize as cuda_initialize, intake as cuda_intake, recover_interrupted as cuda_recover, render_campaign_report as render_cuda_report, retain as cuda_retain, run_attempt as cuda_run_attempt, summary as cuda_summary, verify_release as cuda_verify_release)
 from nanochat.research.decision import aggregate_objectives, calibrate_objectives
 from nanochat.research.probe import run_memory_probe
@@ -122,6 +124,20 @@ def build_parser() -> argparse.ArgumentParser:
     cuda_view.add_argument("--config", default="configs/research/kda_cuda_ownership.toml")
     cuda_view.add_argument("--attempt", type=int)
     cuda_view.add_argument("--ledger")
+
+    cuda_toolchain = sub.add_parser("cuda-toolchain-preflight", help="compile, load, profile, and sanitize a native SM121 hello operator")
+    cuda_toolchain.add_argument("--cache-dir", help="isolated TORCH_EXTENSIONS_DIR")
+    cuda_toolchain.add_argument("--sanitizers", action="store_true", help="also run all four Compute Sanitizer tools")
+    cuda_toolchain.add_argument("--verbose", action="store_true")
+
+    cuda_candidate = sub.add_parser("cuda-candidate-check", help="ledger-free protected preflight of a staged CUDA candidate worktree")
+    cuda_candidate.add_argument("--config", default="configs/research/kda_cuda_ownership.toml")
+    cuda_candidate.add_argument("--worktree", required=True, help="candidate Git worktree containing staged CUDA sources")
+    cuda_candidate.add_argument("--lane", required=True, choices=("bootstrap", "migration", "optimization"))
+    cuda_candidate.add_argument("--artifact-dir", help="new or empty diagnostic directory (defaults to isolated /tmp)")
+    cuda_candidate.add_argument("--extension-cache", help="isolated TORCH_EXTENSIONS_DIR outside the candidate worktree")
+    cuda_candidate.add_argument("--cuda-cache", help="isolated CUDA_CACHE_PATH outside the candidate worktree")
+    cuda_candidate.add_argument("--sanitizers", action="store_true", help="also run all four configured Compute Sanitizer tools")
 
     report_parser = sub.add_parser("report", help="render a comparison from summary JSON files")
     report_parser.add_argument("summaries", nargs="+")
@@ -244,6 +260,20 @@ def main(argv=None) -> int:
             if args.speed_command == "summary":
                 _json(speed_summary(root, config, args.attempt, args.ledger))
                 return 0
+        if args.command == "cuda-toolchain-preflight":
+            result=run_cuda_preflight(cache_dir=args.cache_dir,verbose=args.verbose)
+            if args.sanitizers: result["sanitizers"]=run_cuda_preflight_sanitizers(cache_dir=args.cache_dir)
+            _json(result)
+            return 0
+        if args.command == "cuda-candidate-check":
+            config = load_cuda_campaign_config(args.config)
+            result = run_cuda_candidate_check(
+                root, config, worktree=args.worktree, lane=args.lane,
+                artifact_dir=args.artifact_dir, extension_cache=args.extension_cache,
+                cuda_cache=args.cuda_cache, sanitizers=args.sanitizers,
+            )
+            _json(result)
+            return 0 if result["status"] == "complete" else 1
         if args.command == "cuda-ownership-supervisor":
             config = load_cuda_campaign_config(args.config)
             if args.cuda_command == "init":

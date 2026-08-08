@@ -166,3 +166,117 @@ rm /tmp/kda-cuda-foundation-smoke.sqlite3
 
 - Initialize the configured ledger and calibrate anchors when the human starts
   the campaign, then spawn the first naive-CUDA candidate.
+
+
+## 2026-08-08 [agent] add ledger-free staged candidate onboarding
+
+**Context**
+
+- A candidate worktree had no safe way to reuse the coordinator environment and
+  current protected worker before committing, so early native-build/runtime
+  mistakes would consume supervisor turnaround.
+- Candidate instructions also needed an exact source/math map, lexical hazards,
+  handoff format, and an explicitly narrow first task.
+
+**Commands**
+
+```bash
+uv run --no-sync python -m py_compile nanochat/research/cuda_candidate.py nanochat/research/cli.py
+uv run --no-sync research cuda-candidate-check --help
+uv run --no-sync python -m pytest -q tests/test_cuda_supervisor.py
+uv run --no-sync python -m pytest -q
+git diff --check
+```
+
+**Artifacts**
+
+- Ledger-free checker: `nanochat/research/cuda_candidate.py` and protected CLI
+  command `research cuda-candidate-check`.
+- Candidate guidance: `program_kda_cuda_ownership.md` and the read-only
+  `nanochat/mixers/cuda_kda/README.md`.
+- Checker diagnostics default to isolated, retained
+  `/tmp/nanochat-cuda-candidate-*` directories; no GPU candidate check was
+  launched while implementing the command.
+
+**Result**
+
+- The coordinator command accepts an explicit candidate worktree and derived
+  lane, requires an exact staged snapshot with no unstaged/untracked files,
+  validates scope/suffixes/forbidden lexical tokens, and invokes the current
+  protected worker with the coordinator interpreter.
+- Runtime audit performs the candidate build in isolated extension/CUDA caches;
+  bounded ownership profiling follows, with all four sanitizers optional for
+  iteration. The command does not import/open the supervisor or ledger and
+  cannot intake or retain a result.
+- Documentation now uses `uv run --no-sync research`, recommends naive
+  recurrent-only bootstrap first, distinguishes coordination deadlines from
+  protected subprocess and campaign deadlines, and specifies the exact pushed
+  commit handoff.
+- Validation passed: `166 passed, 10 skipped`; CUDA skips remain the declared
+  optional test lane. Focused tests passed `29 passed`. CLI help, compilation,
+  and `git diff --check` passed.
+
+**Next**
+
+- Review the combined uncommitted implementation. Before the first child, run
+  the checker from the coordinator against a disposable staged recurrent-only
+  worktree, then use the emitted absolute `summary.json` in the handoff.
+
+
+## 2026-08-08 [agent] harden the autonomous CUDA launch boundary
+
+**Context**
+
+- Fresh candidate worktrees could create empty local environments, the host
+  lacked `setuptools` for PyTorch extensions, protected backward dispatch was
+  ambiguous, and Kineto exposed no SM121 CUDA kernel events on this host.
+- Transitional Compute Sanitizer runs also needed to isolate only claimed
+  atomic units rather than fail on unclaimed FLA kernels.
+
+**Commands**
+
+```bash
+uv sync --extra gpu --group dev
+uv run --no-sync research cuda-toolchain-preflight \
+  --cache-dir /tmp/nanochat-sm121-final-preflight --sanitizers
+uv run --no-sync python -m pytest -q
+uv build --out-dir /tmp/nanochat-build-check
+```
+
+**Artifacts**
+
+- Protected build/preflight: `nanochat/research/cuda_build.py` and
+  `nanochat/research/cuda_preflight.py`.
+- Exact protected ABI and candidate checker in
+  `nanochat/mixers/cuda_kda/README.md` and
+  `nanochat/research/cuda_candidate.py`.
+- Ephemeral successful receipt:
+  `/tmp/nanochat-sm121-final-preflight.json`; it contains no campaign result and
+  is not an initialized ledger or candidate artifact.
+
+**Result**
+
+- A content-addressed `TORCH_LIBRARY` hello op compiled with CUDA 13.1 using
+  `compute_121,sm_121`, loaded from the isolated cache, produced exact output,
+  and exposed `nanochat_sm121_hello_kernel` through Nsight Systems.
+- `memcheck`, `racecheck`, `synccheck`, and `initcheck` all returned zero-error
+  summaries. Racecheck's distinct `RACECHECK SUMMARY` format is now handled
+  explicitly by the preflight, candidate checker, and supervisor.
+- Candidate execution reuses the coordinator interpreter and absolute protected
+  worker, pins the protected dispatcher, bridges only candidate `cuda_kda`, and
+  profiles declared kernel symbols with Nsight rather than unavailable Kineto
+  events. Fixed historical FLA operator timing uses an explicit historical
+  bridge instead.
+- Chunk and convolution backward dispatch now cross separately registered
+  native operators. Transitional sanitizers execute only complete claimed
+  atomic units; optimization requires every unit.
+- Full validation passed: `172 passed, 10 skipped`. Wheel/sdist construction
+  passed and includes the build, preflight, checker, and read-only ABI guide.
+- The configured campaign ledger, anchor calibration, and first candidate have
+  not been launched.
+
+**Next**
+
+- Commit this launch foundation, create immutable launch-foundation and
+  controller tags, push and verify their peeled remote SHAs, then perform a
+  temporary initialization smoke before the configured ledger is created.

@@ -27,6 +27,16 @@ from nanochat.research.cuda_config import KdaCudaCampaignConfig
 
 SCHEMA = "cuda-ownership-supervisor"
 LEDGER_REVISION = "2"
+CONTROLLER_PATHS = (
+    "configs/research/kda_cuda_ownership.toml", "nanochat/research/cuda_config.py",
+    "nanochat/research/cuda_supervisor.py", "nanochat/research/cuda_worker.py",
+    "nanochat/research/cuda_build.py", "nanochat/research/cuda_preflight.py",
+    "nanochat/research/cuda_candidate.py", "nanochat/research/cli.py",
+    "nanochat/mixers/kda.py", "nanochat/gpt.py", "scripts/base_train.py",
+    "pyproject.toml", "uv.lock", "program_kda_cuda_ownership.md",
+    "nanochat/mixers/cuda_kda/README.md",
+)
+READ_ONLY_CANDIDATE_PATHS={"nanochat/mixers/cuda_kda/README.md"}
 FORBIDDEN_GENERATED_SUFFIXES = {".so", ".o", ".a", ".cubin", ".fatbin", ".pyc"}
 RETAINABLE = {"correct_bootstrap", "validated_component", "fla_free_naive", "optimization_retained"}
 
@@ -156,14 +166,34 @@ def _open(path: Path, *, readonly: bool = False) -> sqlite3.Connection:
     return db
 
 
-def _verify_pinned_refs(repo: Path, config: KdaCudaCampaignConfig, stored: dict[str,str]) -> tuple[str,str]:
+def _controller_hashes(repo:Path,controller:str)->dict[str,str]:
+    hashes={}
+    for relative in CONTROLLER_PATHS:
+        result=subprocess.run(["git","show",f"{controller}:{relative}"],cwd=repo,capture_output=True)
+        if result.returncode!=0:
+            raise ValueError(f"protected controller file is missing from pinned controller: {relative}")
+        target=repo/relative
+        if not target.is_file() or target.read_bytes()!=result.stdout:
+            raise ValueError(f"protected controller file differs from pinned controller: {relative}")
+        hashes[relative]=hashlib.sha256(result.stdout).hexdigest()
+    return hashes
+
+
+def _verify_pinned_refs(repo: Path, config: KdaCudaCampaignConfig, stored: dict[str,str]) -> tuple[str,str,str]:
     foundation = _commit(repo, config.campaign.foundation_ref)
+    controller = _commit(repo, config.campaign.controller_ref)
     cumulative = _commit(repo, config.campaign.cumulative_performance_anchor_ref)
     if stored.get("foundation_sha") not in {None, foundation}:
         raise ValueError("foundation ref moved after ledger initialization")
+    if stored.get("controller_sha") not in {None, controller}:
+        raise ValueError("controller ref moved after ledger initialization")
     if stored.get("cumulative_performance_anchor_sha") not in {None, cumulative}:
         raise ValueError("cumulative performance anchor ref moved after ledger initialization")
-    return foundation, cumulative
+    hashes=_controller_hashes(repo,controller)
+    encoded=json.dumps(hashes,sort_keys=True)
+    if stored.get("controller_hashes_json") not in {None,encoded}:
+        raise ValueError("protected controller hashes differ from initialized ledger")
+    return foundation, controller, cumulative
 
 
 def initialize(root: str | Path, config: KdaCudaCampaignConfig, ledger=None) -> dict[str,Any]:
@@ -173,13 +203,14 @@ def initialize(root: str | Path, config: KdaCudaCampaignConfig, ledger=None) -> 
         db=_open(path,readonly=True)
         try: existing=dict(db.execute("SELECT key,value FROM metadata").fetchall())
         finally: db.close()
-    foundation,cumulative=_verify_pinned_refs(repo,config,existing)
+    foundation,controller,cumulative=_verify_pinned_refs(repo,config,existing)
     db=_open(path)
     try:
         if existing.get("protocol_sha") not in {None,sha}: raise ValueError("ledger protocol hash differs from frozen CUDA config")
         db.execute("BEGIN IMMEDIATE")
         entries={"schema":SCHEMA,"ledger_revision":LEDGER_REVISION,"protocol_sha":sha,
-                 "config_json":_canonical(config.to_dict()).decode(),"foundation_sha":foundation,
+                 "config_json":_canonical(config.to_dict()).decode(),"foundation_sha":foundation,"controller_sha":controller,
+                 "controller_hashes_json":json.dumps(_controller_hashes(repo,controller),sort_keys=True),
                  "cumulative_performance_anchor_sha":cumulative}
         for key,value in entries.items(): db.execute("INSERT OR IGNORE INTO metadata(key,value) VALUES(?,?)",(key,value))
         root_row=db.execute("SELECT id FROM milestones WHERE ordinal=0").fetchone()
@@ -196,7 +227,7 @@ def initialize(root: str | Path, config: KdaCudaCampaignConfig, ledger=None) -> 
         if db.in_transaction: db.execute("ROLLBACK")
         raise
     finally: db.close()
-    return {"status":"ready","ledger":str(path),"protocol_sha":sha,"foundation_sha":foundation,
+    return {"status":"ready","ledger":str(path),"protocol_sha":sha,"foundation_sha":foundation,"controller_sha":controller,
             "cumulative_performance_anchor_sha":cumulative,"schema":SCHEMA,"ledger_revision":2}
 
 
@@ -230,6 +261,8 @@ def intake(root:str|Path,config:KdaCudaCampaignConfig,base_ref:str,candidate_ref
         changed=[line for line in _git(repo,["diff","--no-renames","--name-only",f"{base}..{candidate}"]).splitlines() if line]
         if reason is None and (not changed or not all(_allowed(item,config.campaign.candidate_paths) for item in changed)):
             reason="candidate has no changes or changes paths outside the CUDA/build-source scope"
+        if reason is None and any(item in READ_ONLY_CANDIDATE_PATHS for item in changed):
+            reason="candidate changed protected read-only onboarding documentation"
         patch=_git(repo,["diff","--binary",f"{base}..{candidate}"])
         if reason is None and len(patch.encode()) > config.campaign.max_patch_bytes: reason="candidate patch exceeds frozen byte cap"
         for item in changed:
@@ -305,7 +338,11 @@ def _bounded(command:list[str],cwd:Path,log:Path,timeout:float,env_extra=None)->
     with log.open("w",encoding="utf-8") as handle:
         try: process=subprocess.Popen(command,cwd=cwd,env=env,stdout=handle,stderr=subprocess.STDOUT,start_new_session=True)
         except OSError as error: return {"status":"launch_error","reason":str(error),"seconds":time.monotonic()-started}
-        try: code=process.wait(timeout=timeout); return {"status":"complete" if code==0 else "crash","returncode":code,"seconds":time.monotonic()-started}
+        try:
+            code=process.wait(timeout=timeout)
+            result={"status":"complete" if code==0 else "crash","returncode":code,"seconds":time.monotonic()-started}
+            if code: result["reason"]=f"process exited with code {code}"
+            return result
         except subprocess.TimeoutExpired:
             os.killpg(process.pid,signal.SIGTERM)
             try: process.wait(timeout=10)
@@ -344,14 +381,75 @@ def _resolved_artifacts(repo:Path,config:KdaCudaCampaignConfig,artifact:Path,can
     return resolved,env
 
 
-def _worker(command:str,backend:str,lane:str,root:Path,config_path:Path,output:Path,log:Path,timeout:float,env:dict[str,str],runner_root:Path|None=None)->tuple[dict[str,Any],dict[str,Any]]:
-    if runner_root is None:
-        args=[sys.executable,"-m","nanochat.research.cuda_worker",command]
-    else:
-        args=[sys.executable,str(runner_root/"nanochat/research/cuda_worker.py"),command,"--implementation-root",str(root)]
-        env={**env,"PYTHONPATH":str(runner_root)+((os.pathsep+os.environ["PYTHONPATH"]) if os.environ.get("PYTHONPATH") else "")}
+def _worker_invocation(command:str,implementation_root:Path,env:dict[str,str],protected_dispatch:bool=True)->tuple[list[str],dict[str,str]]:
+    # The coordinator always owns the runner. Candidate runs also pin the
+    # protected dispatcher; historical anchor runs intentionally load the
+    # retained implementation so their operator timing remains exact.
+    controller_root=Path(__file__).resolve().parents[2]
+    bridge_flag="--implementation-root" if protected_dispatch else "--historical-implementation-root"
+    args=[sys.executable,str(controller_root/"nanochat/research/cuda_worker.py"),command,
+          bridge_flag,str(implementation_root)]
+    bridged={**env,"PYTHONPATH":str(controller_root)+((os.pathsep+os.environ["PYTHONPATH"]) if os.environ.get("PYTHONPATH") else "")}
+    return args,bridged
+
+
+def _worker(command:str,backend:str,lane:str,root:Path,config_path:Path,output:Path,log:Path,timeout:float,env:dict[str,str],protected_dispatch:bool=True)->tuple[dict[str,Any],dict[str,Any]]:
+    args,env=_worker_invocation(command,root,env,protected_dispatch)
     args += ["--backend",backend,"--lane",lane,"--config",str(config_path),"--output",str(output)]
     result=_bounded(args,root,log,timeout,env); return result,_read_json(output)
+
+
+def _declared_kernel_symbols(audit:dict[str,Any])->list[str]:
+    return [symbol for component in audit.get("provenance",{}).get("components",{}).values()
+            if component.get("owner")=="project" for symbol in component.get("kernel_symbols",[])]
+
+
+def _profile_worker(lane:str,implementation_root:Path,config_path:Path,output:Path,log:Path,
+                    timeout:float,env:dict[str,str],expected_symbols:list[str])->tuple[dict[str,Any],dict[str,Any]]:
+    from nanochat.research.cuda_preflight import capture_nsys_cuda_symbols
+    worker,bridged=_worker_invocation("profile-audit",implementation_root,env)
+    command=[*worker,"--backend","project_cuda","--lane",lane,"--config",str(config_path),"--output",str(output)]
+    started=time.monotonic()
+    try:
+        evidence=capture_nsys_cuda_symbols(command,expected_symbols=expected_symbols,cwd=implementation_root,env={**os.environ,**bridged},timeout=timeout)
+        result={"status":"complete","returncode":0,"seconds":time.monotonic()-started}
+        log.write_text(json.dumps({"profiler_backend":"nsys","kernel_evidence":evidence},indent=2,sort_keys=True)+"\n")
+    except Exception as error:
+        result={"status":"invalid","reason":f"Nsight profile failed: {type(error).__name__}: {error}","seconds":time.monotonic()-started}
+        log.write_text(result["reason"]+"\n")
+        evidence={}
+    payload=_read_json(output)
+    if result["status"]=="complete" and payload.get("status")!="complete":
+        result={**result,"status":"invalid","reason":payload.get("reason","profile worker returned invalid payload")}
+    if result["status"]=="complete":
+        payload={**payload,"profiler_backend":"nsys","observed_kernel_symbols":sorted(evidence),"nsys_kernel_evidence":evidence}
+        output.write_text(json.dumps(payload,indent=2,sort_keys=True)+"\n")
+    return result,payload
+
+
+def _sanitizer_worker(tool:str,lane:str,implementation_root:Path,config_path:Path,
+                      output:Path,log:Path,timeout:float,env:dict[str,str])->tuple[dict[str,Any],dict[str,Any]]:
+    worker,env=_worker_invocation("sanitizer-smoke",implementation_root,env)
+    command=["compute-sanitizer","--tool",tool,"--error-exitcode=99",*worker,
+             "--backend","project_cuda","--lane",lane,"--config",str(config_path),"--output",str(output)]
+    result=_bounded(command,implementation_root,log,timeout,env)
+    payload=_read_json(output)
+    log_text=log.read_text(errors="replace") if log.exists() else ""
+    from nanochat.research.cuda_preflight import sanitizer_zero_summary
+    if result["status"]=="complete" and not sanitizer_zero_summary(tool,log_text):
+        result={**result,"status":"invalid","reason":"sanitizer log lacks zero-error summary"}
+    if result["status"]=="complete" and payload.get("status")!="complete":
+        result={**result,"status":"invalid","reason":payload.get("reason","sanitizer worker returned invalid payload")}
+    return result,payload
+
+
+def _failure_detail(phase:str,result:dict[str,Any],payload:dict[str,Any]|None=None,artifact:Path|None=None)->dict[str,Any]:
+    payload=payload or {}
+    reason=payload.get("reason") or result.get("reason") or f"{phase} ended with status {result.get('status','invalid')}"
+    detail={"phase":phase,"status":result.get("status","invalid"),"reason":reason}
+    if result.get("returncode") is not None: detail["returncode"]=result["returncode"]
+    if artifact is not None: detail["artifact"]=str(artifact)
+    return detail
 
 
 def _trainer_command(config:KdaCudaCampaignConfig,backend:str,label:str)->list[str]:
@@ -427,33 +525,54 @@ def run_attempt(root:str|Path,config:KdaCudaCampaignConfig,attempt_id:int,ledger
         head=_head(db)
         if head["id"]!=parent_id or head["commit_sha"]!=base: raise ValueError("attempt parent is stale; current retained head advanced")
         if artifact.exists(): raise ValueError(f"attempt artifact already exists: {artifact}")
+        db.execute("UPDATE attempts SET status='testing' WHERE id=?",(attempt_id,)); _event(db,attempt_id,"testing_started",{"lane":lane}); testing=True
         artifact.mkdir(parents=True); resolved,worker_env=_resolved_artifacts(repo,config,artifact,candidate)
         baseline_env={"TORCH_EXTENSIONS_DIR":str((artifact/"extension-cache"/base).resolve()),"CUDA_CACHE_PATH":str((artifact/"cuda-cache"/base).resolve())}
-        db.execute("UPDATE attempts SET status='testing' WHERE id=?",(attempt_id,)); _event(db,attempt_id,"testing_started",{"lane":lane}); testing=True
         with _worktree(repo,candidate) as candidate_root, _worktree(repo,base) as baseline_root:
             test=_bounded([sys.executable,"-m","pytest","-q",*config.correctness.tests],candidate_root,artifact/"correctness.log",config.correctness.pytest_timeout_seconds)
             _phase(db,attempt_id,"candidate","correctness",0,test,artifact/"correctness.log")
-            audit_run,audit=_worker("runtime-audit","project_cuda",lane,candidate_root,resolved,artifact/"runtime-audit.json",artifact/"runtime-audit.log",config.correctness.runtime_audit_timeout_seconds,worker_env)
-            _phase(db,attempt_id,"candidate","runtime_audit",0,audit_run,artifact/"runtime-audit.json",audit)
+            first_failure=None
+            if test["status"]!="complete":
+                first_failure=_failure_detail("correctness",test,artifact=artifact/"correctness.log")
+
+            audit_run={"status":"skipped","reason":"correctness did not complete"}; audit={}
+            if first_failure is None:
+                audit_run,audit=_worker("runtime-audit","project_cuda",lane,candidate_root,resolved,artifact/"runtime-audit.json",artifact/"runtime-audit.log",config.correctness.runtime_audit_timeout_seconds,worker_env)
+                if audit_run["status"]=="complete" and audit.get("status")=="complete" and lane=="bootstrap" and audit.get("provenance",{}).get("selective_ptx"):
+                    audit_run={**audit_run,"status":"invalid","reason":"bootstrap forbids selective PTX"}
+                _phase(db,attempt_id,"candidate","runtime_audit",0,audit_run,artifact/"runtime-audit.json",audit)
+                if audit_run["status"]!="complete" or audit.get("status")!="complete":
+                    first_failure=_failure_detail("runtime_audit",audit_run,audit,artifact/"runtime-audit.json")
+
             profile_run={"status":"skipped","reason":"runtime audit did not complete"}; profile_audit={}
-            if audit_run["status"]=="complete" and audit.get("status")=="complete":
-                profile_run,profile_audit=_worker("profile-audit","project_cuda",lane,candidate_root,resolved,artifact/"ownership-profile.json",artifact/"ownership-profile.log",config.correctness.runtime_audit_timeout_seconds,worker_env)
+            if first_failure is None:
+                profile_run,profile_audit=_profile_worker(lane,candidate_root,resolved,artifact/"ownership-profile.json",artifact/"ownership-profile.log",config.correctness.runtime_audit_timeout_seconds,worker_env,_declared_kernel_symbols(audit))
                 if (artifact/"ownership-profile.json").exists() and (artifact/"ownership-profile.json").stat().st_size>config.kernel_gates.profile_max_bytes:
                     profile_run={**profile_run,"status":"invalid","reason":"ownership profile exceeds profile_max_bytes"}
                 _phase(db,attempt_id,"candidate","ownership_profile",0,profile_run,artifact/"ownership-profile.json",profile_audit)
-            if lane=="bootstrap" and audit.get("provenance",{}).get("selective_ptx"):
-                audit_run={**audit_run,"status":"invalid","reason":"bootstrap forbids selective PTX"}
+                if profile_run["status"]!="complete" or profile_audit.get("status")!="complete":
+                    first_failure=_failure_detail("ownership_profile",profile_run,profile_audit,artifact/"ownership-profile.json")
+
             sanitizer_results=[]
-            if test["status"]=="complete" and audit_run["status"]=="complete" and audit.get("status")=="complete":
+            if first_failure is None:
                 for ordinal,tool in enumerate(config.correctness.sanitizer_tools):
                     output=artifact/f"sanitizer-{tool}.json"; log=artifact/f"compute-sanitizer-{tool}.log"
-                    command=["compute-sanitizer","--tool",tool,"--error-exitcode=99",sys.executable,"-m","nanochat.research.cuda_worker","sanitizer-smoke","--backend","project_cuda","--lane",lane,"--config",str(resolved),"--output",str(output)]
-                    result=_bounded(command,candidate_root,log,config.correctness.compute_sanitizer_timeout_seconds,worker_env)
-                    log_text=log.read_text(errors="replace") if log.exists() else ""
-                    if result["status"]=="complete" and "ERROR SUMMARY: 0 errors" not in log_text: result={**result,"status":"invalid","reason":"sanitizer log lacks zero-error summary"}
-                    sanitizer_results.append(result); _phase(db,attempt_id,"candidate",f"compute_sanitizer_{tool}",ordinal,result,log,_read_json(output))
-            correctness_ok=test["status"]=="complete" and audit_run["status"]=="complete" and audit.get("status")=="complete" and profile_run["status"]=="complete" and profile_audit.get("status")=="complete"
-            sanitizers_ok=len(sanitizer_results)==len(config.correctness.sanitizer_tools) and all(item["status"]=="complete" for item in sanitizer_results)
+                    result,payload=_sanitizer_worker(tool,lane,candidate_root,resolved,output,log,
+                        config.correctness.compute_sanitizer_timeout_seconds,worker_env)
+                    sanitizer_results.append(result)
+                    _phase(db,attempt_id,"candidate",f"compute_sanitizer_{tool}",ordinal,result,log,payload)
+                    if result["status"]!="complete":
+                        first_failure=_failure_detail(f"compute_sanitizer_{tool}",result,payload,log)
+                        break
+            correctness_ok=first_failure is None
+            sanitizers_ok=first_failure is None and len(sanitizer_results)==len(config.correctness.sanitizer_tools)
+            if first_failure is not None:
+                failure_summary={"schema_version":2,"lane":lane,"objective":"staged_project_owned_cuda_kda",
+                    "quality_not_evaluated":True,"attempt_id":attempt_id,"parent_milestone_id":parent_id,
+                    "base_sha":base,"candidate_sha":candidate,"hypothesis":hypothesis,
+                    "first_failure":first_failure,"artifact_dir":str(artifact)}
+                return _finish(db,attempt_id,"invalid","invalid","invalid","not_retainable",
+                    f"mandatory {first_failure['phase']} gate failed: {first_failure['reason']}",artifact,failure_summary)
 
             baseline_backend="reference" if lane=="bootstrap" else "project_cuda"
             base_kernel_run,base_kernel=_worker("microbenchmark",baseline_backend,lane,baseline_root if lane!="bootstrap" else candidate_root,resolved,artifact/"baseline-kernel.json",artifact/"baseline-kernel.log",config.kernel_gates.timeout_seconds,baseline_env if lane!="bootstrap" else worker_env)
@@ -586,21 +705,44 @@ def verify_release(root:str|Path,config:KdaCudaCampaignConfig,milestone_id:int,l
         with _worktree(repo,candidate) as candidate_root,_worktree(repo,anchor) as baseline_root:
             test=_bounded([sys.executable,"-m","pytest","-q",*config.correctness.tests],candidate_root,artifact/"correctness.log",config.correctness.pytest_timeout_seconds)
             _release_phase(db,release_id,"candidate","correctness",0,test,artifact/"correctness.log")
-            audit_run,audit=_worker("runtime-audit","project_cuda","optimization",candidate_root,resolved,artifact/"runtime-audit.json",artifact/"runtime-audit.log",config.correctness.runtime_audit_timeout_seconds,candidate_env)
-            _release_phase(db,release_id,"candidate","runtime_audit",0,audit_run,artifact/"runtime-audit.json",audit)
-            profile_run,profile=_worker("profile-audit","project_cuda","optimization",candidate_root,resolved,artifact/"ownership-profile.json",artifact/"ownership-profile.log",config.correctness.runtime_audit_timeout_seconds,candidate_env)
-            if (artifact/"ownership-profile.json").exists() and (artifact/"ownership-profile.json").stat().st_size>config.kernel_gates.profile_max_bytes: profile_run={**profile_run,"status":"invalid","reason":"ownership profile exceeds profile_max_bytes"}
-            _release_phase(db,release_id,"candidate","ownership_profile",0,profile_run,artifact/"ownership-profile.json",profile)
+            first_failure=None
+            if test["status"]!="complete": first_failure=_failure_detail("correctness",test,artifact=artifact/"correctness.log")
+            audit_run={"status":"skipped"}; audit={}
+            if first_failure is None:
+                audit_run,audit=_worker("runtime-audit","project_cuda","optimization",candidate_root,resolved,artifact/"runtime-audit.json",artifact/"runtime-audit.log",config.correctness.runtime_audit_timeout_seconds,candidate_env)
+                if audit_run["status"]=="complete" and audit.get("status")=="complete" and not audit.get("runtime_fla_free"):
+                    audit_run={**audit_run,"status":"invalid","reason":"release runtime audit was not FLA-free"}
+                _release_phase(db,release_id,"candidate","runtime_audit",0,audit_run,artifact/"runtime-audit.json",audit)
+                if audit_run["status"]!="complete" or audit.get("status")!="complete":
+                    first_failure=_failure_detail("runtime_audit",audit_run,audit,artifact/"runtime-audit.json")
+            profile_run={"status":"skipped"}; profile={}
+            if first_failure is None:
+                profile_run,profile=_profile_worker("optimization",candidate_root,resolved,artifact/"ownership-profile.json",artifact/"ownership-profile.log",config.correctness.runtime_audit_timeout_seconds,candidate_env,_declared_kernel_symbols(audit))
+                if (artifact/"ownership-profile.json").exists() and (artifact/"ownership-profile.json").stat().st_size>config.kernel_gates.profile_max_bytes: profile_run={**profile_run,"status":"invalid","reason":"ownership profile exceeds profile_max_bytes"}
+                _release_phase(db,release_id,"candidate","ownership_profile",0,profile_run,artifact/"ownership-profile.json",profile)
+                if profile_run["status"]!="complete" or profile.get("status")!="complete":
+                    first_failure=_failure_detail("ownership_profile",profile_run,profile,artifact/"ownership-profile.json")
             sanitizer_results=[]
-            if test["status"]=="complete" and audit_run["status"]=="complete" and audit.get("status")=="complete" and profile_run["status"]=="complete":
+            if first_failure is None:
                 for ordinal,tool in enumerate(config.correctness.sanitizer_tools):
                     output=artifact/f"sanitizer-{tool}.json"; log=artifact/f"compute-sanitizer-{tool}.log"
-                    command=["compute-sanitizer","--tool",tool,"--error-exitcode=99",sys.executable,"-m","nanochat.research.cuda_worker","sanitizer-smoke","--backend","project_cuda","--lane","optimization","--config",str(resolved),"--output",str(output)]
-                    result=_bounded(command,candidate_root,log,config.correctness.compute_sanitizer_timeout_seconds,candidate_env); log_text=log.read_text(errors="replace") if log.exists() else ""
-                    if result["status"]=="complete" and "ERROR SUMMARY: 0 errors" not in log_text: result={**result,"status":"invalid","reason":"sanitizer log lacks zero-error summary"}
-                    sanitizer_results.append(result); _release_phase(db,release_id,"candidate",f"compute_sanitizer_{tool}",ordinal,result,log,_read_json(output))
-            preflight=test["status"]=="complete" and audit_run["status"]=="complete" and audit.get("status")=="complete" and audit.get("runtime_fla_free") and profile_run["status"]=="complete" and profile.get("status")=="complete" and len(sanitizer_results)==len(config.correctness.sanitizer_tools) and all(item["status"]=="complete" for item in sanitizer_results)
-            base_kernel_run,base_kernel=_worker("microbenchmark","fla_triton","optimization",baseline_root,resolved,artifact/"fixed-anchor-kernel.json",artifact/"fixed-anchor-kernel.log",config.kernel_gates.timeout_seconds,baseline_env,runner_root=candidate_root)
+                    result,payload=_sanitizer_worker(tool,"optimization",candidate_root,resolved,output,log,
+                        config.correctness.compute_sanitizer_timeout_seconds,candidate_env)
+                    sanitizer_results.append(result); _release_phase(db,release_id,"candidate",f"compute_sanitizer_{tool}",ordinal,result,log,payload)
+                    if result["status"]!="complete":
+                        first_failure=_failure_detail(f"compute_sanitizer_{tool}",result,payload,log); break
+            preflight=first_failure is None and len(sanitizer_results)==len(config.correctness.sanitizer_tools)
+            if not preflight:
+                if first_failure is None:
+                    first_failure={"phase":"compute_sanitizer","status":"invalid","reason":"not every mandatory sanitizer completed"}
+                reason=f"mandatory {first_failure['phase']} gate failed: {first_failure['reason']}"
+                summary={"schema_version":2,"milestone_id":milestone_id,"candidate_sha":candidate,
+                    "fixed_anchor_sha":anchor,"decision":"invalid","reason":reason,
+                    "first_failure":first_failure,"artifact_dir":str(artifact),"quality_not_evaluated":True}
+                db.execute("UPDATE release_runs SET status='invalid',decision='invalid',reason=?,summary_json=? WHERE id=?",
+                    (reason,json.dumps(summary,sort_keys=True),release_id))
+                return {"release_id":release_id,"status":"invalid","decision":"invalid","reason":reason,"summary":summary}
+            base_kernel_run,base_kernel=_worker("microbenchmark","fla_triton","optimization",baseline_root,resolved,artifact/"fixed-anchor-kernel.json",artifact/"fixed-anchor-kernel.log",config.kernel_gates.timeout_seconds,baseline_env,protected_dispatch=False)
             candidate_kernel_run,candidate_kernel=_worker("microbenchmark","project_cuda","optimization",candidate_root,resolved,artifact/"candidate-kernel.json",artifact/"candidate-kernel.log",config.kernel_gates.timeout_seconds,candidate_env)
             _release_phase(db,release_id,"baseline","kernel_profile",0,base_kernel_run,artifact/"fixed-anchor-kernel.json",base_kernel); _release_phase(db,release_id,"candidate","kernel_profile",0,candidate_kernel_run,artifact/"candidate-kernel.json",candidate_kernel)
             base_rows,candidate_rows=_kernel_rows(base_kernel),_kernel_rows(candidate_kernel)
@@ -718,7 +860,7 @@ def campaign_report(root:str|Path,config:KdaCudaCampaignConfig,ledger=None,*,inc
             blocks=[{"ordinal":block[0],"execution_order":json.loads(block[1]),"baseline_tps":block[2],"candidate_tps":block[3],"baseline_peak_mb":block[4],"candidate_peak_mb":block[5],"status":block[6]} for block in db.execute("SELECT ordinal,execution_order,baseline_tps,candidate_tps,baseline_peak_mb,candidate_peak_mb,status FROM release_blocks WHERE release_id=? ORDER BY ordinal",(row[0],))]
             releases.append({"release_id":row[0],"milestone_id":row[1],"status":row[2],"decision":row[3],"reason":row[4],"summary":json.loads(row[5]) if row[5] else None,"artifact_dir":row[6],"phases":phases,"paired_blocks":blocks})
         head=db.execute("SELECT current_milestone_id FROM campaign_state WHERE singleton=1").fetchone()[0]
-        return {"schema":"kda_cuda_ownership_report","schema_version":2,"quality_not_evaluated":True,"protocol_sha":metadata["protocol_sha"],"historical_context":_historical_context(repo,config),"provenance":{"foundation_sha":metadata["foundation_sha"],"cumulative_performance_anchor_sha":metadata["cumulative_performance_anchor_sha"],"canonical_metric":{"operation":config.reporting.canonical_operation,"length":config.reporting.canonical_length,"unit":"milliseconds_lower_is_better"}},"anchors":anchors,"current_milestone_id":head,"milestones":milestones,"attempts":attempts,"release_runs":releases,"warnings":["Illustrative chained point estimates are not gates or confidence intervals.","Historical speed-campaign evidence is not arithmetically combined with this protocol."]}
+        return {"schema":"kda_cuda_ownership_report","schema_version":2,"quality_not_evaluated":True,"protocol_sha":metadata["protocol_sha"],"historical_context":_historical_context(repo,config),"provenance":{"foundation_sha":metadata["foundation_sha"],"controller_sha":metadata["controller_sha"],"cumulative_performance_anchor_sha":metadata["cumulative_performance_anchor_sha"],"canonical_metric":{"operation":config.reporting.canonical_operation,"length":config.reporting.canonical_length,"unit":"milliseconds_lower_is_better"}},"anchors":anchors,"current_milestone_id":head,"milestones":milestones,"attempts":attempts,"release_runs":releases,"warnings":["Illustrative chained point estimates are not gates or confidence intervals.","Historical speed-campaign evidence is not arithmetically combined with this protocol."]}
     finally: db.close()
 
 

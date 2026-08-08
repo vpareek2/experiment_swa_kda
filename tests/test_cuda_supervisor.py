@@ -11,7 +11,7 @@ from nanochat.research.config import ResearchConfig, load_config
 from nanochat.research.cuda_config import CudaCampaignConfigError, load_cuda_campaign_config, validate_cuda_campaign_config
 from nanochat.research.cuda_supervisor import (
     calibrate_anchors, campaign_report, decide_migration, decide_performance, initialize, intake,
-    paired_interval, protocol_sha, recover_interrupted, retain, summary,
+    paired_interval, protocol_sha, recover_interrupted, retain, summary, CONTROLLER_PATHS,
 )
 from nanochat.research.speed_supervisor import _protocol_sha as legacy_protocol_sha
 
@@ -27,13 +27,16 @@ def git(root,*args):
 def make_repo(tmp_path):
     root=tmp_path/"repo"; source=root/"nanochat"/"mixers"/"cuda_kda"; source.mkdir(parents=True)
     (source/"__init__.py").write_text("stub\n")
+    for relative in CONTROLLER_PATHS:
+        target=root/relative; target.parent.mkdir(parents=True,exist_ok=True)
+        target.write_bytes((ROOT/relative).read_bytes())
     git(tmp_path,"init",str(root)); git(root,"config","user.email","test@example.com"); git(root,"config","user.name","Test")
     git(root,"add","."); git(root,"commit","-m","foundation"); return root,git(root,"rev-parse","HEAD")
 
 
 def config_for(tmp_path,foundation):
     value=load_cuda_campaign_config(ROOT/"configs/research/kda_cuda_ownership.toml")
-    return replace(value,campaign=replace(value.campaign,ledger_path=str(tmp_path/"cuda.sqlite3"),artifact_root=str(tmp_path/"artifacts"),foundation_ref=foundation,cumulative_performance_anchor_ref=foundation),reporting=replace(value.reporting,historical_context_manifest=str(ROOT/"configs/research/archive/kda_training_speed_context.json")))
+    return replace(value,campaign=replace(value.campaign,ledger_path=str(tmp_path/"cuda.sqlite3"),artifact_root=str(tmp_path/"artifacts"),foundation_ref=foundation,controller_ref=foundation,cumulative_performance_anchor_ref=foundation),reporting=replace(value.reporting,historical_context_manifest=str(ROOT/"configs/research/archive/kda_training_speed_context.json")))
 
 
 def commit_candidate(root,name="kernel.cu",body="// candidate CUDA\n"):
@@ -207,19 +210,54 @@ def test_cuda_cli_has_staged_commands_and_speed_cli_is_unchanged():
     assert parser.parse_args(["cuda-ownership-supervisor","calibrate"]).cuda_command=="calibrate"
     assert parser.parse_args(["cuda-ownership-supervisor","retain","--attempt","1","--label","x","--reason","y"]).cuda_command=="retain"
     assert parser.parse_args(["cuda-ownership-supervisor","verify-release","--milestone","2"]).cuda_command=="verify-release"
+    candidate=parser.parse_args(["cuda-candidate-check","--worktree","/tmp/candidate","--lane","bootstrap","--sanitizers"])
+    assert candidate.command=="cuda-candidate-check" and candidate.worktree=="/tmp/candidate" and candidate.sanitizers
+    preflight=parser.parse_args(["cuda-toolchain-preflight","--sanitizers"]); assert preflight.command=="cuda-toolchain-preflight" and preflight.sanitizers
     speed=parser.parse_args(["speed-supervisor","summary"]); assert speed.command=="speed-supervisor" and speed.speed_command=="summary"
+
+
+def test_cuda_candidate_checker_validates_the_staged_snapshot(tmp_path):
+    from nanochat.research.cuda_candidate import inspect_staged_candidate
+    root,foundation=make_repo(tmp_path)
+    config=config_for(tmp_path,foundation)
+    source=root/"nanochat/mixers/cuda_kda/recurrent.cu"
+    source.write_text("// naive recurrent kernel\n")
+    git(root,"add",str(source.relative_to(root)))
+    result=inspect_staged_candidate(root,config)
+    assert result["staged_paths"]==["nanochat/mixers/cuda_kda/recurrent.cu"]
+    assert result["sources"][0]["sha256"]
+    source.write_text("// unstaged replacement\n")
+    with pytest.raises(ValueError,match="no unstaged or untracked"):
+        inspect_staged_candidate(root,config)
+
+
+def test_cuda_candidate_cli_dispatches_without_supervisor_or_ledger(monkeypatch,tmp_path):
+    import nanochat.research.cli as cli
+    captured={}
+    monkeypatch.setattr(cli,"load_cuda_campaign_config",lambda path:"config")
+    def check(root,config,**kwargs):
+        captured.update(root=root,config=config,**kwargs)
+        return {"status":"complete","ledger_accessed":False}
+    monkeypatch.setattr(cli,"run_cuda_candidate_check",check)
+    assert cli.main(["cuda-candidate-check","--worktree",str(tmp_path/"candidate"),"--lane","migration"])==0
+    assert captured["lane"]=="migration" and captured["worktree"]==str(tmp_path/"candidate")
 
 
 def test_worker_and_supervisor_preserve_build_sanitizer_and_no_trace_guards():
     supervisor=(ROOT/"nanochat/research/cuda_supervisor.py").read_text(); worker=(ROOT/"nanochat/research/cuda_worker.py").read_text()
-    assert "--error-exitcode=99" in supervisor and "ERROR SUMMARY: 0 errors" in supervisor
+    assert "--error-exitcode=99" in supervisor and "sanitizer_zero_summary" in supervisor
     assert "TORCH_EXTENSIONS_DIR" in supervisor and "CUDA_CACHE_PATH" in supervisor
     assert "_dispatch_has_kernel_for_dispatch_key" in worker and 'Path("/proc/self/maps")' in worker
     assert "export_chrome_trace" not in worker and "INSERT OR REPLACE INTO phases" not in supervisor
-    assert "runner_root=candidate_root" in supervisor and "--implementation-root" in worker
+    assert 'controller_root=Path(__file__).resolve().parents[2]' in supervisor
+    assert 'bridge_flag="--implementation-root"' in supervisor and "--implementation-root" in worker
+    assert "--historical-implementation-root" in supervisor and "--historical-implementation-root" in worker
+    assert "nanochat.mixers.__path__.insert(0,implementation_mixers)" in worker
+    assert 'sys.executable,"-m","nanochat.research.cuda_worker"' not in supervisor
     assert "artifact_dir) VALUES(?,?,'testing',?,?,'pending')" not in supervisor
     dispatcher=(ROOT/"nanochat/mixers/kda.py").read_text()
-    assert '_project_operator(forward_component)(' in dispatcher and '_project_operator("causal_convolution_forward")(' in dispatcher
+    assert '_project_operator(forward_component)(' in dispatcher and "_ProjectConvolutionAutograd.apply(" in dispatcher
+    assert "_ProjectKDAAutograd.apply(" in dispatcher and "ctx.backward_component" in dispatcher
     assert "_load_project_backend().kda(" not in dispatcher and "_load_project_backend().causal_convolution(" not in dispatcher
 
 
@@ -242,7 +280,12 @@ def test_protected_dispatch_routes_unclaimed_to_fla_and_claimed_to_project(monke
     class Project:
         def provenance(self): return implementation._PROJECT_PROVENANCE
     def project_operator(component):
-        def call(*args): calls.append("project"); return args[0]*3,None
+        def call(*args):
+            calls.append("project")
+            if component=="chunk_backward":
+                q,k,v,gate,beta,A,dt,initial,*_=args
+                return tuple(torch.zeros_like(item) for item in (q,k,v,gate,beta,A,dt))+(None,)
+            return args[0]*3,None
         return call
     monkeypatch.setattr(implementation,"_run_fla_kda",fla); monkeypatch.setattr(implementation,"_load_project_backend",lambda:Project()); monkeypatch.setattr(implementation,"_project_operator",project_operator)
     unclaimed={name:{"owner":"third_party"} for name in ("chunk_forward","chunk_backward","recurrent_decode","causal_convolution_forward","causal_convolution_backward")}
@@ -251,7 +294,7 @@ def test_protected_dispatch_routes_unclaimed_to_fla_and_claimed_to_project(monke
     assert calls==["fla"] and {event["backend"] for event in implementation.project_runtime_events()}=={"fla"}
     claimed={name:{"owner":"project"} for name in unclaimed}; implementation._PROJECT_PROVENANCE={"components":claimed}; implementation.reset_project_runtime_events(); calls.clear(); q.grad=None
     output,_=implementation.kda(*values,mode="project_chunk",allow_fallback=False); output.sum().backward()
-    assert calls==["project"] and {event["backend"] for event in implementation.project_runtime_events()}=={"project"}
+    assert calls==["project","project"] and {event["backend"] for event in implementation.project_runtime_events()}=={"project"}
 
 
 def test_moved_foundation_tag_fails_closed(tmp_path):
@@ -306,3 +349,102 @@ def test_provenance_scans_unlisted_candidate_helpers_for_forbidden_runtime_paths
             return {"components":{name:{"owner":"third_party","sources":[],"kernel_symbols":[],"torch_operator":None} for name in config.ownership.required_components}}
     result=_provenance(root,Fake,config)
     assert result["status"]=="invalid" and "hidden.py" in result["reason"]
+
+
+def test_sanitizer_claims_only_complete_atomic_units_and_requires_all_in_optimization():
+    from nanochat.research.cuda_worker import _sanitizer_claims
+    config=load_cuda_campaign_config(ROOT/"configs/research/kda_cuda_ownership.toml")
+    components={name:{"owner":"third_party"} for name in config.ownership.required_components}
+    components["chunk_forward"]={"owner":"project"}; components["chunk_backward"]={"owner":"project"}
+    provenance={"components":components}
+    assert _sanitizer_claims(provenance,config,"bootstrap")=={"chunk_forward","chunk_backward"}
+    components["chunk_backward"]={"owner":"third_party"}
+    with pytest.raises(RuntimeError,match="partially claimed atomic unit"):
+        _sanitizer_claims(provenance,config,"migration")
+    components["chunk_backward"]={"owner":"project"}
+    with pytest.raises(RuntimeError,match="requires every component"):
+        _sanitizer_claims(provenance,config,"optimization")
+
+
+def test_worker_bridge_always_uses_current_protected_controller(tmp_path):
+    from nanochat.research.cuda_supervisor import _worker_invocation
+    implementation=tmp_path/"candidate"
+    args,env=_worker_invocation("sanitizer-smoke",implementation,{"FIXTURE":"1"})
+    assert Path(args[1]).resolve()==(ROOT/"nanochat/research/cuda_worker.py").resolve()
+    assert args[2:]==["sanitizer-smoke","--implementation-root",str(implementation)]
+    assert Path(env["PYTHONPATH"].split(__import__("os").pathsep)[0]).resolve()==ROOT.resolve()
+    assert env["FIXTURE"]=="1"
+
+
+
+def test_cuda_build_content_address_and_receipt_contract(tmp_path):
+    from nanochat.research.cuda_build import _content_name
+
+    source = tmp_path / "kernel.cu"
+    source.write_text("__global__ void fixture() {}\n")
+    first = _content_name("fixture-op", [source], (), (), ())
+    assert first == _content_name("fixture-op", [source], (), (), ())
+    assert first.startswith("fixture_op_")
+    source.write_text("__global__ void changed() {}\n")
+    assert first != _content_name("fixture-op", [source], (), (), ())
+    helper = (ROOT / "nanochat/research/cuda_build.py").read_text()
+    assert 'os.environ["TORCH_CUDA_ARCH_LIST"] = _TARGET_ARCH' in helper
+    assert "is_python_module=False" in helper and 'cuobjdump, "--list-elf"' in helper
+    assert '{"library_path", "source_paths", "compiler_command", "target_arch"}' in helper
+
+
+def test_nsys_helpers_construct_profile_and_read_kernel_symbols(tmp_path, monkeypatch):
+    import subprocess as subprocess_module
+    import nanochat.research.cuda_preflight as preflight
+
+    monkeypatch.setattr(preflight.shutil, "which", lambda name: f"/tools/{name}")
+    command = preflight.nsys_profile_command(["python", "worker.py"], tmp_path / "profile")
+    assert command[:4] == ["/tools/nsys", "profile", "--trace=cuda", "--sample=none"]
+    assert command[-2:] == ["python", "worker.py"]
+    report = tmp_path / "profile.nsys-rep"
+    report.write_bytes(b"fixture")
+    csv_output = '"Time (%)","Instances","Name"\n"100.0","1","visible_fixture_kernel(float *)"\n'
+    monkeypatch.setattr(
+        preflight.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess_module.CompletedProcess(args[0], 0, csv_output, ""),
+    )
+    assert preflight.read_nsys_kernel_symbols(report) == ["visible_fixture_kernel(float *)"]
+
+
+def test_sm121_preflight_is_a_real_registered_cuda_op():
+    source = (ROOT / "nanochat/research/cuda_preflight.py").read_text()
+    assert "__global__ void nanochat_sm121_hello_kernel" in source
+    assert "TORCH_LIBRARY(nanochat_cuda_preflight" in source
+    assert "TORCH_LIBRARY_IMPL(nanochat_cuda_preflight, CUDA" in source
+    assert "torch.testing.assert_close(actual, expected" in source
+    assert "capture_nsys_cuda_symbols" in source
+
+
+def test_candidate_source_policy_ignores_comments_but_not_executable_imports(tmp_path):
+    from nanochat.research.cuda_candidate import _comment_free_source
+    commented=tmp_path/"commented.py"; commented.write_text("# import fla\nvalue = 1\n")
+    active=tmp_path/"active.py"; active.write_text("import fla\n")
+    assert b"import fla" not in _comment_free_source(commented,commented.read_bytes()).lower()
+    assert b"import fla" in _comment_free_source(active,active.read_bytes()).lower()
+
+
+def test_launch_hardening_binds_nsys_frozen_abi_and_read_only_guide():
+    supervisor=(ROOT/"nanochat/research/cuda_supervisor.py").read_text()
+    candidate=(ROOT/"nanochat/research/cuda_candidate.py").read_text()
+    worker=(ROOT/"nanochat/research/cuda_worker.py").read_text()
+    guide=(ROOT/"nanochat/mixers/cuda_kda/README.md").read_text()
+    assert "capture_nsys_cuda_symbols" in supervisor and "capture_nsys_cuda_symbols" in candidate
+    assert "protected_operator_trace_plus_external_nsys" in worker
+    assert 'expected_operator=f"nanochat_kda::{name}"' in worker
+    assert "nanochat_kda::chunk_backward(" in guide and "Tensor? grad_final_state" in guide
+    assert "READ_ONLY_CANDIDATE_PATHS" in supervisor and "READ_ONLY_CANDIDATE_PATHS" in candidate
+
+
+def test_candidate_checker_rejects_protected_readme_change(tmp_path):
+    from nanochat.research.cuda_candidate import inspect_staged_candidate
+    root,foundation=make_repo(tmp_path); config=config_for(tmp_path,foundation)
+    readme=root/"nanochat/mixers/cuda_kda/README.md"; readme.write_text(readme.read_text()+"\nchanged\n")
+    git(root,"add",str(readme.relative_to(root)))
+    with pytest.raises(ValueError,match="protected read-only"):
+        inspect_staged_candidate(root,config)

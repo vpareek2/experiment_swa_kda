@@ -166,7 +166,8 @@ class ShortConvolution(nn.Conv1d):
             if backend not in {"fla_triton", "project_cuda"}:
                 raise ValueError(f"unknown CUDA short-convolution backend: {backend}")
             if use_project:
-                output, final_state = _project_operator("causal_convolution_forward")(
+                output, final_state = _ProjectConvolutionAutograd.apply(
+                    "causal_convolution_forward", "causal_convolution_backward",
                     x, self.weight.squeeze(1).to(dtype=x.dtype),
                     None if state is None else current, output_final_state,
                 )
@@ -379,6 +380,71 @@ def _project_operator(component: str):
     return getattr(getattr(torch.ops,namespace),operator)
 
 
+class _ProjectKDAAutograd(torch.autograd.Function):
+    """Protected autograd boundary whose backward must dispatch the claimed native op."""
+
+    @staticmethod
+    def forward(ctx, forward_component, backward_component, q, k, v, raw_gate, beta_logits,
+                A_log, dt_bias, initial_state, output_final_state, lower_bound, scale):
+        output, final_state = _project_operator(forward_component)(
+            q, k, v, raw_gate, beta_logits, A_log, dt_bias, initial_state,
+            output_final_state, lower_bound, scale,
+        )
+        ctx.backward_component = backward_component
+        ctx.initial_state = initial_state
+        ctx.final_state = final_state
+        ctx.lower_bound = lower_bound
+        ctx.scale = scale
+        ctx.save_for_backward(q, k, v, raw_gate, beta_logits, A_log, dt_bias, output)
+        return output, final_state
+
+    @staticmethod
+    def backward(ctx, grad_output, grad_final_state):
+        q, k, v, raw_gate, beta_logits, A_log, dt_bias, output = ctx.saved_tensors
+        gradients = _project_operator(ctx.backward_component)(
+            q, k, v, raw_gate, beta_logits, A_log, dt_bias, ctx.initial_state,
+            output, ctx.final_state, grad_output, grad_final_state,
+            ctx.lower_bound, ctx.scale,
+        )
+        if not isinstance(gradients, (tuple, list)) or len(gradients) != 8:
+            raise RuntimeError("project chunk backward must return eight gradients")
+        dq, dk, dv, draw_gate, dbeta, dA, ddt, dinitial = gradients
+        if ctx.initial_state is None:
+            dinitial = None
+        return (None, None, dq, dk, dv, draw_gate, dbeta, dA, ddt, dinitial,
+                None, None, None)
+
+
+class _ProjectConvolutionAutograd(torch.autograd.Function):
+    """Protected convolution autograd boundary with a separately observed native backward."""
+
+    @staticmethod
+    def forward(ctx, forward_component, backward_component, x, weight, initial_state,
+                output_final_state):
+        output, final_state = _project_operator(forward_component)(
+            x, weight, initial_state, output_final_state,
+        )
+        ctx.backward_component = backward_component
+        ctx.initial_state = initial_state
+        ctx.final_state = final_state
+        ctx.save_for_backward(x, weight, output)
+        return output, final_state
+
+    @staticmethod
+    def backward(ctx, grad_output, grad_final_state):
+        x, weight, output = ctx.saved_tensors
+        gradients = _project_operator(ctx.backward_component)(
+            x, weight, ctx.initial_state, output, ctx.final_state,
+            grad_output, grad_final_state,
+        )
+        if not isinstance(gradients, (tuple, list)) or len(gradients) != 3:
+            raise RuntimeError("project convolution backward must return three gradients")
+        dx, dweight, dinitial = gradients
+        if ctx.initial_state is None:
+            dinitial = None
+        return None, None, dx, dweight, dinitial, None
+
+
 def kda_backend_provenance() -> dict:
     """Return the candidate claim consumed and independently checked by the protected audit."""
 
@@ -517,10 +583,17 @@ def kda(
             forward_component, backward_component = "recurrent_decode", None
         if owned:
             resolved_scale=float(scale if scale is not None else q.shape[-1] ** -0.5)
-            output, final_state = _project_operator(forward_component)(
-                q, k, v, raw_gate, beta_logits, A_log, dt_bias,
-                initial_state, output_final_state, float(lower_bound), resolved_scale,
-            )
+            if backward_component is None:
+                output, final_state = _project_operator(forward_component)(
+                    q, k, v, raw_gate, beta_logits, A_log, dt_bias,
+                    initial_state, output_final_state, float(lower_bound), resolved_scale,
+                )
+            else:
+                output, final_state = _ProjectKDAAutograd.apply(
+                    forward_component, backward_component,
+                    q, k, v, raw_gate, beta_logits, A_log, dt_bias,
+                    initial_state, output_final_state, float(lower_bound), resolved_scale,
+                )
             selected = "project"
         else:
             output, final_state = _run_fla_kda(

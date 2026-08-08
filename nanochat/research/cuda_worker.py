@@ -21,6 +21,7 @@ import sys
 from typing import Any
 
 from nanochat.research.cuda_config import cuda_campaign_config_from_dict, load_cuda_campaign_config
+from nanochat.research.cuda_candidate import _comment_free_source
 
 
 class _ForbiddenRuntimeFinder(importlib.abc.MetaPathFinder):
@@ -62,7 +63,7 @@ def _provenance(root: Path, module, config) -> dict[str, Any]:
     forbidden_tokens=(b"import fla",b"from fla",b"_run_fla",b"_fla_ops",b"_fla_causal_conv1d",b"_reference_kda",b"tests.kda_oracle",b"/ref/")
     for candidate_source in candidate_root.rglob("*"):
         if candidate_source.is_file() and candidate_source.suffix.lower() in {".py", ".cu", ".cuh", ".cpp", ".cc", ".h", ".hpp", ".ptx"}:
-            lowered=candidate_source.read_bytes().lower()
+            lowered=_comment_free_source(candidate_source,candidate_source.read_bytes()).lower()
             if any(token in lowered for token in forbidden_tokens):
                 return {"status":"invalid","reason":f"candidate source references a forbidden runtime/oracle path: {candidate_source.relative_to(root)}","owned_fraction":0.0,"components":{}}
             if candidate_source.suffix.lower()==".py" and (b"torch.library" in lowered or b"from torch import library" in lowered):
@@ -86,8 +87,9 @@ def _provenance(root: Path, module, config) -> dict[str, Any]:
             return {"status": "invalid", "reason": f"unclaimed component {name} must not attach project evidence", "owned_fraction": 0.0, "components": components}
         if entry["owner"] == "project":
             import torch
-            if not isinstance(torch_operator, str) or not torch_operator.startswith("nanochat_kda::") or not torch._C._dispatch_has_kernel_for_dispatch_key(torch_operator, "CUDA"):
-                return {"status": "invalid", "reason": f"project-owned component {name} requires a registered nanochat_kda CUDA operator", "owned_fraction": 0.0, "components": components}
+            expected_operator=f"nanochat_kda::{name}"
+            if torch_operator != expected_operator or not torch._C._dispatch_has_kernel_for_dispatch_key(expected_operator, "CUDA"):
+                return {"status": "invalid", "reason": f"project-owned component {name} requires registered CUDA operator {expected_operator}", "owned_fraction": 0.0, "components": components}
         checked = []
         for source in sources:
             relative = Path(source)
@@ -98,7 +100,7 @@ def _provenance(root: Path, module, config) -> dict[str, Any]:
                 return {"status": "invalid", "reason": f"source outside tracked project-owned roots: {source}", "owned_fraction": 0.0, "components": components}
             if resolved.suffix.lower() not in config.ownership.source_extensions:
                 return {"status": "invalid", "reason": f"unapproved CUDA/build source extension: {source}", "owned_fraction": 0.0, "components": components}
-            source_bytes = resolved.read_bytes(); lowered = source_bytes.lower()
+            source_bytes = resolved.read_bytes(); lowered = _comment_free_source(resolved,source_bytes).lower()
             if resolved.suffix.lower() in {".py", ".cu", ".cuh", ".cpp", ".cc", ".h", ".hpp"}:
                 forbidden_tokens=(b"import fla",b"from fla",b"_run_fla",b"_reference_kda",b"tests.kda_oracle",b"/ref/")
                 if any(token in lowered for token in forbidden_tokens):
@@ -345,26 +347,124 @@ def runtime_audit(root: Path, config, lane: str) -> dict[str, Any]:
             "loaded_forbidden_modules": loaded_forbidden, "runtime_forbidden_module_attempts": finder.attempts,
             "runtime_events": events, "native_operator_events":sorted(set(native_operator_events)), "provenance": provenance, "checks": checks, "migration_ready": migration_ready}
 
-def sanitizer_smoke(config, lane: str) -> dict[str, Any]:
+def _sanitizer_claims(provenance: dict[str, Any], config, lane: str) -> set[str]:
+    if lane not in {"bootstrap", "migration", "optimization"}:
+        raise RuntimeError(f"unsupported sanitizer lane: {lane}")
+    components = provenance.get("components", {})
+    claimed = {name for name, entry in components.items() if entry.get("owner") == "project"}
+    for unit in config.ownership.atomic_units:
+        owned = set(unit) & claimed
+        if owned and owned != set(unit):
+            raise RuntimeError(f"sanitizer refuses a partially claimed atomic unit: {list(unit)}")
+    required = set(config.ownership.required_components)
+    if not claimed:
+        raise RuntimeError("sanitizer requires at least one verified project-owned atomic unit")
+    if lane == "optimization" and claimed != required:
+        raise RuntimeError(f"optimization sanitizer requires every component to be project-owned; missing {sorted(required - claimed)}")
+    return claimed
+
+
+def sanitizer_smoke(root: Path, config, lane: str) -> dict[str, Any]:
+    """Run sanitizer coverage only through provenance-verified native claims.
+
+    Transitional lanes deliberately do not load FLA: unclaimed atomic units are
+    skipped rather than exercised through the protected hybrid dispatcher.
+    """
     import torch
+    if not torch.cuda.is_available():
+        return {"status": "invalid", "reason": "CUDA is required", "lane": lane}
     implementation = importlib.import_module("nanochat.mixers.kda")
-    if not torch.cuda.is_available(): return {"status": "invalid", "reason": "CUDA is required"}
+    for name in list(sys.modules):
+        if any(name == prefix or name.startswith(prefix + ".") for prefix in config.ownership.forbid_runtime_modules):
+            del sys.modules[name]
+    finder = _ForbiddenRuntimeFinder(config.ownership.forbid_runtime_modules)
+    sys.meta_path.insert(0, finder)
+    provenance: dict[str, Any] = {}; checks: list[str] = []; recorder = None
     try:
-        implementation.prepare_kda_backend("project_cuda")
-        conv_x=torch.randn(1,65,128,device="cuda",dtype=torch.bfloat16,requires_grad=True)
-        conv=implementation.ShortConvolution(128,4).cuda()
-        conv_output,_=conv(conv_x,output_final_state=True,backend="project_cuda")
-        conv_output.float().sum().backward(); torch.cuda.synchronize()
-        values = _inputs(torch, 65, config.correctness.production_head_dim, gradients=True)
-        output, state = implementation.kda(*values, output_final_state=True, mode="project_chunk", allow_fallback=False)
-        output.float().sum().backward(); torch.cuda.synchronize()
-        with torch.no_grad():
-            implementation.kda(*(item.detach() for item in _inputs(torch, 1, config.correctness.production_head_dim, gradients=False)),
-                               initial_state=state.detach(), output_final_state=True, mode="project_recurrent", allow_fallback=False)
-        torch.cuda.synchronize()
-        return {"status": "complete", "lane": lane, "checks": ["causal_convolution_forward_backward_tail", "chunk_forward_backward_tail", "recurrent_nonzero_state"]}
+        project = implementation._load_project_backend()
+        project.prepare()
+        implementation._PROJECT_PROVENANCE = None
+        provenance = _provenance(root, implementation, config)
+        if provenance.get("status") != "complete":
+            raise RuntimeError(provenance.get("reason", "invalid project provenance"))
+        claimed = _sanitizer_claims(provenance, config, lane)
+        implementation.reset_project_runtime_events()
+        recorder = _NativeOperatorRecorder(); recorder.__enter__()
+
+        if {"causal_convolution_forward", "causal_convolution_backward"} <= claimed:
+            conv_x = torch.randn(1, 65, 128, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+            conv_initial = torch.randn(1, 128, 4, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+            conv = implementation.ShortConvolution(128, 4).cuda()
+            conv_output, conv_state = conv(conv_x, conv_initial, output_final_state=True, backend="project_cuda")
+            (conv_output.float().sum() + conv_state.float().sum()).backward()
+            if conv_x.grad is None or conv_initial.grad is None or conv.weight.grad is None:
+                raise RuntimeError("claimed causal-convolution backward omitted a required gradient")
+            torch.cuda.synchronize()
+            checks.append("causal_convolution_forward_backward_state_tail")
+
+        if {"chunk_forward", "chunk_backward"} <= claimed:
+            values = _inputs(torch, 65, config.correctness.production_head_dim, gradients=True)
+            initial = torch.randn(1, 1, config.correctness.production_head_dim,
+                                  config.correctness.production_head_dim, device="cuda",
+                                  dtype=torch.float32, requires_grad=True)
+            output, state = implementation.kda(
+                *values, initial_state=initial, output_final_state=True,
+                mode="project_chunk", allow_fallback=False,
+            )
+            (output.float().sum() + state.float().sum()).backward()
+            if initial.grad is None or any(value.grad is None for value in values):
+                raise RuntimeError("claimed chunk backward omitted a required gradient")
+            torch.cuda.synchronize()
+            checks.append("chunk_forward_backward_nonzero_state_tail")
+
+        if "recurrent_decode" in claimed:
+            recurrent = _inputs(torch, 1, config.correctness.production_head_dim, gradients=False)
+            recurrent_state = torch.randn(1, 1, config.correctness.production_head_dim,
+                                          config.correctness.production_head_dim,
+                                          device="cuda", dtype=torch.float32)
+            with torch.no_grad():
+                recurrent_output, recurrent_final = implementation.kda(
+                    *recurrent, initial_state=recurrent_state, output_final_state=True,
+                    mode="project_recurrent", allow_fallback=False,
+                )
+            if recurrent_final is None or not bool(torch.isfinite(recurrent_output).all() and torch.isfinite(recurrent_final).all()):
+                raise RuntimeError("claimed recurrent decode produced missing or non-finite state")
+            torch.cuda.synchronize()
+            checks.append("recurrent_decode_nonzero_state")
+
+        recorder.__exit__(None, None, None)
+        native_events = recorder.names; recorder = None
+        runtime_events = implementation.project_runtime_events()
+        observed = {event.get("component") for event in runtime_events}
+        unexpected = observed - claimed
+        missing = claimed - observed
+        if unexpected:
+            raise RuntimeError(f"sanitizer executed unclaimed components: {sorted(unexpected)}")
+        if missing:
+            raise RuntimeError(f"sanitizer missed claimed component events: {sorted(missing)}")
+        nonproject = [event for event in runtime_events if event.get("backend") != "project"]
+        if nonproject:
+            raise RuntimeError(f"sanitizer observed non-project routes: {nonproject}")
+        for component in sorted(claimed):
+            operator = provenance["components"][component]["torch_operator"]
+            if not _operator_observed(operator, native_events):
+                raise RuntimeError(f"sanitizer did not observe claimed operator for {component}: {operator}")
+        return {
+            "status": "complete", "lane": lane, "claimed_components": sorted(claimed),
+            "checks": checks, "runtime_events": runtime_events,
+            "native_operator_events": sorted(set(native_events)), "provenance": provenance,
+            "runtime_forbidden_module_attempts": finder.attempts,
+        }
     except Exception as error:
-        return {"status": "invalid", "reason": f"{type(error).__name__}: {error}"}
+        return {
+            "status": "invalid", "reason": f"{type(error).__name__}: {error}", "lane": lane,
+            "provenance": provenance, "checks": checks,
+            "runtime_forbidden_module_attempts": finder.attempts,
+        }
+    finally:
+        if recorder is not None:
+            recorder.__exit__(None, None, None)
+        sys.meta_path.remove(finder)
 
 
 def profile_audit(root: Path, config, lane: str) -> dict[str, Any]:
@@ -379,25 +479,23 @@ def profile_audit(root: Path, config, lane: str) -> dict[str, Any]:
         values=_inputs(torch,length,config.correctness.production_head_dim,gradients=True)
         conv=implementation.ShortConvolution(128,4).cuda(); conv_x=torch.randn(1,length,128,device="cuda",dtype=torch.bfloat16,requires_grad=True)
         recurrent_values=_inputs(torch,1,config.correctness.production_head_dim,gradients=False)
-        activities=[torch.profiler.ProfilerActivity.CPU,torch.profiler.ProfilerActivity.CUDA]
-        with torch.profiler.profile(activities=activities,record_shapes=False,profile_memory=False,with_stack=False) as prof:
+        recorder=_NativeOperatorRecorder("nanochat_kda")
+        with recorder:
             output,state=implementation.kda(*values,output_final_state=True,mode="project_chunk",allow_fallback=False)
             (output.float().square().mean()+state.square().mean()).backward()
             conv_output,_=conv(conv_x,output_final_state=True,backend="project_cuda"); conv_output.float().sum().backward()
             with torch.no_grad(): implementation.kda(*recurrent_values,output_final_state=True,mode="project_recurrent",allow_fallback=False)
-        all_names=[]
-        for event in prof.events():
-            for value in (getattr(event,"name",None),getattr(event,"key",None)):
-                if value: all_names.append(str(value))
-        missing_ops=[]; missing_symbols=[]
+        torch.cuda.synchronize()
+        all_names=recorder.names
+        missing_ops=[]
         for name,component in provenance["components"].items():
             if component["owner"]!="project": continue
             if not _operator_observed(component["torch_operator"],all_names): missing_ops.append({"component":name,"operator":component["torch_operator"]})
-            for symbol in component["kernel_symbols"]:
-                if not any(symbol in observed for observed in all_names): missing_symbols.append({"component":name,"symbol":symbol})
-        if missing_ops or missing_symbols: raise RuntimeError(f"profile does not bind claimed operators/symbols: operators={missing_ops}, symbols={missing_symbols}")
-        rows=[{"name":item.key,"calls":int(item.count),"self_device_time_us":float(item.self_device_time_total)} for item in sorted(prof.key_averages(),key=lambda row:row.self_device_time_total,reverse=True)[:config.kernel_gates.profile_rows]]
-        payload={"status":"complete","lane":lane,"profile_mode":"bounded_key_averages_no_trace","profile":rows,"observed_project_operators":[component["torch_operator"] for component in provenance["components"].values() if component["owner"]=="project"],"observed_kernel_symbols":[symbol for component in provenance["components"].values() if component["owner"]=="project" for symbol in component["kernel_symbols"]]}
+        if missing_ops: raise RuntimeError(f"profile does not observe claimed CUDA operators: {missing_ops}")
+        counts={name:all_names.count(name) for name in dict.fromkeys(all_names)}
+        rows=[{"name":name,"calls":count} for name,count in list(counts.items())[:config.kernel_gates.profile_rows]]
+        expected_symbols=[symbol for component in provenance["components"].values() if component["owner"]=="project" for symbol in component["kernel_symbols"]]
+        payload={"status":"complete","lane":lane,"profile_mode":"protected_operator_trace_plus_external_nsys","profile":rows,"observed_project_operators":[component["torch_operator"] for component in provenance["components"].values() if component["owner"]=="project"],"expected_kernel_symbols":expected_symbols}
         if len(json.dumps(payload,sort_keys=True).encode())>config.kernel_gates.profile_max_bytes: raise RuntimeError("bounded profile exceeds profile_max_bytes")
         return payload
     except Exception as error:
@@ -492,17 +590,27 @@ def microbenchmark(config, backend: str, lane: str) -> dict[str, Any]:
 
 def main(argv=None) -> int:
     parser=argparse.ArgumentParser(); parser.add_argument("command", choices=("runtime-audit", "sanitizer-smoke", "profile-audit", "microbenchmark"))
-    parser.add_argument("--config", required=True); parser.add_argument("--output", required=True); parser.add_argument("--backend", choices=("reference", "fla_triton", "project_cuda"), default="project_cuda"); parser.add_argument("--lane", choices=("bootstrap", "migration", "optimization", "anchor"), default="optimization"); parser.add_argument("--implementation-root", default=None)
+    parser.add_argument("--config", required=True); parser.add_argument("--output", required=True); parser.add_argument("--backend", choices=("reference", "fla_triton", "project_cuda"), default="project_cuda"); parser.add_argument("--lane", choices=("bootstrap", "migration", "optimization", "anchor"), default="optimization"); parser.add_argument("--implementation-root", default=None); parser.add_argument("--historical-implementation-root",default=None)
     args=parser.parse_args(argv)
+    if args.implementation_root and args.historical_implementation_root: parser.error("implementation bridges are mutually exclusive")
     if args.implementation_root:
-        import nanochat
-        implementation_package=str((Path(args.implementation_root).resolve()/"nanochat"))
-        if implementation_package not in nanochat.__path__: nanochat.__path__.insert(0,implementation_package)
+        # Keep this controller's protected dispatcher/worker loaded, while
+        # resolving only the candidate-owned cuda_kda implementation package
+        # from the explicitly bridged worktree.
+        import nanochat.mixers
+        import nanochat.mixers.kda  # pin the controller-owned dispatcher before extending package search
+        implementation_mixers=str((Path(args.implementation_root).resolve()/"nanochat"/"mixers"))
+        if implementation_mixers not in nanochat.mixers.__path__:
+            nanochat.mixers.__path__.insert(0,implementation_mixers)
+    elif args.historical_implementation_root:
+        import nanochat.mixers
+        historical_mixers=str((Path(args.historical_implementation_root).resolve()/"nanochat"/"mixers"))
+        if historical_mixers not in nanochat.mixers.__path__: nanochat.mixers.__path__.insert(0,historical_mixers)
     config_path=Path(args.config)
     config=(cuda_campaign_config_from_dict(json.loads(config_path.read_text())) if config_path.suffix == ".json" else load_cuda_campaign_config(config_path))
     root=Path.cwd().resolve()
     if args.command == "runtime-audit": result = runtime_audit(root, config, args.lane)
-    elif args.command == "sanitizer-smoke": result = sanitizer_smoke(config, args.lane)
+    elif args.command == "sanitizer-smoke": result = sanitizer_smoke(root, config, args.lane)
     elif args.command == "profile-audit": result = profile_audit(root, config, args.lane)
     else: result = microbenchmark(config, args.backend, args.lane)
     _write(args.output, result)
