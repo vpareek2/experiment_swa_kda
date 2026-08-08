@@ -156,38 +156,61 @@ __global__ void nanochat_kda_chunk_backward_kernel(
     float lower_bound,
     float scale) {
   const int64_t h = blockIdx.x;
-  if (h >= heads || threadIdx.x != 0) {
+  if (h >= heads) {
     return;
   }
+  const int64_t lane = threadIdx.x;
+  const int64_t lanes = blockDim.x;
+  extern __shared__ float reduction[];
+  __shared__ float q_inverse_norm_shared;
+  __shared__ float k_inverse_norm_shared;
+  __shared__ float q_square_sum_shared;
+  __shared__ float k_square_sum_shared;
+  __shared__ float beta_shared;
+  __shared__ float query_dot_shared;
+  __shared__ float key_dot_shared;
+  __shared__ float head_A_gradient_shared;
 
-  float head_A_gradient = 0.0f;
+  if (lane == 0) {
+    head_A_gradient_shared = 0.0f;
+  }
+  __syncthreads();
+
   const float a = expf(A_log[h]);
   for (int64_t b = 0; b < batch; ++b) {
-    for (int64_t value = 0; value < value_dim; ++value) {
-      for (int64_t key = 0; key < key_dim; ++key) {
-        const int64_t history = history_index(
-            b, h, 0, value, key, heads, length, value_dim, key_dim);
-        const int64_t state = state_index(
-            b, h, value, key, heads, value_dim, key_dim);
-        state_history[history] = initial_state == nullptr
-            ? 0.0f
-            : initial_state[state];
-      }
+    const int64_t matrix_count = value_dim * key_dim;
+    for (int64_t linear = lane; linear < matrix_count; linear += lanes) {
+      const int64_t value = linear / key_dim;
+      const int64_t key = linear - value * key_dim;
+      const int64_t history = history_index(
+          b, h, 0, value, key, heads, length, value_dim, key_dim);
+      const int64_t state = state_index(
+          b, h, value, key, heads, value_dim, key_dim);
+      state_history[history] = initial_state == nullptr
+          ? 0.0f
+          : initial_state[state];
     }
+    __syncthreads();
 
+    // The recurrence remains sequential in time, while independent value rows
+    // are recomputed concurrently.  Each row keeps the original key reduction
+    // order and therefore the V-first FP32 state trajectory.
     for (int64_t token = 0; token < length; ++token) {
       const int64_t q_base = q_index(
           b, token, h, 0, length, heads, key_dim);
-      float k_square_sum = 0.0f;
-      for (int64_t key = 0; key < key_dim; ++key) {
-        const float key_value = __bfloat162float(k[q_base + key]);
-        k_square_sum += key_value * key_value;
+      if (lane == 0) {
+        float k_square_sum = 0.0f;
+        for (int64_t key = 0; key < key_dim; ++key) {
+          const float key_value = __bfloat162float(k[q_base + key]);
+          k_square_sum += key_value * key_value;
+        }
+        k_inverse_norm_shared = rsqrtf(fmaxf(k_square_sum, 1.0e-24f));
+        const int64_t beta_offset = (b * length + token) * heads + h;
+        beta_shared = chunk_sigmoid(__bfloat162float(beta_logits[beta_offset]));
       }
-      const float k_inverse_norm = rsqrtf(fmaxf(k_square_sum, 1.0e-24f));
-      const int64_t beta_offset = (b * length + token) * heads + h;
-      const float beta = chunk_sigmoid(__bfloat162float(beta_logits[beta_offset]));
+      __syncthreads();
 
-      for (int64_t value = 0; value < value_dim; ++value) {
+      for (int64_t value = lane; value < value_dim; value += lanes) {
         float prediction = 0.0f;
         for (int64_t key = 0; key < key_dim; ++key) {
           const float gate_input = __bfloat162float(raw_gate[q_base + key]);
@@ -195,8 +218,8 @@ __global__ void nanochat_kda_chunk_backward_kernel(
               a * (gate_input + dt_bias[h * key_dim + key]));
           const float previous = state_history[history_index(
               b, h, token, value, key, heads, length, value_dim, key_dim)];
-          prediction += __bfloat162float(k[q_base + key]) * k_inverse_norm *
-              previous * expf(decay);
+          prediction += __bfloat162float(k[q_base + key]) *
+              k_inverse_norm_shared * previous * expf(decay);
         }
         const int64_t value_offset = v_index(
             b, token, h, value, length, heads, value_dim);
@@ -208,55 +231,63 @@ __global__ void nanochat_kda_chunk_backward_kernel(
               a * (gate_input + dt_bias[h * key_dim + key]));
           const float previous = state_history[history_index(
               b, h, token, value, key, heads, length, value_dim, key_dim)];
-          const float normalized_key = __bfloat162float(k[q_base + key]) * k_inverse_norm;
+          const float normalized_key = __bfloat162float(k[q_base + key]) *
+              k_inverse_norm_shared;
           state_history[history_index(
               b, h, token + 1, value, key, heads, length, value_dim, key_dim)] =
-              previous * expf(decay) + beta * normalized_key * residual;
+              previous * expf(decay) + beta_shared * normalized_key * residual;
         }
       }
+      __syncthreads();
     }
 
-    for (int64_t value = 0; value < value_dim; ++value) {
-      for (int64_t key = 0; key < key_dim; ++key) {
-        const int64_t state = state_index(
-            b, h, value, key, heads, value_dim, key_dim);
-        state_adjoint[state] = grad_final_state == nullptr
-            ? 0.0f
-            : grad_final_state[state];
-      }
+    for (int64_t linear = lane; linear < matrix_count; linear += lanes) {
+      const int64_t value = linear / key_dim;
+      const int64_t key = linear - value * key_dim;
+      const int64_t state = state_index(
+          b, h, value, key, heads, value_dim, key_dim);
+      state_adjoint[state] = grad_final_state == nullptr
+          ? 0.0f
+          : grad_final_state[state];
     }
+    __syncthreads();
 
     for (int64_t token = length; token-- > 0;) {
       const int64_t q_base = q_index(
           b, token, h, 0, length, heads, key_dim);
-      float q_square_sum = 0.0f;
-      float k_square_sum = 0.0f;
-      for (int64_t key = 0; key < key_dim; ++key) {
-        const float query_value = __bfloat162float(q[q_base + key]);
-        const float key_value = __bfloat162float(k[q_base + key]);
-        q_square_sum += query_value * query_value;
-        k_square_sum += key_value * key_value;
+      if (lane == 0) {
+        float q_square_sum = 0.0f;
+        float k_square_sum = 0.0f;
+        for (int64_t key = 0; key < key_dim; ++key) {
+          const float query_value = __bfloat162float(q[q_base + key]);
+          const float key_value = __bfloat162float(k[q_base + key]);
+          q_square_sum += query_value * query_value;
+          k_square_sum += key_value * key_value;
+        }
+        q_square_sum_shared = q_square_sum;
+        k_square_sum_shared = k_square_sum;
+        q_inverse_norm_shared = rsqrtf(fmaxf(q_square_sum, 1.0e-24f));
+        k_inverse_norm_shared = rsqrtf(fmaxf(k_square_sum, 1.0e-24f));
+        const int64_t beta_offset = (b * length + token) * heads + h;
+        beta_shared = chunk_sigmoid(__bfloat162float(beta_logits[beta_offset]));
       }
-      const float q_inverse_norm = rsqrtf(fmaxf(q_square_sum, 1.0e-24f));
-      const float k_inverse_norm = rsqrtf(fmaxf(k_square_sum, 1.0e-24f));
-      const int64_t beta_offset = (b * length + token) * heads + h;
-      const float beta = chunk_sigmoid(__bfloat162float(beta_logits[beta_offset]));
+      __syncthreads();
 
-      for (int64_t value = 0; value < value_dim; ++value) {
+      for (int64_t linear = lane; linear < matrix_count; linear += lanes) {
+        const int64_t value = linear / key_dim;
+        const int64_t key = linear - value * key_dim;
+        const int64_t state = state_index(
+            b, h, value, key, heads, value_dim, key_dim);
         const int64_t value_offset = v_index(
             b, token, h, value, length, heads, value_dim);
-        const float output_gradient = __bfloat162float(grad_output[value_offset]);
-        for (int64_t key = 0; key < key_dim; ++key) {
-          const int64_t state = state_index(
-              b, h, value, key, heads, value_dim, key_dim);
-          const float normalized_query = __bfloat162float(q[q_base + key]) *
-              q_inverse_norm * scale;
-          state_adjoint[state] += output_gradient * normalized_query;
-        }
+        const float normalized_query = __bfloat162float(q[q_base + key]) *
+            q_inverse_norm_shared * scale;
+        state_adjoint[state] +=
+            __bfloat162float(grad_output[value_offset]) * normalized_query;
       }
+      __syncthreads();
 
-      float query_dot = 0.0f;
-      for (int64_t key = 0; key < key_dim; ++key) {
+      for (int64_t key = lane; key < key_dim; key += lanes) {
         float normalized_gradient = 0.0f;
         for (int64_t value = 0; value < value_dim; ++value) {
           const int64_t value_offset = v_index(
@@ -267,38 +298,58 @@ __global__ void nanochat_kda_chunk_backward_kernel(
               state_history[history];
         }
         normalized_adjoint[q_base + key] = normalized_gradient;
-        query_dot += normalized_gradient *
-            (__bfloat162float(q[q_base + key]) * q_inverse_norm);
       }
-      for (int64_t key = 0; key < key_dim; ++key) {
-        const float normalized_query = __bfloat162float(q[q_base + key]) * q_inverse_norm;
-        const float projection = q_square_sum > 1.0e-24f
-            ? normalized_query * query_dot
+      __syncthreads();
+      if (lane == 0) {
+        float query_dot = 0.0f;
+        for (int64_t key = 0; key < key_dim; ++key) {
+          query_dot += normalized_adjoint[q_base + key] *
+              (__bfloat162float(q[q_base + key]) * q_inverse_norm_shared);
+        }
+        query_dot_shared = query_dot;
+      }
+      __syncthreads();
+      for (int64_t key = lane; key < key_dim; key += lanes) {
+        const float query_value = __bfloat162float(q[q_base + key]);
+        const float normalized_query = query_value * q_inverse_norm_shared;
+        const float projection = q_square_sum_shared > 1.0e-24f
+            ? normalized_query * query_dot_shared
             : 0.0f;
-        const float input_gradient = scale * q_inverse_norm *
+        const float input_gradient = scale * q_inverse_norm_shared *
             (normalized_adjoint[q_base + key] - projection);
         dq[q_base + key] = __float2bfloat16_rn(input_gradient);
       }
 
-      float beta_gradient = 0.0f;
-      for (int64_t value = 0; value < value_dim; ++value) {
+      for (int64_t value = lane; value < value_dim; value += lanes) {
         float gradient = 0.0f;
+        float beta_partial = 0.0f;
         const float residual = residual_history[v_index(
             b, token, h, value, length, heads, value_dim)];
         for (int64_t key = 0; key < key_dim; ++key) {
           const int64_t state = state_index(
               b, h, value, key, heads, value_dim, key_dim);
-          const float normalized_key = __bfloat162float(k[q_base + key]) * k_inverse_norm;
-          gradient += state_adjoint[state] * beta * normalized_key;
-          beta_gradient += state_adjoint[state] * normalized_key * residual;
+          const float normalized_key = __bfloat162float(k[q_base + key]) *
+              k_inverse_norm_shared;
+          gradient += state_adjoint[state] * beta_shared * normalized_key;
+          beta_partial += state_adjoint[state] * normalized_key * residual;
         }
         residual_adjoint[(b * heads + h) * value_dim + value] = gradient;
         dv[v_index(b, token, h, value, length, heads, value_dim)] =
             __float2bfloat16_rn(gradient);
+        reduction[value] = beta_partial;
+      }
+      __syncthreads();
+      if (lane == 0) {
+        float beta_gradient = 0.0f;
+        for (int64_t value = 0; value < value_dim; ++value) {
+          beta_gradient += reduction[value];
+        }
+        const int64_t beta_offset = (b * length + token) * heads + h;
+        dbeta_logits[beta_offset] = __float2bfloat16_rn(
+            beta_gradient * beta_shared * (1.0f - beta_shared));
       }
 
-      float key_dot = 0.0f;
-      for (int64_t key = 0; key < key_dim; ++key) {
+      for (int64_t key = lane; key < key_dim; key += lanes) {
         const float gate_input = __bfloat162float(raw_gate[q_base + key]);
         const float decay = lower_bound * chunk_sigmoid(
             a * (gate_input + dt_bias[h * key_dim + key]));
@@ -313,31 +364,41 @@ __global__ void nanochat_kda_chunk_backward_kernel(
               (b * heads + h) * value_dim + value];
           const float previous = state_history[history_index(
               b, h, token, value, key, heads, length, value_dim, key_dim)];
-          normalized_gradient += state_adjoint[state] * beta * residual -
+          normalized_gradient += state_adjoint[state] * beta_shared * residual -
               residual_gradient * previous * decay_exponential;
         }
         normalized_adjoint[q_base + key] = normalized_gradient;
-        key_dot += normalized_gradient *
-            (__bfloat162float(k[q_base + key]) * k_inverse_norm);
       }
-      for (int64_t key = 0; key < key_dim; ++key) {
-        const float normalized_key = __bfloat162float(k[q_base + key]) * k_inverse_norm;
-        const float projection = k_square_sum > 1.0e-24f
-            ? normalized_key * key_dot
+      __syncthreads();
+      if (lane == 0) {
+        float key_dot = 0.0f;
+        for (int64_t key = 0; key < key_dim; ++key) {
+          key_dot += normalized_adjoint[q_base + key] *
+              (__bfloat162float(k[q_base + key]) * k_inverse_norm_shared);
+        }
+        key_dot_shared = key_dot;
+      }
+      __syncthreads();
+      for (int64_t key = lane; key < key_dim; key += lanes) {
+        const float key_value = __bfloat162float(k[q_base + key]);
+        const float normalized_key = key_value * k_inverse_norm_shared;
+        const float projection = k_square_sum_shared > 1.0e-24f
+            ? normalized_key * key_dot_shared
             : 0.0f;
-        const float input_gradient = k_inverse_norm *
+        const float input_gradient = k_inverse_norm_shared *
             (normalized_adjoint[q_base + key] - projection);
         dk[q_base + key] = __float2bfloat16_rn(input_gradient);
       }
 
-      for (int64_t key = 0; key < key_dim; ++key) {
+      for (int64_t key = lane; key < key_dim; key += lanes) {
         const float gate_input = __bfloat162float(raw_gate[q_base + key]);
         const float biased_gate = gate_input + dt_bias[h * key_dim + key];
         const float gate_sigmoid = chunk_sigmoid(a * biased_gate);
         const float decay = lower_bound * gate_sigmoid;
         const float decay_exponential = expf(decay);
         float decay_gradient = 0.0f;
-        const float normalized_key = __bfloat162float(k[q_base + key]) * k_inverse_norm;
+        const float normalized_key = __bfloat162float(k[q_base + key]) *
+            k_inverse_norm_shared;
         for (int64_t value = 0; value < value_dim; ++value) {
           const int64_t state = state_index(
               b, h, value, key, heads, value_dim, key_dim);
@@ -356,24 +417,31 @@ __global__ void nanochat_kda_chunk_backward_kernel(
         const float raw_gradient = activated_gradient * a;
         draw_gate[q_base + key] = __float2bfloat16_rn(raw_gradient);
         ddt_bias[h * key_dim + key] += raw_gradient;
-        head_A_gradient += raw_gradient * biased_gate;
+        reduction[key] = raw_gradient * biased_gate;
       }
-
-      dbeta_logits[beta_offset] = __float2bfloat16_rn(
-          beta_gradient * beta * (1.0f - beta));
+      __syncthreads();
+      if (lane == 0) {
+        for (int64_t key = 0; key < key_dim; ++key) {
+          head_A_gradient_shared += reduction[key];
+        }
+      }
+      __syncthreads();
     }
 
     if (dinitial_state != nullptr) {
-      for (int64_t value = 0; value < value_dim; ++value) {
-        for (int64_t key = 0; key < key_dim; ++key) {
-          const int64_t state = state_index(
-              b, h, value, key, heads, value_dim, key_dim);
-          dinitial_state[state] = state_adjoint[state];
-        }
+      for (int64_t linear = lane; linear < matrix_count; linear += lanes) {
+        const int64_t value = linear / key_dim;
+        const int64_t key = linear - value * key_dim;
+        const int64_t state = state_index(
+            b, h, value, key, heads, value_dim, key_dim);
+        dinitial_state[state] = state_adjoint[state];
       }
     }
+    __syncthreads();
   }
-  dA_log[h] = head_A_gradient;
+  if (lane == 0) {
+    dA_log[h] = head_A_gradient_shared;
+  }
 }
 
 void check_activation(
@@ -563,7 +631,10 @@ chunk_backward_cuda(
       {batch, heads, value_dim}, A_log.options());
 
   if (heads > 0) {
-    nanochat_kda_chunk_backward_kernel<<<static_cast<int>(heads), 1, 0,
+    const int threads = 128;
+    const size_t shared_bytes = static_cast<size_t>(
+        key_dim > value_dim ? key_dim : value_dim) * sizeof(float);
+    nanochat_kda_chunk_backward_kernel<<<static_cast<int>(heads), threads, shared_bytes,
         at::cuda::getCurrentCUDAStream(q.get_device())>>>(
         reinterpret_cast<const __nv_bfloat16*>(contiguous_q.data_ptr<at::BFloat16>()),
         reinterpret_cast<const __nv_bfloat16*>(contiguous_k.data_ptr<at::BFloat16>()),
