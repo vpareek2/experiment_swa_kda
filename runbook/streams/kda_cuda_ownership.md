@@ -92,3 +92,40 @@ git diff --check
 - Review the complete diff, then commit and create the immutable foundation tag.
 - Initialize and calibrate anchors from that clean tag; the first child can then
   write the simplest correct naive CUDA unit.
+
+## 2026-08-08 [agent] freeze protected foundation
+
+**Context**
+
+- The staged supervisor, worker, routing, candidate ABI, report, documentation,
+  and test suite completed internal and independent review.
+- Review blockers were closed before freezing: protected routing consumes native
+  operator outputs directly; fixed-anchor workers can execute against the older
+  anchor; calibration/retention are atomic; and release attempts are retriable.
+
+**Commands**
+
+```bash
+git commit -m "Add staged KDA CUDA ownership campaign"
+git tag -a kda-cuda-ownership-foundation \
+  -m "Protected KDA CUDA-ownership autoresearch foundation" \
+  07d8996eb0fe104e6b07d9a5ae4f2aa31e9f49e6
+git rev-parse kda-cuda-ownership-foundation^{}
+```
+
+**Artifacts**
+
+- Foundation commit and peeled tag target:
+  `07d8996eb0fe104e6b07d9a5ae4f2aa31e9f49e6`.
+- Immutable tag: `kda-cuda-ownership-foundation`.
+
+**Result**
+
+- The protected foundation is committed and tagged from a clean tree. Existing
+  `kda-speed-*` refs were not moved.
+- No CUDA campaign ledger, calibration, candidate, or GPU campaign was launched.
+
+**Next**
+
+- Initialize the independent ledger, calibrate Python/FLA operator anchors, and
+  give the bootstrap instruction to the first autonomous candidate worker.
