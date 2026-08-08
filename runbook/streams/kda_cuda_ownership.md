@@ -751,3 +751,79 @@ git -C "$WORKTREE" \
   candidate `146e9090...` from retained base `da1dea9...` with the declared
   hypothesis, run every protected supervisor phase, and retain only after a
   complete reviewed `validated_component` ownership-progress decision.
+
+## 2026-08-08 [agent] retain validated causal-convolution migration
+
+**Context**
+
+- Ledger-free qualification and the pushed exact candidate are diagnostic only;
+  retention required a separate authoritative supervisor intake and complete
+  attempt from the current clean coordinator.
+- The retained head before intake was recurrent-only commit `da1dea9...` at 20%
+  ownership in the migration lane. Performance remained explicitly advisory.
+
+**Commands**
+
+```bash
+.venv/bin/research cuda-ownership-supervisor intake \
+  --config configs/research/kda_cuda_ownership.toml \
+  --base-ref da1dea938d37618306c8dfaf82b5f06ac8628c6c \
+  --candidate-ref 146e9090a6823a9e87c91114e4eec1b8852a6836 \
+  --hypothesis 'Naive independent-element CUDA kernels with oracle-matched BF16 product/preactivation rounding, FP32 accumulation, exact cache-tail indexing, and recomputed SiLU backward should match convolution output/state and x/weight/initial-state gradients while exposing distinct native forward/backward operators and kernels.'
+.venv/bin/research cuda-ownership-supervisor run \
+  --config configs/research/kda_cuda_ownership.toml --attempt 2
+.venv/bin/research cuda-ownership-supervisor retain \
+  --config configs/research/kda_cuda_ownership.toml --attempt 2 \
+  --label 'naive causal convolution migration' --reason '<reviewed protected evidence>'
+```
+
+**Artifacts**
+
+- Authoritative attempt:
+  `runs/cuda-ownership-supervisor/ba64643fd7fd/attempt-00002`.
+- Its self-contained `summary.json` was materialized from the complete run CLI
+  result without changing any evidence value; SHA-256
+  `c1bd6025ae001fdc91d22005a7102d5e3d241bae23b455b5c140341b3ec4e57f`.
+- Retained milestone 3, ordinal 2, commit
+  `146e9090a6823a9e87c91114e4eec1b8852a6836`.
+
+**Result**
+
+- Intake accepted exact parent `da1dea9...`, exact direct-child candidate
+  `146e9090...`, the declared hypothesis verbatim, and only the three candidate
+  paths. Protected normalized patch SHA-256
+  `261e8e107227c1185ff6064921bc1973db73b4bb2d2df13a109792eb337a608c`
+  equals the committed binary diff after the controller's documented terminal-
+  newline stripping.
+- The authoritative attempt completed all mandatory phases: 52 protected tests;
+  a 21-check runtime audit including all five cache-gradient cases; ownership
+  profile; memcheck, racecheck, synccheck, and initcheck; and matched bounded
+  baseline/candidate kernel observations.
+- Eligibility was `validated_component` and migration decision was
+  `ownership_progress`. Exact ownership is 40% with project-owned
+  `recurrent_decode`, `causal_convolution_forward`, and
+  `causal_convolution_backward`; only `chunk_forward` and `chunk_backward`
+  remain third-party and use explicitly transitional FLA.
+- The authoritative isolated library has SHA-256
+  `7e5e7f8e3c2e5dc20a4cff57b0eba9cac700463c131706313a62f6a0ad953f5f`.
+  Saved provenance binds the mapped library, all three exact source hashes,
+  actual `compute_121,sm_121` commands, three registered operators, and three
+  independently observed Nsight kernel symbols. No candidate forbidden import
+  was attempted.
+- Raw sanitizer evidence is genuine: memcheck, synccheck, and initcheck each
+  report zero errors; racecheck reports zero hazards, errors, and warnings.
+  Every sanitizer executed only the three claimed project units.
+- Performance decision was `observed`, advisory, with no paired interval; it was
+  not used for retention and no speed or quality claim is made.
+- Explicit retention advanced only the append-only ledger head to milestone 3.
+  It did not merge the candidate, move a tag, change the default backend, or
+  claim a fully FLA-free implementation. The derived next lane remains
+  `migration` for the atomic chunk forward/backward pair.
+
+**Next**
+
+- Commit and push this runbook update, then create a fresh attempt-3 worktree and
+  branch from exact retained commit `146e9090...`. Implement the simplest correct
+  naive native `chunk_forward` plus `chunk_backward` atomic unit, preserve all
+  three retained operators, and require the same staged checker, exact handoff,
+  authoritative supervisor run, evidence review, and explicit retention.
