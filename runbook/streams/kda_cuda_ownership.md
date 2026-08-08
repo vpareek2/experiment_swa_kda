@@ -434,3 +434,62 @@ uv run --no-sync python -m pytest -q
 - Commit/tag/push the repaired controller, initialize and calibrate its new
   protocol, remove the candidate's temporary receipt normalization, and rerun
   the complete checker with sanitizers.
+
+
+## 2026-08-08 [agent] recalibrate repaired controller and qualify recurrent handoff
+
+**Context**
+
+- The protected transitional repair was committed, tagged, pushed, and required
+  a fresh protocol/ledger before candidate intake.
+- The candidate removed its temporary receipt normalization and reran the exact
+  staged snapshot against the repaired controller.
+
+**Commands**
+
+```bash
+.venv/bin/research cuda-ownership-supervisor init \
+  --config configs/research/kda_cuda_ownership.toml
+.venv/bin/research cuda-ownership-supervisor calibrate \
+  --config configs/research/kda_cuda_ownership.toml
+.venv/bin/research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_001 \
+  --lane bootstrap \
+  --artifact-dir /tmp/kda-cuda-attempt-001-check-003 \
+  --extension-cache /tmp/kda-cuda-attempt-001-check-003/torch-extensions \
+  --cuda-cache /tmp/kda-cuda-attempt-001-check-003/cuda-cache \
+  --sanitizers
+```
+
+**Artifacts**
+
+- Active protocol: `df188a2c3f05c6fa399974dce9d6dcd748ac5d8ef8b00b80f389795654620fd9`.
+- Calibration:
+  `runs/cuda-ownership-supervisor/df188a2c3f05/anchor-calibrations/attempt-0001`.
+- Ledger-free candidate evidence:
+  `/tmp/kda-cuda-attempt-001-check-003/summary.json`.
+- Candidate commit: `da1dea938d37618306c8dfaf82b5f06ac8628c6c`, pushed branch
+  `kda-cuda/recurrent-bootstrap-001`, parent launch foundation `0d7d3be...`.
+
+**Result**
+
+- The new ledger pins controller
+  `6cb0c1b6f68fe436d884675081812c5d322dd299`. Python and FLA anchors calibrated;
+  comparable recurrent medians were 0.173040 ms and 0.046768 ms respectively.
+- Ledger-free runtime audit completed in 113.26 seconds with all 16 protected
+  checks, 20% ownership, four observed project recurrent events, and FLA only
+  for explicitly unclaimed units.
+- Nsight independently observed
+  `nanochat_kda_recurrent_decode_kernel` and the registered
+  `nanochat_kda::recurrent_decode` operator.
+- Memcheck, racecheck, synccheck, and initcheck all completed with their genuine
+  zero-error summaries and exercised only the claimed recurrent unit.
+- The 10,703-byte recorded patch and both source hashes exactly match the clean
+  pushed candidate commit. This is a qualified handoff, not yet an authoritative
+  campaign attempt or retained result.
+
+**Next**
+
+- Intake the exact candidate/hypothesis, run the protected bootstrap supervisor,
+  inspect the complete saved artifact, and retain only if eligibility is
+  `correct_bootstrap`.
