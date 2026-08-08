@@ -105,6 +105,7 @@ def test_initialize_pins_refs_and_creates_foundation_state(tmp_path):
     root,foundation=make_repo(tmp_path); config=config_for(tmp_path,foundation)
     ready=initialize(root,config); assert ready["ledger_revision"]==2 and ready["foundation_sha"]==foundation
     view=summary(root,config); assert view["next_lane"]=="bootstrap" and not view["anchors_calibrated"]
+    json.dumps(view,allow_nan=False)
     assert "simplest correct naive" in view["next_model_instruction"] and "no PTX" in view["next_model_instruction"]
 
 

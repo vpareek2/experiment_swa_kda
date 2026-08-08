@@ -129,3 +129,40 @@ git rev-parse kda-cuda-ownership-foundation^{}
 
 - Initialize the independent ledger, calibrate Python/FLA operator anchors, and
   give the bootstrap instruction to the first autonomous candidate worker.
+
+## 2026-08-08 [agent] validate real pinned-ref initialization
+
+**Context**
+
+- A temporary ledger smoke was run only after the immutable foundation tag
+  existed, to validate real ref peeling without initializing the campaign ledger.
+
+**Commands**
+
+```bash
+research cuda-ownership-supervisor init \
+  --ledger /tmp/kda-cuda-foundation-smoke.sqlite3
+research cuda-ownership-supervisor summary \
+  --ledger /tmp/kda-cuda-foundation-smoke.sqlite3
+rm /tmp/kda-cuda-foundation-smoke.sqlite3
+```
+
+**Artifacts**
+
+- Ephemeral `/tmp` ledger only; it was deleted after the smoke.
+
+**Result**
+
+- Initialization resolved foundation
+  `07d8996eb0fe104e6b07d9a5ae4f2aa31e9f49e6`, fixed anchor
+  `0b4b24773c2696c23338d7600101d7072b592aa9`, and revision-2 protocol
+  `ebb24c0069bd7a760e102dd88cab94f7b6d5253ef469b5b98196beaf929ef4a7`.
+- The first summary smoke exposed a set-valued JSON serialization defect. It was
+  fixed and regression-tested; the repeated CLI smoke reported
+  `bootstrap`, `anchors_calibrated=false`, and `foundation`.
+- The actual configured campaign ledger remains uninitialized.
+
+**Next**
+
+- Initialize the configured ledger and calibrate anchors when the human starts
+  the campaign, then spawn the first naive-CUDA candidate.
