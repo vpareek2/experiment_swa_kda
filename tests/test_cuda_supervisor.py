@@ -77,15 +77,51 @@ def test_cuda_schema_is_separate_and_legacy_protocol_hashes_are_golden():
 def test_lane_schema_freezes_atomic_units_and_measurement_contract():
     value=load_cuda_campaign_config(ROOT/"configs/research/kda_cuda_ownership.toml")
     assert value.schema_version==2
+    assert protocol_sha(value)=="6fdb0ec11d7efb82ae67bf39997f3601eae08026f5ec12f719f21f1c7c916e7c"
     assert value.ownership.atomic_units==(("chunk_forward","chunk_backward"),("recurrent_decode",),("causal_convolution_forward","causal_convolution_backward"))
     assert value.bootstrap.performance_advisory and value.bootstrap.forbid_selective_ptx
     assert value.migration.performance_advisory and value.migration.require_strict_owner_superset
     assert value.optimization.require_all_components_project and value.optimization.require_runtime_fla_free
-    assert value.measurement.discovery_paired_blocks>=7 and 0.005<=value.measurement.discovery_effect_fraction<=0.01
+    assert value.measurement.discovery_paired_blocks==9 and 0.005<=value.measurement.discovery_effect_fraction<=0.01
+    assert value.measurement.promotion_paired_blocks==15
     assert value.measurement.promotion_cumulative_fraction==0.03
+    assert value.measurement.block_timeout_seconds==13_500.0
+    assert value.kernel_gates.sequence_lengths==(1,64,65,256,1024,4096)
+    assert value.kernel_gates.warmup_iterations==10 and value.kernel_gates.timed_iterations==50
+    assert value.kernel_gates.timeout_seconds==3_600.0
     bad=replace(value,ownership=replace(value.ownership,atomic_units=(("chunk_forward",),)))
     with pytest.raises(CudaCampaignConfigError,match="partition"):
         validate_cuda_campaign_config(bad)
+
+
+def test_timeout_refreeze_changes_only_namespaces_and_process_ceilings():
+    current=load_cuda_campaign_config(ROOT/"configs/research/kda_cuda_ownership.toml")
+    previous=replace(
+        current,
+        campaign=replace(
+            current.campaign,
+            controller_ref="kda-cuda-ownership-controller-state-gradient-gates",
+            ledger_path="runs/kda-cuda-ownership.sqlite3",
+        ),
+        measurement=replace(current.measurement,block_timeout_seconds=180.0),
+        kernel_gates=replace(current.kernel_gates,timeout_seconds=180.0),
+    )
+
+    def changed(left,right,prefix=""):
+        if isinstance(left,dict) and isinstance(right,dict):
+            paths=[]
+            for key in sorted(set(left)|set(right)):
+                path=f"{prefix}.{key}" if prefix else key
+                paths.extend(changed(left.get(key),right.get(key),path))
+            return paths
+        return [] if left==right else [prefix]
+
+    assert set(changed(previous.to_dict(),current.to_dict()))=={
+        "campaign.controller_ref",
+        "campaign.ledger_path",
+        "measurement.block_timeout_seconds",
+        "kernel_gates.timeout_seconds",
+    }
 
 
 def test_paired_decision_separates_retention_from_improvement(tmp_path):
@@ -110,6 +146,15 @@ def test_initialize_pins_refs_and_creates_foundation_state(tmp_path):
     view=summary(root,config); assert view["next_lane"]=="bootstrap" and not view["anchors_calibrated"]
     json.dumps(view,allow_nan=False)
     assert "simplest correct naive" in view["next_model_instruction"] and "no PTX" in view["next_model_instruction"]
+
+
+def test_initialize_rejects_protocol_change_without_mutating_existing_ledger(tmp_path):
+    root,foundation=make_repo(tmp_path); config=config_for(tmp_path,foundation)
+    initialize(root,config); path=Path(config.campaign.ledger_path); before=path.read_bytes()
+    changed=replace(config,kernel_gates=replace(config.kernel_gates,timeout_seconds=config.kernel_gates.timeout_seconds+300.0))
+    with pytest.raises(ValueError,match="protocol hash differs"):
+        initialize(root,changed)
+    assert path.read_bytes()==before
 
 
 def test_intake_is_forced_to_current_bootstrap_head_and_scope(tmp_path):

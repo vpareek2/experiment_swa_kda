@@ -273,6 +273,42 @@ interval resolves the frozen effect, while memory, kernel-latency, and baseline
 drift gates apply. Only a statistically improved and resource-safe candidate
 is eligible as `optimization_retained`.
 
+## Human-authorized timeout-only re-freeze
+
+The original protected protocol
+`ba64643fd7fd764bab39f99ea83ecf3805522fab3005516f29079806e32a46cf`
+remains immutable historical evidence. Its first optimization attempt proved
+that the exact retained naive parent could not complete the required
+optimization kernel payload within 180 seconds, even though the candidate
+completed every correctness, ownership, profile, and sanitizer gate. The
+parent timeout prevented block 0 and was not a numeric performance result.
+
+A human explicitly authorized a new protected protocol that changes only
+process ceilings and evidence namespaces:
+
+- the kernel worker ceiling is 3,600 seconds;
+- each seven-step training-block ceiling is 13,500 seconds;
+- the controller ref is
+  `kda-cuda-ownership-controller-timeout-refreeze`;
+- the fresh ledger is
+  `runs/kda-cuda-ownership-timeout-refreeze.sqlite3`.
+
+The training ceiling is bounded by a saved, ledger-free exact-shape diagnostic.
+The retained naive parent completed all seven steps in 8,932.104 summed step
+seconds; applying the declared 1.5x margin and rounding upward to 300 seconds
+produced 13,500 seconds. This diagnostic sizes the ceiling only. Its throughput
+and memory are not campaign evidence. The kernel ceiling is sized from the
+saved naive T=65/T=256/T=1024 scaling and the unchanged 10-warmup/50-sample
+T=4096 payload.
+
+No shape, sample count, operation, seed, ordering, warmup, timed step, paired
+block count, confidence interval, effect threshold, memory limit,
+kernel-regression limit, drift limit, correctness tolerance, ownership gate,
+profile requirement, or sanitizer gate changes. The old ledger, artifacts,
+controller tags, and failed attempt remain read-only. The new ledger must be
+calibrated and the retained milestone chain rerun from the unchanged foundation;
+old SQLite rows and artifacts must never be copied into the new protocol.
+
 ## Deadline and timeout distinctions
 
 - A candidate-agent handoff deadline is a coordination deadline. When reached,

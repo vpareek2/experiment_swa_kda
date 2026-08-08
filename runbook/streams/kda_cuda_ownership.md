@@ -1292,3 +1292,77 @@ git -C ../experiment_swa_kda_cuda_attempt_004 push -u origin \
   optimized backend. Further work requires explicit human authorization for a
   protected protocol redesign and re-freeze; the complete naive project-owned,
   runtime-FLA-free milestone remains the valid campaign result.
+
+## 2026-08-08 [agent] size and prepare human-authorized timeout re-freeze
+
+**Context**
+
+- Authoritative attempt 4 proved that the exact retained naive parent, not the
+  parallel-backward candidate, exhausted the original 180-second optimization
+  kernel worker before block 0. The human explicitly authorized a protected
+  timeout-only re-freeze and directed that the slow parent be allowed to finish.
+- Original protocol `ba64643fd7fd764bab39f99ea83ecf3805522fab3005516f29079806e32a46cf`,
+  old ledger, namespace, controller tags, candidates, and invalid attempt remain
+  immutable. Before the diagnostic, the old ledger was 647,168 bytes with
+  SHA-256 `14bce91dee58aaa21a59c87be24eb37b821472d8711ce2fc310553d77331267c`.
+
+**Commands**
+
+```bash
+# Run once from each exact clean candidate worktree with distinct extension
+# caches; these are timeout-sizing diagnostics, not campaign comparisons.
+.venv/bin/python -m scripts.base_train --seed 42 --depth 6 --head-dim 128 \
+  --window-pattern K --kda-backend project_cuda --no-force-final-full \
+  --max-seq-len 4096 --device-batch-size 2 --total-batch-size 32768 \
+  --num-iterations 7 --eval-every -1 --core-metric-every -1 \
+  --sample-every -1 --save-every -1 --model-tag <diagnostic-label> \
+  --run dummy
+```
+
+**Artifacts**
+
+- `/tmp/kda-timeout-refreeze-block-diagnostic-001/parent.log` from exact
+  `4d1a3b231da2c99882324efbda5306a1815e21c7`.
+- `/tmp/kda-timeout-refreeze-block-diagnostic-001/candidate.log` from exact
+  `613b0759d3b954cae984274b267a83a5c4ac46ff`.
+- Diagnostic manifest:
+  `/tmp/kda-timeout-refreeze-block-diagnostic-001/diagnostic-manifest.json`,
+  SHA-256 `5b6a58a09f4ece057f796b9dd284d2f8195ca39dc8b286c3fdaa09ecd56bee0a`.
+
+**Result**
+
+- Both exact seven-step, 4k, batch-32768, depth-6 project-CUDA trainers
+  completed. The retained parent used 8,932.104 summed step seconds; the
+  candidate used 239.756 seconds. Both reported the same 5,511.408 MiB peak.
+  These numbers size process ceilings only and are not paired campaign evidence
+  or a retention result.
+- The parent process survived a notebook wait interruption and was recovered by
+  PID rather than killed or duplicated. Reopening the persisted writer during
+  kernel recovery truncated the first 2,107 already-written warning/header
+  bytes; the final file preserves a 2,107-byte NUL hole followed by all seven
+  `RESEARCH_TRAIN_STEP` records and the complete `RESEARCH_TRAIN_RESULT`. This
+  exact recovery defect is recorded in the manifest and no source or gate was
+  changed because of it.
+- The declared `ceil_to_300(1.5 * slower summed step seconds)` rule selects a
+  13,500-second training-block ceiling. The kernel ceiling is 3,600 seconds,
+  based on the retained T=65/T=256/T=1024 scaling and the unchanged T=4096,
+  10-warmup, 50-sample worker payload.
+- The prepared config changes only the controller ref, fresh ledger path, and
+  these two ceilings. All shapes, samples, nine discovery pairs, 15 release
+  pairs, order, seed, correctness/ownership/profile/sanitizer gates, confidence
+  interval, effect floor, memory limit, kernel-regression limit, and drift limit
+  remain unchanged.
+- The first read-only allowed-diff helper compared old canonical JSON lists with
+  new dataclass tuples and failed after reporting representation-only collection
+  paths. It mutated nothing. JSON-roundtripping the new value before comparison
+  fixed the diagnostic; the corrected helper reported exactly the four declared
+  fields and new protocol SHA `6fdb0ec11d7efb82ae67bf39997f3601eae08026f5ec12f719f21f1c7c916e7c`.
+
+**Next**
+
+- Run protected/static tests and an exact resolved-config diff against the old
+  ledger. If clean, commit once, create the new immutable annotated controller
+  tag `kda-cuda-ownership-controller-timeout-refreeze`, push and verify it, then
+  initialize only `runs/kda-cuda-ownership-timeout-refreeze.sqlite3`. Calibrate
+  fresh anchors and rerun the exact retained milestone chain; never copy old
+  SQLite rows or reuse old artifacts.

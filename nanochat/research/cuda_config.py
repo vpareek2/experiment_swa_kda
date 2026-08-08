@@ -24,12 +24,12 @@ class CudaCampaignConfigError(ValueError):
 class CampaignConfig:
     name: str = "kda-cuda-ownership"
     artifact_root: str = "runs/cuda-ownership-supervisor"
-    ledger_path: str = "runs/kda-cuda-ownership.sqlite3"
+    ledger_path: str = "runs/kda-cuda-ownership-timeout-refreeze.sqlite3"
     max_attempts: int = 24
     seed: int = 42
     candidate_paths: tuple[str, ...] = ("nanochat/mixers/cuda_kda/",)
     foundation_ref: str = "kda-cuda-ownership-launch-foundation"
-    controller_ref: str = "kda-cuda-ownership-controller"
+    controller_ref: str = "kda-cuda-ownership-controller-timeout-refreeze"
     cumulative_performance_anchor_ref: str = "0b4b24773c2696c23338d7600101d7072b592aa9"
     max_patch_bytes: int = 2_000_000
 
@@ -123,7 +123,7 @@ class MeasurementConfig:
     timed_steps: int = 5
     discovery_paired_blocks: int = 9
     promotion_paired_blocks: int = 15
-    block_timeout_seconds: float = 180.0
+    block_timeout_seconds: float = 13_500.0
     confidence_level: float = 0.95
     discovery_effect_fraction: float = 0.0075
     retention_margin_fraction: float = 0.0075
@@ -140,7 +140,7 @@ class KernelGateConfig:
     sequence_lengths: tuple[int, ...] = (1, 64, 65, 256, 1024, 4096)
     warmup_iterations: int = 10
     timed_iterations: int = 50
-    timeout_seconds: float = 180.0
+    timeout_seconds: float = 3_600.0
     profile_max_bytes: int = 262_144
     profile_rows: int = 40
     require_profile: bool = True
