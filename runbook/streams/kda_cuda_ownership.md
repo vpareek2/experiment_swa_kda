@@ -6942,3 +6942,93 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_099 \
   register-U result is insufficient in full autograd execution, closing this
   partial-fusion boundary. The next independent high-value target is the pair
   WMMA/ordered-accumulation handoff or a larger persistent backward fusion.
+
+## 2026-08-09 [Codex] Attempt 100 colored pair VJP becomes development baseline
+
+**Context**
+
+- Attempt 100 starts from accepted attempt 91 and removes the causal pair
+  producer/consumer global handoff. The four C16 tiles of each C64 chunk form
+  four conflict-free graph-color rounds: the diagonal and three disjoint edge
+  matchings. Each CTA computes its BF16 WMMA pair products, reconstructs the
+  stable FP32 factors, and writes directly to its unique target/source tiles.
+- The ordered four-launch schedule has no atomics or cross-CTA reduction. It
+  replaces three producer plus three ordered-accumulator launches and removes
+  the five global pair workspaces while preserving the exact C64 equations.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --config configs/research/kda_cuda_ownership.toml \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_100 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact seed-4101 production comparison and independent fresh-cache repeat
+# against attempt 91.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_091 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_100 \
+  runs/kda-cuda-development/attempt-00100-colored-pair-level1 \
+  --level2-order candidate-first
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_validation_100 \
+  --lane optimization --sanitizers <isolated artifact/cache arguments>
+# Executed the saved candidate-first Level-2 commands exactly once, followed
+# by one bounded two-iteration production Nsight Systems profile.
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_100 \
+  push -u origin kda-cuda/wy-colored-pair-vjp-100
+```
+
+**Artifacts**
+
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00100-colored-pair-protected-checker`, manifest `4e1552226356d5081d78b1ab67e8849782c428a6c12aeb9cf541f9de62680e97`.
+- Production comparison/repeat: `runs/kda-cuda-development/diagnostics/attempt-00100-colored-pair-gradient`, manifest `a9e0e28017a637c9f53758e7dd2e5bead65fd3ffb5216571f9a2bbcd83ac7bc4`.
+- Level 1: `runs/kda-cuda-development/attempt-00100-colored-pair-level1`, manifest `7ff44376aa9601d26dd7b07e7a2349934356f3e980426cf42323557e9d21fe77`.
+- Full sanitizer validation: `runs/kda-cuda-development/validations/validation-00027-colored-pair`, manifest `ac239bc74d40aa44ceee52f488589ff148e341c42880f6b3d9ec5f1a3e29f57d`.
+- Level 2: `runs/kda-cuda-development/attempt-00100-colored-pair-level2`, manifest `d15ac9b6174a25675ab9ba8080f9383b111bb3029d37838eb00af3ef5e75e18b`.
+- Production profile: `runs/kda-cuda-development/diagnostics/attempt-00100-production-profile`, manifest `674ad3a07e593130acae72bb1e567fee6bd86ddb3caf834038c7fa71195ee51e`.
+- Development-baseline manifest: `runs/kda-cuda-development/baseline/272d55aeb8.json`, SHA-256 `04ab4232b69548aa8f7e0d2ae416d2b6ab749c8e2fbcd2891693d13dd5a9bfc5`.
+- Append-only attempt/reference index SHA-256: `72f2be41f11856ea548297f290f2d17487fcf159d3c24b2b6905f33464d50cd9`.
+
+**Result**
+
+- Pushed commit `272d55aeb8a3e28823aea622ce399cb2b9760a6b` passes ownership 1.0,
+  the complete protected runtime/profile audit, runtime FLA freedom, and all
+  four sanitizers with zero errors or hazards. Production output, `dv`, and
+  `dbeta` are bitwise equal to attempt 91; maximum gradient delta is
+  `3.638e-12`, every tensor passes frozen tolerance, and the independent repeat
+  is bitwise exact.
+- Level 1 advances decisively: T=4096 forward+backward improves
+  `13.3743 -> 12.3068 ms` (7.98%) with identical 202,770,944-byte peak
+  allocation. T=1024 and T=256 forward+backward improve 2.42% and 2.21%; all
+  important-row and memory guards pass.
+- The single candidate-first Level-2 pair measured candidate
+  `[33532, 33563, 33797, 33694, 33601]` tok/s, median 33,601, and baseline
+  `[32824, 32682, 32884, 32823, 32643]` tok/s, median 32,823. The 2.37%
+  development gain clears the frozen 2% gate; peak memory is identical at
+  5,508.533 MiB. Candidate throughput is 76.93% of the fixed 43,680 tok/s FLA
+  reference and 74.67% of the 45,000 tok/s campaign aim. No retest ran.
+- Profiling shows the pair path falling from attempt 91's
+  `1.570 ms/iteration` (`pair_wmma + pair_accumulate`) to
+  `0.657 ms/iteration` (`colored_pair_wmma_vjp`), a measured
+  `0.913 ms/iteration` reduction. The largest remaining KDA costs are forward
+  WMMA 2.133 ms, 130 generic GEMMs totaling 1.995 ms, group-boundary WMMA
+  1.240 ms, persistent reverse 0.835 ms, pack-group 0.511 ms, chunk backward
+  0.524 ms, and the separate forward/backward build-pair kernels totaling
+  0.846 ms per profiled layer call.
+- This is development evidence only. It is not statistically confirmed and no
+  LM-quality evaluation or private confirmation was run. The official retained
+  milestone remains `4d1a3b231da2c99882324efbda5306a1815e21c7`.
+
+**Next**
+
+- Use attempt 100 as the accepted development baseline. The highest-value
+  backward strategy boundary is a complete WY/UT VJP that composes the colored
+  pair ownership with removal of the remaining 130 generic GEMMs, while
+  distributing row ownership enough to avoid attempt 95's 48-KiB single-CTA
+  bottleneck. Fuse group-boundary packing/build and reverse work where their
+  dependencies permit.
+- Treat FlashKDA as a forward dataflow reference, not a drop-in runtime. Its
+  transferable idea is a register-fragment handoff across the residual solve
+  and output MMA; attempts 98/99 show that partial reassociation or one removed
+  BMM is too small. Only revisit forward with an end-to-end fused pipeline.
