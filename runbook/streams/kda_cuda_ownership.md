@@ -4940,3 +4940,88 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_069 \
   persistent group scan with an additional mechanistic improvement in a new
   child, compare to accepted attempt 68, and continue to honor all Level-1
   guards rather than treating the short-path result as a win.
+
+## 2026-08-09 [agent] accept eight-warp persistent group recomputation
+
+**Context**
+
+- Attempt 70 is a child of preserved attempt 69, while every matched
+  correctness and performance comparison uses accepted attempt 68. It maps the
+  persistent backward group scan's eight `(16-row, 16-value)` Z products to all
+  eight resident warps instead of making four warps serialize both value
+  halves. Equations, rounding, geometry, state/history allocation, and the
+  chunk-boundary recomputation strategy are unchanged.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --config configs/research/kda_cuda_ownership.toml \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_070 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact seeded B=2/H=3/T=4096 saved-gradient comparison against the existing
+# attempt-68 tensor artifact, plus one independent deterministic repeat.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_068 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_070 \
+  runs/kda-cuda-development/attempt-00070-eight-warp-group-level1
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_validation_070 \
+  --lane optimization <isolated artifact/cache arguments> --sanitizers
+# Executed one artifact-complete saved baseline-first Level-2 pair after
+# preserving a baseline whose raw-log tee target was missing.
+PYTHONPATH=/home/veer/Master/projects/experiment_swa_kda_cuda_attempt_070 \
+TORCH_EXTENSIONS_DIR=/tmp/kda070-production-profile-ext-001 \
+nsys profile --trace=cuda,nvtx,osrt --sample=none --cpuctxsw=none \
+  --force-overwrite=true --output=<artifact>/trace \
+  /home/veer/Master/projects/experiment_swa_kda/.venv/bin/python \
+  /tmp/kda033_nsys.py
+nsys stats --report cuda_gpu_kern_sum --format csv \
+  --output <artifact>/kern <artifact>/trace.nsys-rep
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_070 \
+  push -u origin kda-cuda/wy-eight-warp-group-recompute-070
+```
+
+**Artifacts**
+
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00070-protected-checker`, manifest `88f4392c5d0486612906265ef4ce232105241f02e4dc8d7b798e490d5ca57fd2`.
+- Production comparison/repeat: `runs/kda-cuda-development/diagnostics/attempt-00070-eight-warp-group-gradient`, manifest `1ca5b18d2df2b1e4cce82eab54282da2bf71fa0169005093bce874ad621de995`.
+- Full sanitizer validation: `runs/kda-cuda-development/validations/validation-00016-eight-warp-group-recompute`, manifest `7dd61dfbc536f6bf3f557a6fba5c9e95d890fcb50143202cb31595b6cc2a1c8c`.
+- Level 1: `runs/kda-cuda-development/attempt-00070-eight-warp-group-level1`, manifest `e2e9a8ee229217be0c24d033bf457a3d0f9f850b633d3067f3dce2532dcf872a`.
+- Level 2: `runs/kda-cuda-development/attempt-00070-eight-warp-group-level2`, manifest `6d4b4c556d507305f91366431673dc2e47b02cf991dde5451f55fdf49092478b`.
+- Production profile: `runs/kda-cuda-development/diagnostics/attempt-00070-production-profile`, manifest `e143779f072c9f0af5ea8d977eff515b3e497bfd94c2283d9cb14bea66584d35`.
+- Invalid gradient invocations: `runs/kda-cuda-development/diagnostics/attempt-00070-gradient-invalid-001`, manifest `01c3efc62faa95b6a6190f7ede31721b757fe590ead028827a4df9a8cadfb5f2`, and `attempt-00070-gradient-invalid-002`, manifest `35083d9b699fcd38352880388b934176b3df44097adf3d3f22ffdac924431c68`. Both failed before GPU work because module/source roots resolved from the coordinator; the second raw directory was overwritten by the corrected absolute-path launch, so its exact captured traceback and that limitation are recorded explicitly.
+- Invalid missing-tee Level-2 baseline: `runs/kda-cuda-development/diagnostics/attempt-00070-level2-invalid-001`, manifest `87918ceaac0a9266e1955d688a5fce184c50fccdb8522f71340a6d24f44231df`. The completed baseline samples are preserved and excluded; no candidate ran in that namespace.
+- Baseline manifest: `runs/kda-cuda-development/baseline/c6532b46e4.json`, SHA-256 `431bdc8d2a460778c2ae456759aab9b49e7b968ed78182b0e8b23e9f932f5d5b`.
+- Append-only attempt/reference index SHA-256: `ceece07dc7132df879085ac9832df8e6e0b9fea65d111173aad3978e991bf41d`.
+
+**Result**
+
+- Pushed commit `c6532b46e4ad2f4ad81072dc0016e94eeb4f7f84`
+  passed ownership 1.0, protected runtime/profile audit, runtime FLA freedom,
+  frozen production correctness, a bitwise deterministic repeat, and all four
+  sanitizers. Output, `dv`, and `dbeta` are bitwise exact against attempt 68;
+  the largest changed-gradient delta is `1.455e-11`.
+- Level 1 advanced with every guard passing: T=4096 forward+backward improved
+  `19.726 -> 18.286 ms` (7.30%), peak allocation ratio was `0.99712`, and the
+  formerly noisy T=256 forward+backward row improved 3.82%.
+- The valid Level-2 pair measured baseline
+  `[28641,28600,28754,28378,28687]`, median `28641 tok/s`, and candidate
+  `[29727,29699,29715,29315,29656]`, median `29699 tok/s`: +3.69%, identical
+  `5508.533 MiB`, and 67.99% of the fixed 43,680 tok/s reference.
+- The fresh profile places the forward WMMA scan at `2.183 ms/iteration`, the
+  expanded persistent group scan at `1.695 ms`, pair pack at `0.915 ms`, pair
+  transforms at about `0.751-0.757 ms` each, and pair accumulation at
+  `0.658 ms`. The persistent group kernel is larger because it now emits the
+  reverse-recompute H/Z histories, but it removes a greater amount of generic
+  BMM/copy/decay/add work.
+- Attempt 70 is the accepted development baseline. Official retention remains
+  `4d1a3b231da2c99882324efbda5306a1815e21c7`; no confirmation or quality
+  evaluation ran, and this is not statistically confirmed evidence.
+
+**Next**
+
+- Continue from exact attempt 70. Prioritize eliminating duplicated work or
+  traffic inside the persistent group scan, then the remaining forward WMMA
+  scan, pair transforms/pack-accumulate, and generic FP32 BMM groups. Preserve
+  the no-full-history boundary-recomputation design and all frozen gates.
