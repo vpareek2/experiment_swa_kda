@@ -1689,3 +1689,85 @@ uv run --no-sync python -m pytest -q tests/test_kda_cuda_development.py
   references rather than repeatedly polishing the token-serial algorithm.
 - Never launch the naive parent or the nine-pair confirmation suite in the
   inner loop. Confirm only at the agreed sparse cadence.
+
+## 2026-08-08 [agent] accept batch-parallel backward as the fast development baseline
+
+**Context**
+
+- Attempt 5 is the first candidate evaluated through the new short funnel. Its
+  only axis is removing the serial batch loop from chunk backward: one CTA now
+  owns each `(B,H)` recurrence, writes deterministic per-batch FP32 parameter
+  partials, and two small fixed-order kernels reduce `dA_log` and `ddt_bias`.
+- Parent is exact development baseline `613b0759...`; candidate branch is
+  `kda-cuda/batch-parallel-backward-005`. No naive-parent or confirmation run
+  was launched.
+
+**Commands**
+
+```bash
+# First harness invocation (preserved invalid software failure).
+.venv/bin/python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_004 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_005 \
+  runs/kda-cuda-development/attempts/attempt-00005-level1
+# Fixed isolated import with importlib.import_module; 13 focused tests passed.
+# Fresh rerun:
+.venv/bin/python scripts/kda_cuda_development.py ... \
+  runs/kda-cuda-development/attempts/attempt-00005-level1-rerun-001
+# One recorded Level-2 baseline-first pair executed from level2-plan.json.
+```
+
+**Artifacts**
+
+- Preserved invalid harness attempt:
+  `runs/kda-cuda-development/attempts/attempt-00005-level1`.
+- Valid attempt and every provenance/diff/raw sample/log:
+  `runs/kda-cuda-development/attempts/attempt-00005-level1-rerun-001`.
+- Append-only attempt index SHA-256:
+  `ca7fe3b04e074f4b49390d3d10436caa6349f37410825063a886e8a7031fa68c`.
+- New development-baseline manifest:
+  `runs/kda-cuda-development/baseline/c5b36f8dc.json`, SHA-256
+  `4d86f8d217096eec295f0c58383805bf3b4bfb7a53518ba06df1ae25f48300a3`.
+- Candidate commit/source: `c5b36f8dc0018f28d242ad1a656625b7aa94cb7b` /
+  `chunk.cu` SHA-256
+  `5ad66f545331a6d592095f5f244235e74ae6fac427f0fa4495103b56db288db8`.
+
+**Result**
+
+- The first Level-1 invocation is invalid and unscored: both benchmark helpers
+  imported the package-level `kda` function instead of the dispatcher module
+  and emitted no measurements. It remains preserved. Coordinator fix
+  `322eb5d` uses `importlib.import_module`; no artifact was overwritten.
+- Fresh exact B=2, H=3, K=V=128 Level 1 completed in about 135 seconds. Candidate
+  runtime audit passed, ownership was 1.0, runtime was FLA-free, and production
+  helper events were purely project CUDA.
+- Forward+backward medians (parent -> candidate):
+  - T=256: `81.374 -> 48.767 ms` (40.07% lower).
+  - T=1024: `329.343 -> 197.904 ms` (39.91% lower).
+  - T=4096: `1318.981 -> 792.127 ms` (39.94% lower).
+  T=4096 forward was effectively unchanged (`243.027 -> 242.015 ms`). Every
+  important row stayed within the 5% guard and T=4096 peak allocation changed
+  by only 3,584 bytes (`1.0000021x`). Level 1 advanced.
+- A preserved changed-axis diagnostic compared joint B=2/H=3 and B=3/unequal-V
+  candidate gradients against the exact parent under independent output/final
+  state cotangents. All BF16 outputs/activation/initial-state gradients were
+  bit-identical; only FP32 parameter reduction association changed (`dA` max
+  abs `4.77e-7`, `ddt` max abs `1.19e-7`). Candidate repeats were bitwise
+  deterministic.
+- The single exact six-layer 4k Level-2 pair completed in baseline-first order:
+  parent timed steps `[960,959,959,958,956]`, median `959 tok/s`; candidate
+  `[1516,1516,1517,1517,1516]`, median `1516 tok/s`. The observed single-pair
+  improvement is 58.08%; both reported exactly `5511.408 MiB` peak. This is a
+  development observation, not a confidence interval or quality result.
+- Attempt 5 passed the agreed Level-1 and Level-2 development rules and becomes
+  the new fast development baseline. It is pushed but not merged, not the
+  default backend, and not an officially confirmed retained milestone.
+
+**Next**
+
+- Branch attempt 6 from `c5b36f8...` and cache per-token decay/normalized-key
+  invariants in chunk backward as one separate low-risk axis. Continue the
+  kernel-only Level 1 and one-pair Level 2 funnel.
+- Start the larger C=64 WY/UT CUDA design in parallel. Do not invoke nine-pair
+  confirmation until a plateau/strategy boundary/four-hour checkpoint/end of
+  night.
