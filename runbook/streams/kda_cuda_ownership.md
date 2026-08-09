@@ -3604,3 +3604,64 @@ nsys stats --report cuda_gpu_kern_sum --format csv \
 - Do not replay rejected attempt-39 pair-ratio caching. First remove redundant
   per-value decay exponentials from the boundary VJP, then return to an
   algebraic/tiled implementation of the dominant complete pair VJP.
+
+## 2026-08-09 [agent] accept key-block boundary VJP baseline
+
+**Context**
+
+- Attempt 46 remaps each reverse boundary update to one block per
+  recurrence/key. The block computes the chunk-end decay once, updates all 128
+  value lanes, and preserves the original ordered `dD` dot-product reduction.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_046 \
+  --lane optimization <isolated artifact/cache arguments>
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_validation_046 \
+  --lane optimization <isolated artifact/cache arguments> --sanitizers
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_045 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_046 \
+  runs/kda-cuda-development/attempt-00046-boundary-key-block-level1
+# Executed the predeclared baseline-first Level-2 pair once, then one profile.
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_046 \
+  push -u origin kda-cuda/wy-vjp-boundary-key-block-046
+```
+
+**Artifacts**
+
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00046-protected-checker`, manifest `6bc8b1cc6bbee06cfae91746dd5f2a126aeab41bc7ea571ea3531d5866220041`.
+- Production comparison/repeat: `runs/kda-cuda-development/diagnostics/attempt-00046-boundary-key-block-gradient`, manifest `63a29653e5a874d1460c666d6277b029948a28cf706d52770fc3569e7f777177`.
+- Full sanitizer validation: `runs/kda-cuda-development/validations/validation-00009-boundary-key-block`, manifest `1dc38d5016969445465df2583e0590d490bd82664fe8d82d5fc5f06571e10f8a`.
+- Level 1: `runs/kda-cuda-development/attempt-00046-boundary-key-block-level1`, manifest `c3131a8085e1f16f22ee2e14c79c79802a5869184ee13a33e5017678dd7212ca`.
+- Level 2: `runs/kda-cuda-development/attempt-00046-boundary-key-block-level2`, manifest `adfc19f2510453ddc0622f036cea58096de3e8eda3113561ae2e83f03864fe3a`.
+- Production profile: `runs/kda-cuda-development/diagnostics/attempt-00046-production-profile`, manifest `432d0d51a4ff9624e5a084b1f547132cd6951ad94d0308f22ecbced5ace59bfe`.
+- Baseline manifest: `runs/kda-cuda-development/baseline/5edf86274c.json`, SHA-256 `48e2d3dc6ce05811d8ac3d70a2629619ad225a8af34b4e8bde72328ae3c71ceb`.
+- Append-only attempt/reference index SHA-256: `7eacaf62d3490e91e31ace86c3a67884f4be5422fbf5d8b954c0519a5c5d2cb2`.
+
+**Result**
+
+- Exact pushed commit `5edf86274c25cdfc473f13412337b048480a35a5`
+  passed ownership 1.0, runtime/profile audit, runtime FLA freedom, all four
+  sanitizers, and a bitwise deterministic production comparison. Output and
+  every gradient were bitwise equal to attempt 45.
+- Level 1 advanced: T=4096 forward+backward improved
+  `25.667 -> 24.441 ms` (4.78%) at memory ratio 1.0. The T=256 backward row
+  regressed 2.05%, within its frozen 5% guard.
+- Level 2 measured baseline `[25530,25507,25566,25415,25608]`, median
+  `25530 tok/s`, and candidate `[26278,26258,26315,26048,26236]`, median
+  `26258 tok/s`: +2.85%, identical `5508.533 MiB`, and 60.11% of the fixed
+  43,680 tok/s reference.
+- The follow-up profile reduced boundary terms from `1.773 ms` to
+  `0.170 ms` per iteration (90.4%). The complete pair/state VJP remains the
+  dominant owned kernel at `4.769 ms`. Attempt 46 is the accepted development
+  baseline, not confirmation, LM-quality evidence, or official retention.
+
+**Next**
+
+- Implement the complete A/M pair VJP with stable tiled transforms and matched
+  BMMs, retaining the scalar kernel only for R/E/P/Q/D terms. Do not replay the
+  rejected attempt-39 shared ratio cache.
