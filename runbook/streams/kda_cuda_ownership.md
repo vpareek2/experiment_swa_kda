@@ -3940,3 +3940,49 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_051 \
   pair pack/accumulate dispatches from three to two batches per reverse group,
   while retaining the 3% memory gate. If that does not advance, profile-guided
   finalization fusion is the next distinct axis. Continue toward 45k.
+
+## 2026-08-09 [agent] reject five-pair WY batching
+
+**Context**
+
+- Attempt 52 increases attempt 51's pair batch from four to five, explicitly
+  ending dead H/state/Q/W views before allocating the larger scratch. This
+  reduces each reverse group from three pair batches to two.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_052 \
+  --lane optimization <isolated artifact/cache arguments>
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_051 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_052 \
+  runs/kda-cuda-development/attempt-00052-pair-batch5-level1
+```
+
+**Artifacts**
+
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00052-protected-checker`, manifest `76c944f0fc665f1707dffaf5096960ddca8bf0c3bd07099549da287fbd156720`.
+- Production comparison/repeat: `runs/kda-cuda-development/diagnostics/attempt-00052-pair-batch5-gradient`, manifest `71b73f4a4856a823bf05ffdf6b481ab1d5d21dddb45e098e2c68e08ab9992bf8`.
+- Level 1: `runs/kda-cuda-development/attempt-00052-pair-batch5-level1`, manifest `0e2210d24d64e58c99a2daa537a760cf52a140f13e90730fbb3ff05c7a904af1`.
+- Append-only attempt/reference index SHA-256: `0d1a02d8bb299f5c29bc8356fc9091181eb175a640a4a09470c1f63ce1d8adde`.
+
+**Result**
+
+- Pushed commit `c0f7d50ff69e369d086e7ece86b4f6f1abaf6e07`
+  passed ownership/runtime gates, remained deterministic, and stayed inside
+  frozen tolerances. Output, `dv`, and `dbeta` are bitwise equal to attempt 51;
+  the largest gradient delta is `4.55e-13`.
+- Level 1 did not advance: T=4096 forward+backward improved only
+  `22.473 -> 22.327 ms` (0.65%). Peak allocation ratio was `1.00763`, within
+  the resource gate but larger than attempt 51. No sanitizer, Level 2, or
+  retest ran.
+- Attempt 51 remains the accepted development baseline. Neither attempt is
+  confirmation or quality evidence.
+
+**Next**
+
+- Stop pair-batch width tuning. From exact attempt 51, fuse finalization and
+  local parameter accumulation to target the profile's largest named project
+  kernel while preserving ordered reductions and BF16 rounding.
