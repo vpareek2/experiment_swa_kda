@@ -7170,3 +7170,80 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_10N \
   direction is fragment-resident producer/consumer handoff; do not import or
   link it at runtime and do not replay the already-rejected row-subdivision or
   persistent-reverse variants.
+
+## 2026-08-09 [Codex] Attempt 105 vector-consumer VJP rejected at Level 1
+
+**Context**
+
+- Attempt 105 starts from accepted attempt 100 and partitions the vector-output
+  WY/UT VJP by 16-value-column ownership. Eight CTAs per chunk compute
+  `dR/dE/dW/dP/dQ`; they immediately apply the row-local `dqbar`, `dkhat`,
+  `dv`, `dbeta`, and `dprefix` equations and retain only `dW`, which remains
+  necessary for the matrix `dT` path. This removes four generic BMMs, four full
+  FP32 vector-gradient workspaces, and the standalone chunk-backward launch.
+- The design transfers FlashKDA's fragment/on-chip producer-consumer handoff,
+  but remains an independently implemented training VJP and never imports or
+  links the inference reference at runtime.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_105 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact seed-4101 production comparison and fresh-cache deterministic repeat.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_100 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_105 \
+  runs/kda-cuda-development/attempt-00105-vector-consumer-level1 \
+  --level2-order baseline-first
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_105 \
+  push -u origin kda-cuda/wy-vector-consumer-vjp-105
+```
+
+**Artifacts**
+
+- Pushed candidate commit `089a7a733c784f9274093df028f3f75dbd5ff1fe`;
+  source SHA-256 `a28c6f88c3c1a2c059dc6cb7bf9caf98621ed5b8b8a547f6c3789c4f2dd11284`.
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00105-vector-consumer-protected-checker`, manifest `f661956a53b6c6c0cf8c3217b749e2f37ee264550353887873caa8a71990d6aa`.
+- Production comparison/repeat: `runs/kda-cuda-development/diagnostics/attempt-00105-vector-consumer-gradient`, manifest `4dc19b2e7d67c8a77c67066f2da203c2428d648a620e9365dc19dc81e73964aa`.
+- Invalid pre-fix deterministic capture: `runs/kda-cuda-development/diagnostics/attempt-00105-vector-consumer-gradient-invalid-race-001`, manifest `1d05770351399a3466d895b0e5d071e468192d6dc612bd26b861e1bd01762619`.
+- Invalid checker launch and superseded pre-race-fix audit manifests:
+  `0327cb085ef4860f9b2ba2e69471140cb2db69d0c10d1234f44b4ed986f77ff6`
+  and `50b3a149fef948a14fb15d5f0b7a0b68d2db93c96acc34cf436f83243cf9c93f`.
+- Level 1: `runs/kda-cuda-development/attempt-00105-vector-consumer-level1`, manifest `3f296a24563225ce1c9529a3a99d557faaccd7e852514ac0ca26b908fa572f95`.
+- Append-only attempt/reference index SHA-256:
+  `c86dfd0b7f4a236abefffa9e4021d5115723870927b2b831daf6899172c5f1a7`.
+
+**Result**
+
+- The final pushed candidate passes ownership 1.0, the protected runtime/profile
+  audit, runtime FLA freedom, frozen numerical tolerance, and finite-gradient
+  checks. Output is bitwise equal to attempt 100, maximum gradient delta is
+  `5.820766091346741e-11`, and the independent fresh-cache repeat is bitwise
+  exact for every saved tensor.
+- The first production repeat exposed a missing CTA barrier between the general
+  `dE` consumer and the row-63 end contribution. It produced non-bitwise FP32
+  `draw_gate`, `dA_log`, and `ddt_bias` results and is invalid. The exact state
+  is preserved; adding the barrier removed the race and the entire audit and
+  production comparison were rerun from fresh caches.
+- Level 1 rejects the corrected candidate. T=4096 forward+backward improves
+  `12.440800 -> 12.161664 ms` (2.244%), below the frozen 3% gate. Peak allocation
+  improves 3.31%, from 202,770,944 to 196,053,504 bytes. T=256 improves 1.317%;
+  T=1024 regresses 0.089%. All important-row and memory guards pass.
+- No sanitizer, Level-2, profile, confirmation, or LM-quality evaluation ran.
+  This is development evidence only and is not statistically confirmed.
+
+**Next**
+
+- Retain attempt 100. The result confirms that removing vector workspaces is
+  worthwhile for memory but eight independent 24-KiB CTAs reread and restage
+  the same `dO/H/z/dstate/dZ/T` operands too often. Do not subdivide this path
+  further.
+- A credible next backward design is one warp-specialized CTA owning two or
+  four value tiles: load each shared left operand once, let warps compute
+  multiple disjoint output columns, and use register-file transpose/handoff for
+  `dW -> dQ`. It must stay below the attempt-95 one-CTA/48-KiB serialization
+  regime. The independent larger alternative is a complete two-kernel forward
+  pipeline matching FlashKDA's prepare-plus-persistent schedule rather than
+  another isolated algebraic reassociation.
