@@ -2677,3 +2677,63 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_030 \
   products before allocating adjoints, reuse dZ storage, and materialize the
   independent VJP matrices in bounded groups. Re-run exact gradients and Level
   1; do not relax either the memory or short-length regression gate.
+
+## 2026-08-09 [agent] reduce batched WY VJP peak through exact lifetimes
+
+**Context**
+
+- Attempt 31 changes only tensor lifetimes and storage reuse in attempt 30's
+  bitwise-validated batched VJP. Dead forward matrices are released at phase
+  boundaries, dZ and dM storage is reused, and large output-adjoint buffers are
+  allocated only after the reverse state scan.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_031 \
+  --lane optimization <isolated artifact/cache arguments>
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_028 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_031 \
+  runs/kda-cuda-development/attempts/attempt-00031-level1
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_031 \
+  push -u origin kda-cuda/wy-vjp-lifetimes-031
+```
+
+**Artifacts**
+
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00031-protected-checker`,
+  manifest SHA-256 `bc63e511e36d77a46c904ec3ecf467fcf158ae08f6aa0d56ac9f1792edbee73f`.
+- Bitwise production comparison:
+  `runs/kda-cuda-development/diagnostics/attempt-00031-lifetimes-gradient-exact`,
+  manifest SHA-256 `c9cf3cc26b532a9fa8405024067501ef3d5cdfa1cdd287f641510b3fad93f106`.
+- Draft timing/memory:
+  `runs/kda-cuda-development/diagnostics/attempt-00031-lifetimes-draft`,
+  manifest SHA-256 `3c9a892109ae570e7e37edb255aa4057c4801e44d323f7a527d7dbd32124e369`.
+- Formal Level 1: `runs/kda-cuda-development/attempts/attempt-00031-level1`,
+  manifest SHA-256 `c762d1a081a3eab6ce486312d972d05bbf94feca694ecbf271766df7a6b25685`.
+- Append-only index SHA-256:
+  `fd70fdd8c89e6216e0432792ea073644adc3e5caba2e27b45ce442d9aa438cea`.
+
+**Result**
+
+- Exact pushed commit `e7e597b3c55df7873fb3d7d7b015b7c3e273774c`
+  passed the protected audit at ownership 1.0 with no runtime FLA. Output and
+  all seven production gradients are bitwise identical to attempt 30.
+- Candidate-only peak fell `492151296 -> 319572992` bytes (35.07%) while
+  T=4096 forward+backward changed `47.024 -> 48.130 ms` (2.35% regression).
+- Formal Level 1 retained a 19.60% T=4096 improvement
+  (`59.156 -> 47.563 ms`) and every non-memory row stayed inside the 5% gate.
+  It did not advance because peak remained `1.5867x` the accepted baseline.
+  Level 2 was not launched.
+- Attempt 31 is the next memory-optimization parent, not the accepted baseline,
+  confirmation, quality evidence, or official retention. Attempt 28 remains
+  accepted.
+
+**Next**
+
+- Full-sequence H, Z, dH-next, and matrix-adjoint outputs still coexist at the
+  remaining peak. Replace them with bounded chunk-group boundary states,
+  recompute each group, and consume its reverse/VJP products before moving to
+  the previous group. Preserve exact ordering within each recurrence.
