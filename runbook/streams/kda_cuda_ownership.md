@@ -6827,3 +6827,63 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_097 \
   kernel so it avoids global dependency boundaries. Otherwise move to the
   independent forward or pair dataflow boundary, transferring FlashKDA's
   register-resident fused schedule rather than its chunk size alone.
+
+## 2026-08-09 [Codex] Attempt 98 fused forward residual solve rejected at Level 1
+
+**Context**
+
+- Attempt 98 starts from accepted attempt 91 and transfers a structural
+  FlashKDA forward mechanism without importing or linking reference code. It
+  rewrites `Z = U - W H`, `U = T P`, and `W = T Q` as
+  `Z = T (P - Q H)` inside the persistent forward scan.
+- The candidate removes both global FP32 U/W intermediates and their BMMs. A
+  shared-memory residual handoff feeds a second CTA-local WMMA phase; equations,
+  ownership, the C64 chunk size, and the FP32 recurrent state remain fixed.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_098 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact seed-4101 production comparison and fresh-cache repeat against 91.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_091 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_098 \
+  runs/kda-cuda-development/attempt-00098-fused-residual-solve-level1 \
+  --level2-order candidate-first
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_098 \
+  push -u origin kda-cuda/wy-fused-residual-solve-forward-098
+```
+
+**Artifacts**
+
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00098-fused-residual-solve-protected-checker`, summary SHA-256 `6f9de487458b1331962d5a051ecb626dcbe6c31f0fdbc099bdacdffeac2c3237`.
+- Invalid unstaged checker launch: `runs/kda-cuda-development/diagnostics/attempt-00098-fused-residual-solve-protected-checker-invalid-unstaged-001`, summary SHA-256 `2920f609237b7f32197fd6cdd97003fc1c0977b8207ab84a141609231a784dd8`.
+- Invalid signature-mismatch compile: `runs/kda-cuda-development/diagnostics/attempt-00098-fused-residual-solve-protected-checker-invalid-compile-002`, summary SHA-256 `acc7567c3f77938638c58ca14168123c72cb703ee801081013da0f3645a5e44c`.
+- Production comparison/repeat: `runs/kda-cuda-development/diagnostics/attempt-00098-fused-residual-solve-gradient`, manifest `4211547047dff47e89525441c76c7790271981142f93b74c778564898b2ead63`.
+- Level 1: `runs/kda-cuda-development/attempt-00098-fused-residual-solve-level1`, manifest `1a3c8bbb027662cfbdcee5f362b21ba6044cbf99f4ff00c1853993736ef45f1b`.
+- Append-only attempt/reference index SHA-256: `0f00757fe804fb781f173f89a914b6c5a8d900a0ca80cc997b3cfe34e66f4dff`.
+
+**Result**
+
+- Pushed commit `aa14dadf71afac2283e5063986410346514f4d69` passes ownership 1.0,
+  the protected runtime/profile audit, and runtime FLA freedom. Production
+  maximum output delta is `4.8828125e-4`, maximum gradient delta is
+  `2.056e-9`, all tensors pass frozen tolerance, and the independent repeat is
+  bitwise exact.
+- Level 1 rejects the candidate. T=4096 forward is effectively flat and
+  slightly worse, `19.3753 -> 19.4121 ms` (-0.19%); forward+backward improves
+  `13.5942 -> 13.3739 ms` (1.62%), below the 3% advance gate. T=256
+  forward+backward regresses 7.42%, violating the frozen 5% important-row
+  guard. Peak allocation improves 3.94%, from 202,770,944 to 194,775,552 bytes.
+- The algebraic fusion and memory removal work, but the shared residual store,
+  barrier, reload, and second WMMA phase replace the saved BMM cost. No
+  sanitizer, Level 2, profile, confirmation, or LM-quality evaluation ran.
+
+**Next**
+
+- Retain attempt 91. Only revisit this reassociation with a warp-register
+  fragment handoff from `P-QH` directly into the `T` MMA, matching the actual
+  FlashKDA mechanism rather than merely its equation. Otherwise target the
+  independent pair producer/accumulator global handoff.
