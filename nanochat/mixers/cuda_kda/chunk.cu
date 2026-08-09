@@ -108,7 +108,7 @@ __global__ void nanochat_kda_chunk_preprocess_kernel(
   }
 }
 
-__global__ void nanochat_kda_chunk_forward_kernel(
+__global__ void nanochat_kda_chunk_forward_generic_kernel(
     const __nv_bfloat16* q,
     const __nv_bfloat16* k,
     const __nv_bfloat16* v,
@@ -188,7 +188,7 @@ __global__ void nanochat_kda_chunk_forward_kernel(
   }
 }
 
-__global__ void nanochat_kda_chunk_forward_kernel_shared_cache(
+__global__ void nanochat_kda_chunk_forward_generic_kernel_shared_cache(
     const __nv_bfloat16* q,
     const __nv_bfloat16* k,
     const __nv_bfloat16* v,
@@ -284,7 +284,7 @@ __global__ void nanochat_kda_chunk_forward_kernel_shared_cache(
   }
 }
 
-__global__ void nanochat_kda_chunk_forward_row_128_kernel(
+__global__ void nanochat_kda_chunk_forward_kernel(
     const __nv_bfloat16* q,
     const __nv_bfloat16* k,
     const __nv_bfloat16* v,
@@ -467,7 +467,7 @@ __global__ void nanochat_kda_chunk_history_128_kernel(
   }
 }
 
-__global__ void nanochat_kda_chunk_backward_kernel(
+__global__ void nanochat_kda_chunk_backward_generic_kernel(
     const __nv_bfloat16* v,
     const __nv_bfloat16* raw_gate,
     const __nv_bfloat16* beta_logits,
@@ -761,7 +761,7 @@ __global__ void nanochat_kda_chunk_backward_kernel(
   }
 }
 
-__global__ void nanochat_kda_chunk_reverse_128_kernel(
+__global__ void nanochat_kda_chunk_backward_kernel(
     const __nv_bfloat16* v,
     const __nv_bfloat16* raw_gate,
     const __nv_bfloat16* beta_logits,
@@ -1131,7 +1131,7 @@ std::tuple<at::Tensor, c10::optional<at::Tensor>> chunk_forward_cuda(
     const int threads = 128;
     const cudaStream_t stream = at::cuda::getCurrentCUDAStream(q.get_device());
     if (key_dim == 128 && value_dim == 128) {
-      nanochat_kda_chunk_forward_row_128_kernel<<<
+      nanochat_kda_chunk_forward_kernel<<<
           static_cast<int>(count), threads, 0, stream>>>(
           reinterpret_cast<const __nv_bfloat16*>(contiguous_q.data_ptr<at::BFloat16>()),
           reinterpret_cast<const __nv_bfloat16*>(contiguous_k.data_ptr<at::BFloat16>()),
@@ -1148,7 +1148,7 @@ std::tuple<at::Tensor, c10::optional<at::Tensor>> chunk_forward_cuda(
       C10_CUDA_KERNEL_LAUNCH_CHECK();
     } else {
       const int blocks = static_cast<int>((count + threads - 1) / threads);
-      nanochat_kda_chunk_forward_kernel<<<blocks, threads, 0, stream>>>(
+      nanochat_kda_chunk_forward_generic_kernel<<<blocks, threads, 0, stream>>>(
           reinterpret_cast<const __nv_bfloat16*>(contiguous_q.data_ptr<at::BFloat16>()),
           reinterpret_cast<const __nv_bfloat16*>(contiguous_k.data_ptr<at::BFloat16>()),
           reinterpret_cast<const __nv_bfloat16*>(contiguous_v.data_ptr<at::BFloat16>()),
@@ -1299,7 +1299,7 @@ chunk_backward_cuda(
           residual_history.data_ptr<float>(),
           batch, length, heads, value_dim);
       C10_CUDA_KERNEL_LAUNCH_CHECK();
-      nanochat_kda_chunk_reverse_128_kernel<<<
+      nanochat_kda_chunk_backward_kernel<<<
           static_cast<int>(recurrence_count), threads, shared_bytes, stream>>>(
           reinterpret_cast<const __nv_bfloat16*>(contiguous_v.data_ptr<at::BFloat16>()),
           reinterpret_cast<const __nv_bfloat16*>(contiguous_raw_gate.data_ptr<at::BFloat16>()),
@@ -1335,7 +1335,7 @@ chunk_backward_cuda(
           static_cast<float>(lower_bound), static_cast<float>(scale));
       C10_CUDA_KERNEL_LAUNCH_CHECK();
     } else {
-      nanochat_kda_chunk_backward_kernel<<<
+      nanochat_kda_chunk_backward_generic_kernel<<<
           static_cast<int>(recurrence_count), threads, shared_bytes, stream>>>(
           reinterpret_cast<const __nv_bfloat16*>(contiguous_v.data_ptr<at::BFloat16>()),
           reinterpret_cast<const __nv_bfloat16*>(contiguous_raw_gate.data_ptr<at::BFloat16>()),
