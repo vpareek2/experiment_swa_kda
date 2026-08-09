@@ -1771,3 +1771,74 @@ uv run --no-sync python -m pytest -q tests/test_kda_cuda_development.py
 - Start the larger C=64 WY/UT CUDA design in parallel. Do not invoke nine-pair
   confirmation until a plateau/strategy boundary/four-hour checkpoint/end of
   night.
+
+## 2026-08-09 [agent] reject shared-cache barrier cost and accept 256-thread backward
+
+**Context**
+
+- Two independent low-risk axes followed accepted attempt 5. Both used exact
+  B=2/H=3 production-shaped Level 1 against `c5b36f8...`; neither invoked the
+  naive parent or confirmation.
+
+**Commands**
+
+```bash
+.venv/bin/python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_005 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_006 \
+  runs/kda-cuda-development/attempts/attempt-00006-level1 \
+  --level2-order candidate-first
+.venv/bin/python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_005 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_007 \
+  runs/kda-cuda-development/attempts/attempt-00007-level1 \
+  --level2-order candidate-first
+```
+
+**Artifacts**
+
+- Attempt 6: `runs/kda-cuda-development/attempts/attempt-00006-level1`;
+  exact rejected commit `1ec0bc4889c1982dc2d415df98859e2a8b5433d0`.
+- Attempt 7: `runs/kda-cuda-development/attempts/attempt-00007-level1`;
+  exact accepted commit `90e87cf86723d19dd26906f3ede567c7ba1c2268`.
+- Append-only attempt index SHA-256 after both:
+  `de0e0e0eca721c072fdb88fdfbaa8316abd29a8326a9a0ef220f2ab735114c33`.
+- New development-baseline manifest:
+  `runs/kda-cuda-development/baseline/90e87cf86.json`, SHA-256
+  `f558e50224b7a920dd163e01add0863741e96f4e30fe46c7ad5a628bc11893f9`.
+- Preserved C=64 project-CUDA WY/UT implementation blueprint:
+  `runs/kda-cuda-development/research/chunkwise-wy-cuda-blueprint-001.md`,
+  SHA-256
+  `d0d04136381e27acff28dff5fd8683aa803021a44b77ddb38112c768ee954bb3`.
+
+**Result**
+
+- Attempt 6 cached normalized keys, gate sigmoids, and decay exponentials in
+  dynamic shared memory during backward. Correctness/runtime audit passed and
+  memory was unchanged, but its extra per-token barriers outweighed redundant
+  transcendental removal: T=4096 forward+backward regressed
+  `792.369 -> 822.806 ms` (3.84%). Level 1 rejected it in about 105 seconds;
+  Level 2 was not run. The exact source/artifact/branch remain preserved.
+- Attempt 7 changed only backward block size from 128 to 256 threads. Level 1
+  completed in about 91 seconds and advanced: T=256/T=1024/T=4096
+  forward+backward improved 8.29%/7.63%/7.01%; T=4096 was
+  `792.674 -> 737.126 ms`. All latency/memory/runtime gates passed.
+- Its one candidate-first exact six-layer 4k Level-2 pair observed candidate
+  timed steps `[1636,1631,1629,1628,1629]`, median `1629 tok/s`, versus parent
+  `[1515,1515,1517,1517,1515]`, median `1515 tok/s`: 7.52% higher with identical
+  `5511.408 MiB` peak. This is one development pair, not statistical
+  confirmation or a quality result.
+- Attempt 7 becomes the current development baseline. It is pushed but not
+  merged or set as the default backend.
+- The offline/public blueprint derives a fixed-shape C=64 FP32 WY/UT path with
+  only 24.375 MiB of chunk-boundary state instead of about 1536 MiB token
+  history. Its first complete path must remain FP32 SIMT/ATen BMM; BF16 WMMA is
+  explicitly a later separate precision/performance axis.
+
+**Next**
+
+- Finish/evaluate attempt 8's independently authored global token-preprocessing
+  axis. Because it branched from `c5b36f8...` in parallel, any win must be
+  replayed as a fresh child of `90e87cf...` before becoming the baseline.
+- Continue building the FP32 C=64 forward path as small independently testable
+  stages; keep sparse confirmation reserved for the agreed cadence.
