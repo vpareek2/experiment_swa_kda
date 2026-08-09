@@ -4164,3 +4164,57 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_055 \
 - Keep the efficient third pair BMM. Choose a different structural backward
   path from exact attempt 53; do not continue pair-batch, exponential, or beta
   reduction variants.
+
+## 2026-08-09 [agent] preserve hybrid WMMA scan below advance gate
+
+**Context**
+
+- With attempt 53's complete backward near 2 ms beyond forward-only time, the
+  campaign reached the declared point for revisiting preserved attempt 27's
+  tensor-core scan. Attempt 56 combines attempt 53's stable FP32 tiled A/M
+  construction and accepted backward with only the prior 32-value BF16-WMMA,
+  FP32-accumulator forward scan.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_056 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact seeded B=2/H=3/T=4096 saved-gradient comparison plus repeat.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_053 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_056 \
+  runs/kda-cuda-development/attempt-00056-hybrid-wmma-level1
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_056 \
+  push -u origin kda-cuda/wy-hybrid-wmma-scan-056
+```
+
+**Artifacts**
+
+- Invalid generated-patch compile: `runs/kda-cuda-development/diagnostics/attempt-00056-protected-checker-invalid-compile-001`, manifest `36b0c6bdb3e00f178cdb390f0566f78c088297da9400491c06a1f341b95a7ab1`.
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00056-protected-checker`, manifest `8eb3d78c7241a48581c465e784f4767c3a045f1fbb73534ec29f0aba0c81c91e`.
+- Production comparison/repeat: `runs/kda-cuda-development/diagnostics/attempt-00056-hybrid-wmma-gradient`, manifest `443613143d8b28d2b635d511e8f63bd141ad9862b94971cba8a6d563ca42bd44`.
+- Level 1: `runs/kda-cuda-development/attempt-00056-hybrid-wmma-level1`, manifest `535b6923d862e0183963f62dbf308956dcb82eb0a595d3d9b9e25b32887f7c62`.
+- Append-only attempt/reference index SHA-256: `ef57cb5c7d7f975deb8a4c43ad8589de25365cb7f850635f97df164754310a1e`.
+
+**Result**
+
+- The first checker stopped at compilation because the generated transplant
+  left one literal `+` line. It emitted no measurement and is preserved. The
+  corrected pushed commit `f5146a5a7ecd6bc54772e91704dcd38e7c25eac3`
+  passed ownership 1.0, runtime/profile audit, and runtime FLA freedom.
+- Production output and gradients remained finite and deterministic. Maximum
+  output delta was `4.8828125e-4`; the largest gradient delta was `5.821e-11`,
+  both within frozen tolerances.
+- Level 1 did not advance: T=4096 forward+backward improved
+  `21.787 -> 21.221 ms` (2.60%), below the 3% gate, with memory ratio 1.0.
+  Forward-only improved 0.33%. No retest, sanitizer, Level 2, or profile ran.
+- Attempt 53 remains accepted. Attempt 56 is a valid preserved tensor-core
+  strategy-boundary option, not confirmation, quality evidence, or retention.
+
+**Next**
+
+- Return to exact FP32 attempt 53. Stack the same-right tiled A/M construction
+  products into one FP32 batched call without changing scan precision or
+  allocation; do not tune WMMA tile geometry.
