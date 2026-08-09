@@ -7092,3 +7092,81 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_101 \
   adding more work to the persistent reverse CTA. The next viable large axis is
   fusing group-boundary packing/build work or designing a complete multi-CTA
   WY/UT VJP with deterministic reduction boundaries.
+
+## 2026-08-09 [Codex] Attempts 102-104 group-producer axis closed at Level 1
+
+**Context**
+
+- Attempts 102-104 start from accepted attempt 100's colored-pair VJP and test
+  whether the group-boundary producer is the next material bottleneck. Attempt
+  102 replaces the separate group packing and dense products with a one-CTA per
+  chunk dual-WMMA producer for `U = T P`, `W = T Q`, `R`, `E`, and packed
+  `dO`. Attempt 103 reuses shared storage by staging the two WMMA phases
+  serially. Attempt 104 returns to attempt 102's dual-WMMA schedule and omits
+  the unused `R` allocation/computation in the forward-only boundary pass.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_10N \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact seed-4101 production comparisons and fresh-cache deterministic repeats.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_100 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_10N \
+  runs/kda-cuda-development/attempt-0010N-<label>-level1 \
+  --level2-order baseline-first
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_10N \
+  push -u origin kda-cuda/<attempt-branch>
+```
+
+**Artifacts**
+
+- Attempt 102 commit `bf4b6146fe839092f1d24fa72d1f1d9dd5ccdf31`:
+  protected checker `runs/kda-cuda-development/diagnostics/attempt-00102-group-producer-pack-protected-checker`, manifest `1c566e6fc05f430db8bcad3ad9b0ccdffde8b38d5d8640e9d98d9612c2cc92c5`;
+  gradient/repeat manifest `68d854c69cfc5a76f483775dbb4061acaf6c39c48104f75f13d9cb2752a80ab5`;
+  Level-1 manifest `5ca715089978bf319ec58c906a88c9e78b2220e64c5ee8cf5b48ad23fbb9257f`.
+- Attempt 103 commit `c9835a92d7772a8bd75e4f6b8c9002448f4f1a09`:
+  protected checker manifest `7aeb6d045640127084fdc42e77a117a2503990d148e83c6a4d37451513edebf1`;
+  valid gradient/repeat manifest `1fe6d9e162f539275df90ce040c8cbbcdb5b38b9aa5558649ccefbaa1ca0d26d`;
+  invalid log-race capture manifest `e683fc5cd1102b5ebf1f844611ec055dd7ad3af7b28d39aac02d7d6b133bd649`;
+  Level-1 manifest `e59017ff6712c6e23e2ed381924aac30a108307ebb8992dd53576369b1a753d4`.
+- Attempt 104 commit `a5743b2d457600de46fe8e87c1130cafe60eaa74`:
+  protected checker manifest `865af0eeb69527ca686c1c391bdbd2617992261860f169165ad467abe1d8c720`;
+  gradient/repeat manifest `3270238ce1ed28540bc4ea162d22b95a351e4a36d8738630fad346d71702f146`;
+  Level-1 manifest `f224efc598ac9995b8a196aa46fe64c667f7563053ee8d5f60db86d03308f91b`.
+- Append-only attempt/reference index SHA-256:
+  `3e95b3cb5273446963fde51710b9f4493707e7aec482556a89e966f32ab1cbea`.
+
+**Result**
+
+- All three pushed candidates pass ownership 1.0, the protected runtime/profile
+  audit, runtime FLA freedom, frozen numerical tolerance, finite-gradient
+  checks, and independent bitwise deterministic repeats. Attempts 102 and 104
+  are bitwise output-equivalent to their parent; their maximum gradient delta
+  versus attempt 100 is `1.4580336937797256e-11`. Attempt 103 is bitwise equal
+  to 102. The first attempt-103 gradient capture is invalid solely because its
+  `tee` sink raced artifact-directory creation; tensors and the exact failure
+  are retained and excluded from conclusions.
+- Attempt 102 is the best of the group, but T=4096 forward+backward improves
+  only `12.417008 -> 12.051312 ms` (2.945%), just below the frozen 3% gate.
+  T=256 and T=1024 regress 0.857% and 0.252%; peak allocation is unchanged at
+  202,770,944 bytes.
+- Attempt 103's shared-lifetime reuse reaches only 2.300% at T=4096 and
+  regresses 2.855% at T=256. Attempt 104 reaches 2.734% at T=4096 while its
+  T=4096 forward-only lane regresses 1.134%. All therefore receive
+  `do_not_advance`; no sanitizer, Level-2, profile, confirmation, or LM-quality
+  evaluation ran.
+
+**Next**
+
+- Retain attempt 100 as the accepted development baseline and close the isolated
+  group-producer micro-axis. The next experiment must cross a larger strategy
+  boundary: fuse vector-output WY/UT adjoints into their row-local downstream
+  consumers, or otherwise remove the remaining generic GEMM/global-workspace
+  handoffs without serializing additional work into the persistent reverse CTA.
+- FlashKDA remains an offline inference/dataflow reference only. Its useful
+  direction is fragment-resident producer/consumer handoff; do not import or
+  link it at runtime and do not replay the already-rejected row-subdivision or
+  persistent-reverse variants.
