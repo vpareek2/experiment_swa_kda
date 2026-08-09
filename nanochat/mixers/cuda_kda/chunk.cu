@@ -676,7 +676,7 @@ chunk_backward_cuda(
   at::Tensor residual_adjoint = at::empty(
       {batch, heads, value_dim}, A_log.options());
 
-  const int threads = 128;
+  const int threads = 256;
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream(q.get_device());
   const int64_t recurrence_count = batch * heads;
   if (recurrence_count > 0) {
