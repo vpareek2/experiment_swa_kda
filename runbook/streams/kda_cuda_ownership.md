@@ -4751,3 +4751,68 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_066 \
 - Preserve attempt 66 unchanged. Do not materialize whole-history decay
   operands. Return to attempt 65 and target work entirely inside the persistent
   scan, or shift to the measured backward pair-pack/accumulate path.
+
+## 2026-08-09 [agent] preserve pair-pack parallelism without advancing
+
+**Context**
+
+- Attempt 67 starts from accepted attempt 65 and flattens each 16x128 stable
+  pair operand across a 256-thread CTA instead of making 128 channel lanes loop
+  over all 16 rows. Every output element retains a single writer; equations,
+  pair-batch width, reductions, storage, and allocation are unchanged.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_validation_067 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact production-shape saved-gradient comparison plus repeat.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_065 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_067 \
+  runs/kda-cuda-development/attempt-00067-pair-pack-level1
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_validation_067 \
+  --lane optimization <isolated artifact/cache arguments> --sanitizers
+# Executed one valid saved baseline-first Level-2 plan after preserving an
+# artifact-invalid baseline invocation.
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_067 \
+  push -u origin kda-cuda/wy-pair-pack-256-067
+```
+
+**Artifacts**
+
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00067-protected-checker`, manifest `0011f899c1de10609465e3c60050f7b0a891b8796e4ecbe4650ff8a666a90f94`.
+- Production comparison/repeat: `runs/kda-cuda-development/diagnostics/attempt-00067-pair-pack-gradient`, manifest `98d86cd20ffb80301ecb5c33f7a1379fdfc2911b7051f59958f4ec43b6a00de7`.
+- Full sanitizer validation: `runs/kda-cuda-development/validations/validation-00014-pair-pack-256`, manifest `f7f62b84582ea6c9e8512bf27f8ed76277df70ee5a742e287717b2762c6941d9`.
+- Level 1: `runs/kda-cuda-development/attempt-00067-pair-pack-level1`, manifest `081d5f764c21538292f49e3fc9f7cb79194ef98a41fc120b7f6456251e1241d2`.
+- Level 2: `runs/kda-cuda-development/attempt-00067-pair-pack-level2`, manifest `dbc2d39c4c71bc5da296b135e754b6a4ae3d7866493bffc0489b53773d7ba1fa`.
+- Invalid gradient-save invocation: `runs/kda-cuda-development/diagnostics/attempt-00067-gradient-save-invalid-001`, manifest `dc13a482315e57e052f41b0be80b37ccf8d4c0938e89ea280cfc0a203d7906df`.
+- Invalid missing-tee Level-2 baseline: `runs/kda-cuda-development/diagnostics/attempt-00067-level2-invalid-001`, manifest `7434de87e45a325e8460e2dd676d73bc69645ef55e1c75f09b333100a4747d44`.
+- Append-only attempt/reference index SHA-256: `300fe34a987553b6cbe5030da9f52ede32a1dac85962bddbcf9e73decab9afe5`.
+
+**Result**
+
+- Pushed commit `edcf90c12c8f4ea19e08f85009e51ae7a3c65add`
+  passed ownership 1.0, runtime/profile audit, runtime FLA freedom, bitwise
+  production correctness and repeat, and all four sanitizers. Peak allocation
+  is unchanged.
+- Level 1 advanced: T=4096 forward+backward improved
+  `21.047 -> 20.077 ms` (4.61%); all important regression guards passed.
+- The valid Level-2 pair measured baseline
+  `[28741,28656,28565,28339,28448]`, median `28565 tok/s`, and candidate
+  `[28724,28675,28556,28378,28663]`, median `28663 tok/s`: +0.34%, identical
+  `5508.533 MiB`, and 65.62% of the fixed 43,680 tok/s reference. This small
+  matched gain is not a defensible new baseline.
+- The first Level-2 baseline completed but its raw-log tee target did not exist;
+  it is invalid and excluded. A fresh complete baseline-first pair supplied the
+  reported evidence. Attempt 65 remains accepted. No confirmation, profile, or
+  retest ran; this is not quality or statistically confirmed evidence.
+
+**Next**
+
+- Preserve attempt 67 unchanged. Continue from attempt 65 with a larger
+  structural reduction in backward pair transforms/BMMs or forward persistent
+  scan work; thread-count scheduling alone does not materially move trainer
+  throughput.
