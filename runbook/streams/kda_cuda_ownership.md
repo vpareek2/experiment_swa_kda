@@ -5231,3 +5231,56 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_074 \
 
 - Preserve attempt 74 unchanged. Continue from attempt 72; avoid materializing
   factor caches and favor eliminating a BMM or fusing existing traffic.
+
+## 2026-08-09 [agent] reject compact exact pre-M history
+
+**Context**
+
+- Attempt 75 starts from accepted attempt 72. It copies the exact unscaled
+  strict-lower C64 pair matrix before in-place beta scaling into a compact
+  2,016-float-per-chunk history, then reconstructs group-local `pre_m` during
+  pair packing. This removes the third generic FP32 pair BMM without restoring
+  full recurrent token-state history. The expected production allocation
+  increase was bounded by the frozen 3% memory gate.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_075 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact production-shape gradient capture and fresh-cache deterministic repeat.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_072 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_075 \
+  runs/kda-cuda-development/attempt-00075-compact-pre-m-level1
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_075 \
+  push -u origin kda-cuda/wy-compact-pre-m-075
+```
+
+**Artifacts**
+
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00075-compact-pre-m-protected-checker`, manifest `4d718be11459e2e406b705f62cb78fbf802c8fc9091198fbf82c734ef1e3b56f`.
+- Production comparison/repeat: `runs/kda-cuda-development/diagnostics/attempt-00075-compact-pre-m-gradient`, manifest `4ab5aa38854e9939ca780ebf67b4d0dd89b26dbb67b7f0e8aaeab75ccc051652`.
+- Level 1: `runs/kda-cuda-development/attempt-00075-compact-pre-m-level1`, manifest `4a8bf454dc1d434fa1259aeb019fbd3f8ef92e78ee41f00b5beed7d72801ba3c`.
+- Append-only attempt/reference index SHA-256: `fd44d6b57cd969d348a1947c744c705a886894c271961691b4748bc6380af012`.
+
+**Result**
+
+- Pushed commit `2ca3135a0ea096a5a6beb8fcd44847082ea0bf11`
+  passed ownership 1.0, runtime/profile audit, runtime FLA freedom, bitwise
+  output/all-gradient correctness, and a bitwise fresh-cache repeat.
+- Level 1 rejected the candidate: T=4096 forward+backward improved only
+  `18.008 -> 17.861 ms` (0.81%), below the frozen 3% advancement threshold.
+  Peak allocation rose 1.52%, within the 3% cap, and all per-length regression
+  guards passed.
+- No sanitizers, Level 2, profile, confirmation, or retest ran. Attempt 72
+  remains accepted; this is neither quality nor statistically confirmed
+  evidence.
+
+**Next**
+
+- Preserve attempt 75 unchanged. Continue from attempt 72 and seek a
+  higher-leverage backward transition, especially fusion or replacement of
+  the remaining generic FP32 BMM groups rather than storing additional pair
+  history.
