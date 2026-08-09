@@ -2799,3 +2799,76 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_032 \
   the remaining live set, while packing 16 groups dominates runtime. Recompute
   U/W/R/E inside wider groups and finalize each group's normalized/input
   gradients immediately so group-local adjoints do not accumulate globally.
+
+## 2026-08-09 [agent] reject eight-chunk local-final WY VJP
+
+**Context**
+
+- Attempt 33 removes full-sequence U/W/R/E, FP32 upstream packing, and global
+  dqbar/dkhat/dprefix/dv scratch from attempt 32. Eight-chunk groups recompute
+  their WY products, consume local adjoints, write BF16 input gradients
+  immediately, and carry deterministic parameter accumulators in reverse order.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_033 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact seeded B=2/H=3/T=4096 output and gradient comparison plus repeat.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_028 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_033 \
+  runs/kda-cuda-development/attempt-00033-local-final-level1
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_033 \
+  push -u origin kda-cuda/wy-vjp-local-finalize-033
+```
+
+**Artifacts**
+
+- Protected checker:
+  `runs/kda-cuda-development/diagnostics/attempt-00033-protected-checker`,
+  manifest SHA-256
+  `fb443fc0e7b264e8082afd7e3eb4f53b38e76fcb4e3a68ee1ff427ebe71d7f6b`.
+- Production comparison, deterministic repeat, and preserved invalid first
+  invocation:
+  `runs/kda-cuda-development/diagnostics/attempt-00033-local-final-gradient-exact`,
+  manifest SHA-256
+  `b2f4d3bf48459af9d4e4595177a1ee12094cc03dead3a29304a9908004fd05f5`.
+- Unmatched B1/H1 protected-worker diagnostic, retained but excluded from the
+  production decision:
+  `runs/kda-cuda-development/diagnostics/attempt-00033-local-final-draft`,
+  manifest SHA-256
+  `f87d240f9c246abddd233fb4c0544bff5970e2e51312104fdaaa64df228260be`.
+- Matched formal Level 1:
+  `runs/kda-cuda-development/attempt-00033-local-final-level1`, manifest
+  SHA-256
+  `add2808ab9fd91407ba4f3b20b1c61818c1af2af00315aa05ae14b76d23d193f`.
+- Append-only attempt/reference index SHA-256:
+  `5d6d546b04328d8bb62950b33d226098584667a5a04a76a331bb6da73fc74ccb`.
+
+**Result**
+
+- Exact pushed commit `470a64eea53170e1a55ffc92875462ddc3602f68`
+  passed the protected runtime/profile audit at ownership 1.0 with no runtime
+  FLA. Output and all seven production gradients are bitwise identical to
+  attempt 32; a second saved tensor bundle is also bitwise identical.
+- The first saved-gradient invocation was invalid before CUDA because the
+  build helper resolved sources from the coordinator working directory. Its
+  traceback is preserved and excluded from evidence.
+- Matched Level 1 rejected the candidate: T=4096 forward+backward regressed
+  `59.363 -> 90.293 ms` (52.10%), while peak allocation changed
+  `201410048 -> 204491264` bytes (`1.0153x`). Level 2 was not launched.
+- Because Level 1 was decisively rejected, no sanitizer confirmation was
+  launched and no sanitizer-valid claim is made for attempt 33. It is an exact
+  equation/storage scaffold only, not an accepted baseline, confirmation,
+  quality result, default, merge, or official retention. Attempt 28 remains
+  the accepted development baseline.
+
+**Next**
+
+- Profile the exact B=2/H=3/T=4096 specialization to attribute the 4096-only
+  regression. Optimize group recomputation/launch structure without restoring
+  full token history or changing equation order, then rerun exact gradients and
+  matched Level 1. Keep Level 2 and sanitizer confirmation gated on advancement
+  or a declared strategy boundary.
