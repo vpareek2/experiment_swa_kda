@@ -5576,3 +5576,66 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_080 \
 - Preserve attempt 80 unchanged and continue from attempt 77. Avoid adding a
   CTA-wide barrier solely to share the group-boundary decay. Target a larger
   structural reduction in group-boundary WMMA or pair/BMM traffic.
+
+## 2026-08-09 [agent] reject sixteen-chunk backward groups
+
+**Context**
+
+- Attempt 81 starts from accepted attempt 77 and changes only the backward
+  recompute group width from eight chunks to sixteen in
+  `nanochat/mixers/cuda_kda/chunk_wy_backward.cu`. This halves group-level
+  pack, FP32 BMM, pair-transform, and boundary-kernel dispatch counts while
+  preserving all 64 ordered chunk updates.
+- The candidate intentionally tests the frozen memory gate because its bounded
+  group-local operands and scratch double in size.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_081 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact seed-4101 B=2/H=3/T=4096 production capture against attempt 77,
+# followed by an independent candidate capture with fresh compiler caches.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_077 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_081 \
+  runs/kda-cuda-development/attempt-00081-group16-level1 \
+  --level2-order baseline-first
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_081 \
+  push -u origin kda-cuda/wy-group16-081
+```
+
+**Artifacts**
+
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00081-group16-protected-checker`, manifest `b71f5576a932b85b9e4b0068bcccefb87eb23534df20a8ec74954944148e2fc7`.
+- Invalid preflight staging invocations: `runs/kda-cuda-development/diagnostics/attempt-00081-group16-protected-checker-invalid-001`, manifest `1bf97ac7d707dd7cf181c516b60bd1952db9b5435e61012bb863862aa653a852`.
+- Production comparison/repeat: `runs/kda-cuda-development/diagnostics/attempt-00081-group16-gradient`, manifest `15a7896a9a22b9acb6deb5aafbef6085be1949f5b5fc3bbaf30795ca66e55e54`.
+- Level 1: `runs/kda-cuda-development/attempt-00081-group16-level1`, manifest `47717929247b008b9396d990276f598e22f6bf755a66be14cbc1d6ba1ea174a5`.
+- Append-only attempt/reference index SHA-256: `02e10f069739fad2e111c567b0523b40aac9d65e25fa0b3b9c82eedc0b037957`.
+
+**Result**
+
+- Pushed commit `bec34bb6364f3f330dd9879b7c5582c9dde5d175`
+  passed ownership 1.0, protected runtime/profile audit, and runtime FLA
+  freedom. Output and six gradients are bitwise equal to attempt 77;
+  `dA_log` differs by at most `1.705e-13`, passes the frozen tolerance, and is
+  bitwise deterministic across a fresh-cache repeat.
+- Level 1 decisively rejected the candidate. T=4096 forward+backward regressed
+  `17.353 -> 18.982 ms` (9.39%), and peak allocation rose from 203,950,592 to
+  243,071,488 bytes (ratio 1.19182), far beyond the frozen 3% memory cap.
+  T=256 forward+backward also regressed 8.36%.
+- Two initial commands incorrectly staged from the coordinator. Both stopped
+  before build/GPU work with `pathspec ... did not match any files` and
+  `candidate checker requires at least one staged source change`; the second
+  chain also reported that the nonexistent first artifact could not be moved.
+  These failures are preserved as invalid and excluded from evidence.
+- No sanitizer, Level 2, profile, confirmation, or retest ran. Attempt 77
+  remains the accepted development baseline; this is neither quality nor
+  statistically confirmed evidence.
+
+**Next**
+
+- Preserve attempt 81 unchanged and continue from attempt 77. Keep eight-chunk
+  bounded scratch; reduce group-boundary or pair/BMM traffic without widening
+  the live group or replaying pair-batch-width tuning.
