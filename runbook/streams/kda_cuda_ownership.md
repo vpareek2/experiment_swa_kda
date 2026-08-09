@@ -6027,3 +6027,81 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_086 \
   construction, then remove their repeated per-value-tile conversions while
   retaining FP32 state and accumulation. Preserve every correctness and
   provenance gate.
+
+## 2026-08-09 [agent] preserve rejected BF16 forward-scan prepack boundary
+
+**Context**
+
+- Attempt 87 starts from accepted attempt 84 and changes only
+  `nanochat/mixers/cuda_kda/chunk_wy_forward.cu`. Following the offline
+  FlashKDA separation between parallel preparation and persistent recurrence,
+  one preparation CTA per C64 chunk snapshots and compacts the FP32 `W`,
+  decayed q, restored k, and A masters into BF16 views inside their existing
+  allocations. The persistent value-tile scan then loads those exact BF16
+  values directly rather than converting the same masters four times.
+- FP32 recurrent state, WMMA accumulation, equations, backward path, allocation
+  sizes, and model configuration remain unchanged. No reference source is
+  imported, linked, or used at runtime.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_087 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact seed-4101 production capture and fresh-cache repeat against attempt 84.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_084 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_087 \
+  runs/kda-cuda-development/attempt-00087-prepack-level1 \
+  --level2-order baseline-first
+PYTHONPATH=/home/veer/Master/projects/experiment_swa_kda_cuda_attempt_087 \
+TORCH_EXTENSIONS_DIR=/tmp/kda087-production-profile-ext-001 \
+nsys profile --trace=cuda,nvtx,osrt --sample=none --cpuctxsw=none \
+  --force-overwrite=true --output=<artifact>/trace \
+  /home/veer/Master/projects/experiment_swa_kda/.venv/bin/python \
+  /tmp/kda033_nsys.py
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_087 \
+  push -u origin kda-cuda/wy-prepack-scan-bf16-087
+```
+
+**Artifacts**
+
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00087-prepack-protected-checker`, manifest `57b53a6ad6d4bd5f5ae0af77d540e6471e3b8caf0c50bae39b43a5f923e17719`.
+- Invalid coordinator-CWD production capture: `runs/kda-cuda-development/diagnostics/attempt-00087-prepack-gradient-invalid-cwd-001`, manifest `f2f623412782fa61b1a4dea2fd152a227672e4c7ba4ad7d72d9e627f7afd4031`.
+- Production comparison/repeat: `runs/kda-cuda-development/diagnostics/attempt-00087-prepack-gradient`, manifest `4e8cb499c5fb834afa2c5f7ca546abb42e8438466a8298ee6850bdf683310a0d`.
+- Level 1: `runs/kda-cuda-development/attempt-00087-prepack-level1`, manifest `97dfaf56d2f560a05aff130c3c29085db831cef6a6c5bdc40bf98f832774e246`.
+- Production profile: `runs/kda-cuda-development/diagnostics/attempt-00087-production-profile`, manifest `3f293fe07e50aedf130d7195e43276dd47e6c8589d8562cc64e9e833088b92d7`.
+- Append-only attempt/reference index SHA-256: `5abce26bc3875292febb13c62b3ed2422add0bd2205418b6f3ff502c3747ccc9`.
+
+**Result**
+
+- Pushed commit `a36b0474d5111471731cf9c69940c764181ef921` passed ownership 1.0,
+  protected runtime/profile audit, and runtime FLA freedom. Production output
+  and `dq` are bitwise equal to attempt 84; maximum gradient delta is
+  `1.871e-9`, all tensors pass the frozen tolerance, and the fresh-cache repeat
+  is bitwise exact.
+- Level 1 rejected the implementation: T=4096 forward improved
+  `19.474 -> 19.170 ms` (1.56%), but forward+backward regressed
+  `15.015 -> 15.513 ms` (3.32%). Memory ratio is 1.0 and all declared
+  regression guards remain within their limits. No sanitizer, Level 2,
+  confirmation, or retest ran.
+- The boundary profile confirms the mechanism but rejects the realization.
+  The forward scan fell from 2.410 to 1.985 ms/iteration, saving 0.426 ms, but
+  the shared-memory compaction pass costs 0.320 ms/iteration, leaving only
+  about 0.106 ms net in the targeted path.
+- The first production capture was launched from the coordinator CWD, causing
+  project-relative sources to resolve in the source-free coordinator and a
+  `FileNotFoundError` before build/GPU work. Its raw log is preserved and
+  excluded.
+- Attempt 84 remains the accepted development baseline and the official
+  retained milestone remains `4d1a3b231da2c99882324efbda5306a1815e21c7`.
+  This is neither statistically confirmed nor LM-quality evidence.
+
+**Next**
+
+- Replace shared-memory in-place compaction with direct parallel writes into
+  forward buffers whose original values are dead after the U/W products, and
+  compose that with attempt 86's correct persistent build/solve. The measured
+  upper bound is roughly 0.426 ms/iteration from scan prepacking plus 0.253 ms
+  from build/solve before the new direct-pack cost.
