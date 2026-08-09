@@ -679,14 +679,15 @@ nanochat_kda_chunk_wy_backward_c64(
   nanochat_kda_wy_backward_solve_c64_kernel<<<
       kChunkRows, kChunk, 0, stream>>>(M.data_ptr<float>(), T.data_ptr<float>());
   C10_CUDA_KERNEL_LAUNCH_CHECK();
+  M = at::Tensor();
 
   at::Tensor U = at::empty_like(P);
   at::Tensor W = at::empty_like(Q);
   at::bmm_out(U, T, P);
   at::bmm_out(W, T, Q);
 
-  const at::Tensor U_all = U.view({kRecurrences, kChunks, kChunk, kDim});
-  const at::Tensor W_all = W.view({kRecurrences, kChunks, kChunk, kDim});
+  at::Tensor U_all = U.view({kRecurrences, kChunks, kChunk, kDim});
+  at::Tensor W_all = W.view({kRecurrences, kChunks, kChunk, kDim});
 
   at::Tensor R = at::empty_like(qbar);
   at::Tensor E = at::empty_like(qbar);
@@ -697,14 +698,14 @@ nanochat_kda_chunk_wy_backward_c64(
       prefix_g.data_ptr<float>(), R.data_ptr<float>(), E.data_ptr<float>());
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 
-  const at::Tensor E_all = E.view(
+  at::Tensor E_all = E.view(
       {kRecurrences, kChunks, kChunk, kDim});
   at::Tensor state = at::zeros({kRecurrences, kDim, kDim}, fp32);
   at::Tensor H_all_flat = at::empty({kChunkRows, kDim, kDim}, fp32);
-  const at::Tensor H_all = H_all_flat.view(
+  at::Tensor H_all = H_all_flat.view(
       {kRecurrences, kChunks, kDim, kDim});
   at::Tensor z_all_flat = at::empty({kChunkRows, kChunk, kDim}, fp32);
-  const at::Tensor z_all = z_all_flat.view(
+  at::Tensor z_all = z_all_flat.view(
       {kRecurrences, kChunks, kChunk, kDim});
   at::Tensor z = at::empty({kRecurrences, kChunk, kDim}, fp32);
   at::Tensor state_delta = at::empty_like(state);
@@ -734,6 +735,11 @@ nanochat_kda_chunk_wy_backward_c64(
         state.data_ptr<float>(), state_delta.data_ptr<float>(), kStateElements);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
   }
+  U_all = at::Tensor();
+  U = at::Tensor();
+  state = at::Tensor();
+  state_delta = at::Tensor();
+  z = at::Tensor();
 
   at::Tensor dO_packed = at::empty_like(qbar);
   constexpr int kInputElements = kBatch * kLength * kHeads * kDim;
@@ -744,34 +750,26 @@ nanochat_kda_chunk_wy_backward_c64(
           grad_output.data_ptr<at::BFloat16>()),
       dO_packed.data_ptr<float>());
   C10_CUDA_KERNEL_LAUNCH_CHECK();
-  at::Tensor dqbar = at::empty_like(qbar);
-  at::Tensor dkhat = at::empty_like(khat);
-  at::Tensor dv_float = at::empty(
-      {kBatch, kLength, kHeads, kDim}, fp32);
-  at::Tensor dbeta = at::empty_like(beta);
-  at::Tensor dprefix = at::empty_like(prefix_g);
   at::Tensor dstate_base_all = at::empty({kChunkRows, kDim, kDim}, fp32);
-  at::Tensor dZ_base_all = at::empty_like(qbar);
+  at::Tensor dZ_all_flat = at::empty_like(qbar);
   at::bmm_out(dstate_base_all, R.transpose(1, 2), dO_packed);
-  at::bmm_out(dZ_base_all, A.transpose(1, 2), dO_packed);
+  at::bmm_out(dZ_all_flat, A.transpose(1, 2), dO_packed);
+  A = at::Tensor();
 
-  const at::Tensor dstate_base_chunks = dstate_base_all.view(
+  at::Tensor dstate_base_chunks = dstate_base_all.view(
       {kRecurrences, kChunks, kDim, kDim});
-  const at::Tensor dZ_base_chunks = dZ_base_all.view(
+  at::Tensor dZ_base_chunks = dZ_all_flat.view(
       {kRecurrences, kChunks, kChunk, kDim});
   at::Tensor dstate_next_all_flat = at::empty(
       {kChunkRows, kDim, kDim}, fp32);
-  const at::Tensor dstate_next_all = dstate_next_all_flat.view(
+  at::Tensor dstate_next_all = dstate_next_all_flat.view(
       {kRecurrences, kChunks, kDim, kDim});
-  at::Tensor dZ_all_flat = at::empty_like(qbar);
-  const at::Tensor dZ_all = dZ_all_flat.view(
-      {kRecurrences, kChunks, kChunk, kDim});
-  at::Tensor dstate_next = at::zeros_like(state);
-  at::Tensor dstate = at::empty_like(state);
+  at::Tensor dstate_next = at::zeros({kRecurrences, kDim, kDim}, fp32);
+  at::Tensor dstate = at::empty_like(dstate_next);
   at::Tensor dZ = at::empty({kRecurrences, kChunk, kDim}, fp32);
   at::Tensor dD = at::empty({kChunkRows, kDim}, fp32);
   at::Tensor temp_vector = at::empty_like(dZ);
-  at::Tensor temp_state = at::empty_like(state);
+  at::Tensor temp_state = at::empty_like(dstate_next);
 
   for (int chunk_id = kChunks; chunk_id-- > 0;) {
     const at::Tensor H = H_all.select(1, chunk_id);
@@ -787,7 +785,7 @@ nanochat_kda_chunk_wy_backward_c64(
         kThreads, 0, stream>>>(
         dZ.data_ptr<float>(), temp_vector.data_ptr<float>(), kVectorElements);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
-    dZ_all.select(1, chunk_id).copy_(dZ);
+    dZ_base_chunks.select(1, chunk_id).copy_(dZ);
     nanochat_kda_wy_backward_boundary_terms_c64_kernel<<<
         (kStateElements + kThreads - 1) / kThreads,
         kThreads, 0, stream>>>(
@@ -803,21 +801,37 @@ nanochat_kda_chunk_wy_backward_c64(
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     dstate_next.copy_(dstate);
   }
+  W_all = at::Tensor();
+  W = at::Tensor();
+  dstate_base_chunks = at::Tensor();
+  dstate_base_all = at::Tensor();
+  dZ_base_chunks = at::Tensor();
+  dstate_next = at::Tensor();
+  dstate = at::Tensor();
+  dZ = at::Tensor();
+  temp_vector = at::Tensor();
+  temp_state = at::Tensor();
 
   at::Tensor dR = at::empty_like(qbar);
-  at::Tensor dA = at::empty_like(A);
+  at::Tensor dA = at::empty_like(T);
   at::Tensor dE = at::empty_like(qbar);
   at::Tensor dW = at::empty_like(qbar);
   at::Tensor dT = at::empty_like(T);
   at::Tensor dP = at::empty_like(qbar);
   at::Tensor dQ = at::empty_like(qbar);
-  at::Tensor dM = at::empty_like(T);
   at::Tensor temp_matrix = at::empty_like(T);
 
   at::bmm_out(dR, dO_packed, H_all_flat.transpose(1, 2));
   at::bmm_out(dA, dO_packed, z_all_flat.transpose(1, 2));
   at::bmm_out(dE, z_all_flat, dstate_next_all_flat.transpose(1, 2));
+  z_all = at::Tensor();
+  z_all_flat = at::Tensor();
+  dstate_next_all = at::Tensor();
+  dstate_next_all_flat = at::Tensor();
   at::bmm_out(dW, dZ_all_flat, H_all_flat.transpose(1, 2));
+  H_all = at::Tensor();
+  H_all_flat = at::Tensor();
+  dO_packed = at::Tensor();
   nanochat_kda_wy_backward_negate_c64_kernel<<<
       (kAllVectorElements + kThreads - 1) / kThreads,
       kThreads, 0, stream>>>(dW.data_ptr<float>(), kAllVectorElements);
@@ -832,11 +846,26 @@ nanochat_kda_chunk_wy_backward_c64(
   at::bmm_out(dP, T.transpose(1, 2), dZ_all_flat);
   at::bmm_out(dQ, T.transpose(1, 2), dW);
   at::bmm_out(temp_matrix, T.transpose(1, 2), dT);
-  at::bmm_out(dM, temp_matrix, T.transpose(1, 2));
+  at::bmm_out(dT, temp_matrix, T.transpose(1, 2));
+  at::Tensor dM = dT;
+  dT = at::Tensor();
   nanochat_kda_wy_backward_negate_c64_kernel<<<
       (kAllMatrixElements + kThreads - 1) / kThreads,
       kThreads, 0, stream>>>(dM.data_ptr<float>(), kAllMatrixElements);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
+  dZ_all_flat = at::Tensor();
+  P = at::Tensor();
+  Q = at::Tensor();
+  T = at::Tensor();
+  dW = at::Tensor();
+  temp_matrix = at::Tensor();
+
+  at::Tensor dqbar = at::empty_like(qbar);
+  at::Tensor dkhat = at::empty_like(khat);
+  at::Tensor dv_float = at::empty(
+      {kBatch, kLength, kHeads, kDim}, fp32);
+  at::Tensor dbeta = at::empty_like(beta);
+  at::Tensor dprefix = at::empty_like(prefix_g);
 
   nanochat_kda_chunk_backward_kernel<<<
       kChunkRows, kDim, 0, stream>>>(
@@ -850,6 +879,16 @@ nanochat_kda_chunk_wy_backward_c64(
       dv_float.data_ptr<float>(), dbeta.data_ptr<float>(),
       dprefix.data_ptr<float>());
   C10_CUDA_KERNEL_LAUNCH_CHECK();
+  E_all = at::Tensor();
+  R = at::Tensor();
+  E = at::Tensor();
+  dR = at::Tensor();
+  dA = at::Tensor();
+  dM = at::Tensor();
+  dP = at::Tensor();
+  dQ = at::Tensor();
+  dE = at::Tensor();
+  dD = at::Tensor();
 
   nanochat_kda_wy_backward_prefix_reverse_c64_kernel<<<
       kChunkRows, kDim, 0, stream>>>(dprefix.data_ptr<float>());
