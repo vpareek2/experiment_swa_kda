@@ -4883,3 +4883,60 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_068 \
 - Continue from exact attempt 68. The next large owned paths are the remaining
   forward WMMA scan, backward pair pack/accumulate, and generic FP32 BMM groups.
   Prefer an algebraic or fusion change over further thread-count tuning.
+
+## 2026-08-09 [agent] preserve persistent group recomputation behind short guard
+
+**Context**
+
+- Attempt 69 starts from accepted attempt 68 and makes the existing persistent
+  backward group-boundary WMMA scan emit the already allocated per-chunk H and
+  Z buffers during reverse recomputation. It replaces eight BMM/copy/decay/add
+  sequences per group, removes two local temporary buffers, and does not store
+  full-history state.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --config configs/research/kda_cuda_ownership.toml \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_069 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact seeded production comparison plus deterministic repeat.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_068 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_069 \
+  runs/kda-cuda-development/attempt-00069-group-recompute-level1
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_069 \
+  push -u origin kda-cuda/wy-persistent-group-recompute-069
+```
+
+**Artifacts**
+
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00069-protected-checker`, manifest `708791cde7c56f1aee6fe3d0f5d0a7980b35eb16dfb7bded7851134379a00894`.
+- Production comparison/repeat: `runs/kda-cuda-development/diagnostics/attempt-00069-group-recompute-gradient`, manifest `fbe2675eb3dd7f9d17bae6c77f0eb00bafda7ba9f7152e3e14293a9828837f2b`.
+- Level 1: `runs/kda-cuda-development/attempt-00069-group-recompute-level1`, manifest `65fd0c842e00cda23fd51bb2e78972b39a62c1abe2de3d38ddb71f628c7078ac`.
+- Append-only attempt/reference index SHA-256: `13d261c5af41a908d8c19d53f3042aa9fc02bdd2b5e016b08668c31277af9f27`.
+
+**Result**
+
+- Pushed commit `ff37d9ea6d9b9cfd26c23a62b76e76686b5fbf19`
+  passed ownership 1.0, protected runtime/profile audit, runtime FLA freedom,
+  frozen production correctness, and a bitwise repeat. Output, `dv`, and
+  `dbeta` are bitwise exact; the largest changed gradient delta is `1.455e-11`.
+- The production objective improved strongly: T=4096 forward+backward fell
+  `19.674 -> 18.516 ms` (5.89%), and peak allocation fell from 204,540,416 to
+  203,950,592 bytes (ratio 0.99712).
+- Level 1 nevertheless classified `do_not_advance`: T=256 forward+backward
+  regressed 8.27%, exceeding the frozen 5% guard. The changed C64 specialization
+  is dispatched only at T=4096, so the short regression is extrinsic timing
+  noise, but it is not overridden or retested.
+- No sanitizers, Level 2, profile, confirmation, or retest ran. Attempt 68
+  remains accepted. This is neither quality nor statistically confirmed
+  evidence.
+
+**Next**
+
+- Preserve attempt 69 unchanged as strong strategy evidence. Refine its
+  persistent group scan with an additional mechanistic improvement in a new
+  child, compare to accepted attempt 68, and continue to honor all Level-1
+  guards rather than treating the short-path result as a win.
