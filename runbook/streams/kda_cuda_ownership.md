@@ -5284,3 +5284,52 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_075 \
   higher-leverage backward transition, especially fusion or replacement of
   the remaining generic FP32 BMM groups rather than storing additional pair
   history.
+
+## 2026-08-09 [agent] reject fused group-product batch
+
+**Context**
+
+- Attempt 76 starts from accepted attempt 72. One owned packing kernel gathers
+  group-local `P/Q` and duplicates group-local `T`, allowing `T@P` and `T@Q`
+  to run as one doubled-batch FP32 BMM in both boundary construction and
+  reverse replay. The complete WY/UT VJP and FP32 arithmetic are unchanged.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_076 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact production-shape gradient capture and fresh-cache deterministic repeat.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_072 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_076 \
+  runs/kda-cuda-development/attempt-00076-fused-group-level1
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_076 \
+  push -u origin kda-cuda/wy-fused-group-inputs-076
+```
+
+**Artifacts**
+
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00076-fused-group-protected-checker`, manifest `7b6effb8a327e5c3e859c0cc59981db1cf4d8eb6df27844a085a8d3d7885c6d5`.
+- Production comparison/repeat: `runs/kda-cuda-development/diagnostics/attempt-00076-fused-group-gradient`, manifest `99ab297b4b13f67fe870b7f321fe1c5e8ed5dab5207245c67cbfe26c7dcd04be`.
+- Level 1: `runs/kda-cuda-development/attempt-00076-fused-group-level1`, manifest `994bc4a7c694d55f301c082371e1faed6ed1da811407584d623dc01f7e413c99`.
+- Append-only attempt/reference index SHA-256: `d247b2a3448b9c7986f270fd26b762ff7a2d2560cd254c977a7de912dc1f82b3`.
+
+**Result**
+
+- Pushed commit `622cbc812e9fb7f8338c9a0007c2dc62c24e9f58`
+  passed ownership 1.0, runtime/profile audit, runtime FLA freedom, bitwise
+  output/all-gradient correctness, and a bitwise fresh-cache repeat.
+- Level 1 rejected the candidate: T=4096 forward+backward regressed
+  `18.145 -> 18.425 ms` (1.54%). Peak allocation rose 0.39%; all frozen
+  per-length regression and memory guards still passed.
+- No sanitizers, Level 2, profile, confirmation, or retest ran. Attempt 72
+  remains accepted; this is neither quality nor statistically confirmed
+  evidence.
+
+**Next**
+
+- Preserve attempt 76 unchanged. Continue from attempt 72. Do not pursue
+  doubled-batch concatenation; target the reverse chunk scan itself or fuse
+  BMM-adjacent elementwise/copy work without changing efficient BMM geometry.
