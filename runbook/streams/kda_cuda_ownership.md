@@ -6240,3 +6240,69 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_089 \
   matched development from attempt 84. Re-read attempts 69–82 before changing
   the group-boundary or pair-VJP paths; do not replay rejected group-width,
   boundary-copy, recompute, or scheduling variants.
+
+## 2026-08-09 [agent] preserve bitwise-exact backward operand prepack below Level-1 gate
+
+**Context**
+
+- Attempt 90 starts from accepted development baseline attempt 84 and applies
+  the offline FlashKDA preparation/recurrence split to backward group-boundary
+  recomputation only. The existing group-pack kernel rounds `W` and `E` to
+  BF16 once, and the eight value-tile CTAs consume the packed operands instead
+  of redundantly converting their FP32 copies inside every WMMA tile.
+- No runtime FlashKDA/FLA code is imported or linked. The packed pair occupies
+  an existing FP32-sized dead buffer exactly: the unused `R_group` allocation
+  during the forward boundary sweep, and `dO_group` before its delayed gradient
+  gather during the reverse sweep. Peak live allocation and kernel count are
+  unchanged; FP32 `W/E` remain intact for the later complete VJP BMMs.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --config configs/research/kda_cuda_ownership.toml \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_090 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact seed-4101 B=2/H=3/T=4096 production comparison against the saved
+# attempt-84 bundle, followed by one independent fresh-extension-cache repeat.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_084 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_090 \
+  runs/kda-cuda-development/attempt-00090-bf16-group-operands-level1 \
+  --level2-order candidate-first
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_090 \
+  push -u origin kda-cuda/wy-bf16-group-operands-090
+```
+
+**Artifacts**
+
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00090-bf16-group-operands-protected-checker`, manifest `09ad6504b472c2a283a63715da173820c4392b330e2b0edbbdd3a82ae8634476`.
+- Production comparison/repeat: `runs/kda-cuda-development/diagnostics/attempt-00090-bf16-group-operands-gradient`, manifest `29a25eca943ede33f2c9a99bc427a5c3b63740df1c8c34ba78c74b2b5ce39831`.
+- Level 1: `runs/kda-cuda-development/attempt-00090-bf16-group-operands-level1`, manifest `fd8e6d32661931c7bf98e31ec872a1a55ba6fc8f2d1a3ba194163d4d0297ffcf`.
+- Append-only attempt/reference index SHA-256: `09c3d28dd990796801ce8b0686d30539ad51216db0a0a594843867913b38198e`.
+
+**Result**
+
+- Pushed commit `49d7096e72b4f373aa693d9f28a9afac94a53a91` passed ownership 1.0,
+  the complete protected runtime/profile audit, and runtime FLA freedom.
+  Production output and every saved gradient are bitwise equal to attempt 84;
+  the independent fresh-cache repeat is also bitwise equal for every tensor.
+- Level 1 is directionally positive but below the frozen advance threshold:
+  T=4096 forward+backward improved `14.8913 -> 14.6631 ms` (1.53%), while
+  forward-only improved 0.09%. T=256 forward+backward improved 1.31%, and
+  T=1024 forward+backward regressed 0.12%; memory ratio is 1.0 and every
+  important-regression and memory guard passed.
+- No sanitizer, Level 2, production profile, confirmation, or LM-quality
+  evaluation ran. Attempt 84 remains the accepted development baseline and
+  the official retained milestone remains
+  `4d1a3b231da2c99882324efbda5306a1815e21c7`; this is not statistically
+  confirmed evidence.
+
+**Next**
+
+- Preserve the prepack result as evidence that repeated backward operand
+  conversion is real but too small alone. Continue from attempt 84 with a
+  larger group-boundary fusion that removes shared staging and/or launch and
+  global-memory traffic in addition to the conversions; do not compose attempt
+  90 into a baseline unless the larger fused axis independently clears the
+  frozen gates.
