@@ -6756,3 +6756,74 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_096 \
   post-reverse products into the persistent reverse kernel so operands remain
   resident and launch count falls. FlashKDA remains an offline dataflow and
   equation reference only.
+
+## 2026-08-09 [Codex] Attempt 97 two-owner post-reverse midpoint rejected at Level 2
+
+**Context**
+
+- Attempt 97 starts from accepted attempt 91 and applies the validated
+  post-reverse WY/VJP algebra with an intermediate ownership schedule. Two
+  CTAs own disjoint 32-row strips per chunk instead of attempt 95's one CTA or
+  attempt 96's four CTAs.
+- Dependency-safe launch boundaries divide the work into row-local products,
+  transpose-left products, and the final inverse product. Shared memory falls
+  to 40, 24, and 16 KiB by phase. No atomics or cross-CTA reductions are used.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_097 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact seed-4101 production gradient comparison and fresh-cache repeat.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_091 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_097 \
+  runs/kda-cuda-development/attempt-00097-twocta-postreverse-level1 \
+  --level2-order baseline-first
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_validation_097 \
+  --lane optimization --sanitizers <isolated artifact/cache arguments>
+# Executed the saved baseline-first Level-2 commands exactly once and then
+# captured two bounded production forward+backward iterations with nsys.
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_097 \
+  push -u origin kda-cuda/wy-twocta-postreverse-vjp-097
+```
+
+**Artifacts**
+
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00097-twocta-postreverse-protected-checker`, summary SHA-256 `99442dcdd8714ea7f1d29d4488f405642138729f08c9aad2ccd3cd3c80f73619`.
+- Production comparison/repeat: `runs/kda-cuda-development/diagnostics/attempt-00097-twocta-postreverse-gradient`, manifest `9f4dff89d042dec140fd29e9bd651e498456396465da8ea57547fc893bb14b12`.
+- Level 1: `runs/kda-cuda-development/attempt-00097-twocta-postreverse-level1`, manifest `021c409e9140f18a5e15f05e1c9d2f540f5ad35f61e8cde30d0cad181fac1bf0`.
+- Full sanitizer validation: `runs/kda-cuda-development/validations/validation-00026-twocta-postreverse`, summary SHA-256 `35bc7f08d9a189900269bdec8055acccb4f6014eef5e9e3d1aef3c52f46fbbe0`.
+- Level 2: `runs/kda-cuda-development/attempt-00097-twocta-postreverse-level2`, manifest `3be566d486943f70127503b329f4a8bc13cff02923f40e53632184263c28a126`.
+- Production profile: `runs/kda-cuda-development/diagnostics/attempt-00097-production-profile`, manifest `c56a5dc702a2588cd8e1837933b833fd16a87c1757396eb278f50027194e6bec`.
+- Invalid no-report profile invocation: `runs/kda-cuda-development/diagnostics/attempt-00097-production-profile-invalid-cwd-001`, manifest `ae2587b125d3d99750ad2149486eb8b04283fe9ecddff11ec15026917e2f1efb`.
+- Append-only attempt/reference index SHA-256: `844d7ccfbe57a277e1f191d6ac2c418a493a99d6ee70ee9356d9ca0382cc0f3e`.
+
+**Result**
+
+- Pushed commit `3c59d55ef4825f9c2133191383899ea1c70790aa` passes ownership 1.0,
+  the protected runtime/profile audit, runtime FLA freedom, and all four
+  sanitizers with zero errors or hazards. Output is bitwise equal to attempt
+  91, maximum gradient delta is `5.821e-11`, and the repeat is bitwise exact.
+- Level 1 advances: T=4096 forward+backward improves
+  `13.5638 -> 12.8565 ms` (5.21%) with identical 202,770,944-byte peak
+  allocation. Every important-row and memory guard passes.
+- The single baseline-first Level-2 pair measured baseline
+  `[33045, 32968, 33041, 32934, 32935]` tok/s, median 32,968, and candidate
+  `[33112, 33293, 33236, 33152, 33380]`, median 33,236. The 0.81% gain is
+  below the frozen 2% gate; peak memory is identical at 5,508.533 MiB and the
+  candidate reaches 76.09% of the fixed 43,680 tok/s reference. No retest ran.
+- Profiling shows the three post-reverse phases total 0.764 ms/iteration
+  (`0.524 + 0.200 + 0.040`), slightly slower than attempt 95's 0.755-ms
+  single fused kernel. The additional launch boundaries erase the scheduling
+  benefit. This is not statistically confirmed or an LM-quality result.
+
+**Next**
+
+- Retain attempt 91 and stop subdividing the post-reverse row ownership. A
+  further backward attempt should absorb work into an existing persistent
+  kernel so it avoids global dependency boundaries. Otherwise move to the
+  independent forward or pair dataflow boundary, transferring FlashKDA's
+  register-resident fused schedule rather than its chunk size alone.
