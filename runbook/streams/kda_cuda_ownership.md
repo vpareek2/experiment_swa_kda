@@ -5639,3 +5639,57 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_081 \
 - Preserve attempt 81 unchanged and continue from attempt 77. Keep eight-chunk
   bounded scratch; reduce group-boundary or pair/BMM traffic without widening
   the live group or replaying pair-batch-width tuning.
+
+## 2026-08-09 [agent] preserve sub-threshold in-kernel group-boundary stores
+
+**Context**
+
+- Attempt 82 starts from accepted attempt 77 and changes only
+  `nanochat/mixers/cuda_kda/chunk_wy_backward.cu`. It makes saved group
+  boundaries group-major and writes each incoming boundary from the existing
+  group WMMA kernel while that kernel loads the same state into shared memory.
+- This removes the explicit forward `copy_` and reverse `.contiguous()` copy
+  for each of eight groups without changing equations, arithmetic, group
+  width, pair/BMM geometry, or bounded scratch.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_082 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact seed-4101 production capture and fresh-cache repeat against attempt 77.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_077 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_082 \
+  runs/kda-cuda-development/attempt-00082-group-boundary-store-level1 \
+  --level2-order candidate-first
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_082 \
+  push -u origin kda-cuda/wy-group-boundary-store-082
+```
+
+**Artifacts**
+
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00082-group-boundary-store-protected-checker`, manifest `b00e7410efce5161951c96f86317747dfbe0e477155ad5bbe019cd07dcb1f227`.
+- Production comparison/repeat: `runs/kda-cuda-development/diagnostics/attempt-00082-group-boundary-store-gradient`, manifest `7354cd5b396f625ec04ddfb337584218b04bece3fade5089bdebd215996997c7`.
+- Level 1: `runs/kda-cuda-development/attempt-00082-group-boundary-store-level1`, manifest `25aeb73f93b82fbee4853ac813b7cf286aa404b7a91768acb63f4d8c008c2d4a`.
+- Append-only attempt/reference index SHA-256: `9c0dc889e2e93011190837ae95c1981daa21f292580ad26e0ac469809d51ca19`.
+
+**Result**
+
+- Pushed commit `2eeb942aab9492e91b12a79dfcfb8bd7ef2eda41`
+  passed ownership 1.0, protected runtime/profile audit, runtime FLA freedom,
+  bitwise output/all-gradient correctness, and a bitwise fresh-cache repeat.
+- Level 1 measured only a sub-threshold T=4096 forward+backward gain:
+  `17.649 -> 17.601 ms` (0.27%), below the frozen 3% advancement gate. Peak
+  allocation fell from 203,950,592 to 203,557,376 bytes (ratio 0.99807), and
+  every regression and memory guard passed.
+- No sanitizer, Level 2, profile, confirmation, or retest ran. Attempt 77
+  remains accepted; this is neither quality nor statistically confirmed
+  evidence.
+
+**Next**
+
+- Preserve attempt 82 unchanged. Continue from attempt 77 and seek a larger
+  structural removal of pair/BMM or group-boundary work; the copy fusion alone
+  is too small to retain.
