@@ -3986,3 +3986,75 @@ uv run --no-sync python scripts/kda_cuda_development.py \
 - Stop pair-batch width tuning. From exact attempt 51, fuse finalization and
   local parameter accumulation to target the profile's largest named project
   kernel while preserving ordered reductions and BF16 rounding.
+
+## 2026-08-09 [agent] accept chunk-partial finalization baseline
+
+**Context**
+
+- Attempt 53 starts from exact accepted attempt 51 and removes the full FP32
+  raw-gate-gradient history. A row-parallel finalization kernel recomputes the
+  gate derivative once per chunk and emits deterministic `[group rows, 2, 128]`
+  parameter partials; the recurrence/key path reduces those chunks in fixed
+  order without atomics.
+- This is the requested chunk-boundary recomputation/reverse-scan complete
+  WY/UT VJP path, with only `nanochat/mixers/cuda_kda/chunk_wy_backward.cu`
+  changed.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_053 \
+  --lane optimization <isolated artifact/cache arguments>
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_051 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_053 \
+  runs/kda-cuda-development/attempt-00053-finalize-partials-level1
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_validation_053 \
+  --lane optimization <isolated artifact/cache arguments> --sanitizers
+# Executed the saved baseline-first Level-2 plan exactly once, then one
+# candidate production profile.
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_053 \
+  push -u origin kda-cuda/wy-finalize-chunk-partials-053
+```
+
+**Artifacts**
+
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00053-protected-checker`, manifest `661ff0b763129c0b9b930089037c1968f786debf9730150e75170d116535d9c8`.
+- Production comparison/repeat: `runs/kda-cuda-development/diagnostics/attempt-00053-finalize-partials-gradient`, manifest `2cefa444a94a760c6708674191ca7d4ad7ef981ca7745004788fcaf793951b33`.
+- Full sanitizer validation: `runs/kda-cuda-development/validations/validation-00012-finalize-partials`, manifest `4f32f08ff8449051607d2afc54b964059ea4aa3128af25c3cc48b1c105c9830e`.
+- Level 1: `runs/kda-cuda-development/attempt-00053-finalize-partials-level1`, manifest `23d5fd882539d58790d7b0e2241dce8b4d2bb679ef92b854acb418edd99cd127`.
+- Level 2: `runs/kda-cuda-development/attempt-00053-finalize-partials-level2`, manifest `a50d63b9d81d108271c228f2f526e7992483fd87d0a998d1d9110e2849ca3272`.
+- Production profile: `runs/kda-cuda-development/diagnostics/attempt-00053-production-profile`, manifest `6cb95033a4a087e20ff4727330d89c3ea42b36b14046784b0d4a8c0a485e445b`.
+- Baseline manifest: `runs/kda-cuda-development/baseline/0d168b5621.json`, SHA-256 `34464160df5af93905913a708dcc3e4a12216ded9b6709a4174b35b82aa7e4e8`.
+- Append-only attempt/reference index SHA-256: `3676f47f861eb400fac9a240b1b826df76df475455cee430541d5e0b9fd5cd24`.
+
+**Result**
+
+- Pushed commit `0d168b5621c43218667754f55167601cc6a3f9d0`
+  passed ownership 1.0, runtime/profile audit, runtime FLA freedom, all four
+  sanitizers, frozen correctness, and a bitwise deterministic repeat. Output,
+  `dq`, `dk`, `dv`, `draw_gate`, and `dbeta` are bitwise equal to attempt 51;
+  the largest FP32 parameter-gradient delta is `2.842e-14`.
+- Level 1 advanced: T=4096 forward+backward improved
+  `22.626 -> 21.661 ms` (4.27%), and peak allocation fell from 206,064,128 to
+  204,540,416 bytes (ratio 0.99261). The T=256 forward+backward regression was
+  2.63%, within the frozen 5% guard; every guard passed.
+- The single baseline-first Level-2 pair measured baseline
+  `[27003,27071,27043,26787,27012]`, median `27012 tok/s`, and candidate
+  `[27681,27671,27599,27425,27674]`, median `27671 tok/s`: +2.44%, identical
+  `5508.533 MiB`, and 63.35% of the fixed 43,680 tok/s reference.
+- Profiling reduced finalization plus parameter work from `1.417 ms` in attempt
+  51 to `0.381 ms` per iteration. Pair packing plus accumulation is now the
+  largest named owned backward path at `1.534 ms` per iteration, excluding its
+  associated BMMs.
+- Attempt 53 is the accepted development baseline. It is not statistically
+  confirmed, official retention, a merge/default change, or quality evidence.
+
+**Next**
+
+- From exact attempt 53, target the pair pack/accumulate CUDA kernel structure
+  without replaying attempt 52's pair-batch-width tuning. Preserve stable
+  transforms, ordered reductions, BF16 rounding, and every ownership and
+  correctness gate while continuing toward 45k.
