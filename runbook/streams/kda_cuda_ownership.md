@@ -3461,3 +3461,146 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_043 \
 - Continue from attempt 43. Split target (q/k) and right transforms to reduce
   three-output kernel pressure without reintroducing the duplicated target
   exponent, then attack the still-dominant pair and parameter VJP kernels.
+
+## 2026-08-09 [agent] reject split M/A transforms
+
+**Context**
+
+- Attempt 44 split the fused target q/k transform from the right transform to
+  test whether lower per-kernel storage pressure outweighed an extra launch.
+  This was an execution-only intervention and remained bitwise equal to the
+  accepted attempt-43 implementation.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_044 \
+  --lane optimization <isolated artifact/cache arguments>
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_043 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_044 \
+  runs/kda-cuda-development/attempt-00044-ma-split-target-right-level1
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_044 \
+  push -u origin kda-cuda/wy-ma-split-target-right-044
+```
+
+**Artifacts**
+
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00044-protected-checker`, manifest `334881d6222b0d99e7afad17e6f14524b1e5b91ed435086827784708198f3308`.
+- Recovered production comparison: `runs/kda-cuda-development/diagnostics/attempt-00044-ma-split-target-right-gradient`, manifest `62b7290a9d6c03a2b3adf43970956da48652194c7cfaad827bfa0d002d1ce96d`.
+- Level 1: `runs/kda-cuda-development/attempt-00044-ma-split-target-right-level1`, manifest `634566d7e9b3e921f98dd35d8deb60066b4572684c0c009cff6bb50c67c01c79`.
+
+**Result**
+
+- Pushed commit `a3423e8ac84b84c5c698bb50ace7adcfd4d3a979`
+  passed ownership 1.0, the protected runtime/profile audit, runtime FLA
+  freedom, and the deterministic comparison. Output and every gradient were
+  bitwise equal to attempt 43.
+- Level 1 rejected the split: T=4096 forward+backward changed
+  `28.126 -> 28.364 ms` (-0.85%) at memory ratio 1.0. No retest, sanitizer,
+  or Level 2 ran.
+
+**Next**
+
+- Retain the fused attempt-43 transform and optimize the parameter and pair
+  VJP kernels instead.
+
+## 2026-08-09 [agent] accept key-major parameter VJP baseline
+
+**Context**
+
+- Attempt 45 maps parameter accumulation by key lane: each lane accumulates
+  reverse-token `A_log` work and the corresponding `dt_bias` contribution,
+  followed by one ordered shared key reduction. This removes 1,024 barriers
+  per production group while retaining deterministic accumulation.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_045 \
+  --lane optimization <isolated artifact/cache arguments> --sanitizers
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_043 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_045 \
+  runs/kda-cuda-development/attempt-00045-key-major-params-level1
+# Executed the predeclared baseline-first Level-2 pair once.
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_045 \
+  push -u origin kda-cuda/wy-vjp-key-major-params-045
+```
+
+**Artifacts**
+
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00045-protected-checker`, manifest `5069a752e488cf6ce8462f33f8e9150199fec8a4d213e421b42bbaeb5c43fef2`.
+- Production comparison/repeat: `runs/kda-cuda-development/diagnostics/attempt-00045-key-major-params-gradient`, manifest `fcdc440ee48c1b5cb7a08efd7826a877375eac957380d41b2ebcd054c62c1515`.
+- Full sanitizer validation: `runs/kda-cuda-development/validations/validation-00008-key-major-params`, manifest `7066b3ed32f7db87ee5542df625b96879e8c39c623be2e6f341e8d6e8b5f8518`.
+- Level 1: `runs/kda-cuda-development/attempt-00045-key-major-params-level1`, manifest `350e48e05428dcc685bbc8b3f74d696f5bbd348310ebe008ec0e00917d57599f`.
+- Level 2: `runs/kda-cuda-development/attempt-00045-key-major-params-level2`, manifest `43f45d3f96dc427558e71d75c4d249328cfb6b6221339af8f8e80a2899ebe898`.
+- Baseline manifest: `runs/kda-cuda-development/baseline/f0a0c0aaf9.json`, SHA-256 `bbe291e76aa0e5ac58bc18c8ee54cfaa210e31471e26feeecd57ce5e50147c52`.
+- Append-only attempt/reference index SHA-256: `9611e172fc3c5a0211a6ffaa849b374357e9b335a956754f2e0cd803e48f3773`.
+
+**Result**
+
+- Exact pushed commit `f0a0c0aaf9e8c1a98f14d2d47af5859e24fad3ed`
+  passed ownership 1.0, runtime/profile audit, runtime FLA freedom, all four
+  sanitizers, frozen gradient tolerances, and a bitwise deterministic repeat.
+  Output and all gradients except `dA_log` were bitwise equal to attempt 43;
+  `dA_log` differed only by `2.530e-12` maximum due to the declared reduction
+  order change.
+- Level 1 advanced without a retest: T=4096 forward+backward improved
+  `28.126 -> 26.037 ms` (7.43%) at memory ratio 1.0; all guards passed.
+- Level 2 measured baseline `[24399,24321,24385,24376,24461]`, median
+  `24385 tok/s`, and candidate `[25394,25454,25420,25210,25491]`, median
+  `25420 tok/s`: +4.24%, identical `5508.533 MiB`, and 58.20% of the fixed
+  43,680 tok/s reference.
+- Attempt 45 is the accepted development baseline. This is not statistical
+  confirmation, LM-quality evidence, official retention, a merge, or a
+  default change.
+
+**Next**
+
+- Profile attempt 45 once, then use the remaining dominant backward kernel to
+  choose the next algebraic strategy toward the fixed 45k objective.
+
+## 2026-08-09 [agent] attribute accepted attempt-45 backward
+
+**Context**
+
+- A single production-shape Nsight Systems attribution was scheduled after
+  attempt 45 became the accepted development baseline. The initial invocation
+  resolved sources from the coordinator directory and failed before model
+  execution; it is preserved separately as invalid.
+
+**Commands**
+
+```bash
+PYTHONPATH=/home/veer/Master/projects/experiment_swa_kda_cuda_attempt_045 \
+TORCH_EXTENSIONS_DIR=/tmp/kda045-key-major-params-ext-001 \
+nsys profile --trace=cuda,nvtx,osrt --sample=none --cpuctxsw=none \
+  --force-overwrite=true --output=<artifact>/trace \
+  /home/veer/Master/projects/experiment_swa_kda/.venv/bin/python \
+  /tmp/kda033_nsys.py
+nsys stats --report cuda_gpu_kern_sum --format csv \
+  --output <artifact>/kern <artifact>/trace.nsys-rep
+```
+
+**Artifacts**
+
+- Valid profile: `runs/kda-cuda-development/diagnostics/attempt-00045-production-profile`, manifest `b1e35fbcee62d09147967629cd5fcc7b1a737ca036687b45541c3a12de472bcd`.
+- Preserved invalid invocation: `runs/kda-cuda-development/diagnostics/attempt-00045-production-profile-invalid-001`, manifest `3765dfc0b0bbf2b74b25fb82c7923fcb276331fc0e856da87fe70e59b78bd61f`.
+
+**Result**
+
+- The parameter kernel fell from about `2.545 ms` at attempt 43 to
+  `0.255 ms` per profiled iteration at attempt 45, a 90.0% reduction.
+- The remaining dominant owned kernels are the complete pair/state VJP at
+  `4.887 ms`, boundary terms at `1.773 ms`, and finalization at `1.292 ms`.
+  This is profile attribution, not a matched speed, quality, or confirmation
+  result.
+
+**Next**
+
+- Do not replay rejected attempt-39 pair-ratio caching. First remove redundant
+  per-value decay exponentials from the boundary VJP, then return to an
+  algebraic/tiled implementation of the dominant complete pair VJP.
