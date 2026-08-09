@@ -634,39 +634,40 @@ __global__ void nanochat_kda_wy_backward_parameter_c64_kernel(
     float* ddt_partial,
     int chunk_start,
     int group_chunks) {
-  const int owner = blockIdx.x;
-  if (owner >= kRecurrences * kDim || threadIdx.x != 0) {
+  const int recurrence = blockIdx.x;
+  const int key = threadIdx.x;
+  if (recurrence >= kRecurrences || key >= kDim) {
     return;
   }
-  const int key = owner % kDim;
-  const int recurrence = owner / kDim;
   const int h = recurrence % kHeads;
   const int b = recurrence / kHeads;
+  __shared__ float raw_gradients[kDim];
+  __shared__ float biased_gates[kDim];
   float bias_gradient = ddt_partial[(recurrence * kDim) + key];
+  float A_gradient = dA_partial[recurrence];
   for (int local_token = group_chunks * kChunk; local_token-- > 0;) {
     const int local_chunk = local_token / kChunk;
     const int row = local_token - local_chunk * kChunk;
+    const int token = (chunk_start + local_chunk) * kChunk + row;
     const int local_n = recurrence * group_chunks + local_chunk;
-    bias_gradient += raw_gate_gradient[
+    const int64_t input = input_vector_index(b, token, h, key);
+    const float raw_gradient = raw_gate_gradient[
         chunk_vector_index(local_n, row, key)];
+    raw_gradients[key] = raw_gradient;
+    biased_gates[key] = __bfloat162float(raw_gate[input]) +
+        dt_bias[h * kDim + key];
+    bias_gradient += raw_gradient;
+    __syncthreads();
+    if (key == 0) {
+      for (int reduction_key = 0; reduction_key < kDim; ++reduction_key) {
+        A_gradient += raw_gradients[reduction_key] *
+            biased_gates[reduction_key];
+      }
+    }
+    __syncthreads();
   }
   ddt_partial[(recurrence * kDim) + key] = bias_gradient;
   if (key == 0) {
-    float A_gradient = dA_partial[recurrence];
-    for (int local_token = group_chunks * kChunk; local_token-- > 0;) {
-      const int local_chunk = local_token / kChunk;
-      const int row = local_token - local_chunk * kChunk;
-      const int token = (chunk_start + local_chunk) * kChunk + row;
-      const int local_n = recurrence * group_chunks + local_chunk;
-      for (int reduction_key = 0; reduction_key < kDim; ++reduction_key) {
-        const int64_t input = input_vector_index(b, token, h, reduction_key);
-        const float biased_gate = __bfloat162float(raw_gate[input]) +
-            dt_bias[h * kDim + reduction_key];
-        const float raw_gradient = raw_gate_gradient[
-            chunk_vector_index(local_n, row, reduction_key)];
-        A_gradient += raw_gradient * biased_gate;
-      }
-    }
     dA_partial[recurrence] = A_gradient;
   }
 }
@@ -1035,7 +1036,7 @@ nanochat_kda_chunk_wy_backward_c64(
         chunk_start, kGroupChunks);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     nanochat_kda_wy_backward_parameter_c64_kernel<<<
-        kRecurrences * kDim, 1, 0, stream>>>(
+        kRecurrences, kDim, 0, stream>>>(
         reinterpret_cast<const __nv_bfloat16*>(
             raw_gate.data_ptr<at::BFloat16>()),
         dt_bias.data_ptr<float>(), raw_gate_gradient_group.data_ptr<float>(),
