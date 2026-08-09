@@ -2001,3 +2001,52 @@ uv run --no-sync python -m pytest -q tests/test_kda_cuda_development.py
 - Keep `6c847515...` as the confirmed comparison anchor, preserve every future
   attempt, and defer another nine-pair confirmation until the next major
   strategy boundary, four-hour checkpoint, plateau, or final candidate.
+
+## 2026-08-09 [agent] establish matched FLA Triton throughput target
+
+**Context**
+
+- Before beginning the FP32 C=64 WY/UT rewrite, measured the external FLA
+  implementation as a separate reference ceiling. FLA remains forbidden as a
+  candidate runtime dependency; this benchmark did not modify candidate source,
+  merge a branch, change the default backend, or evaluate LM quality.
+- Used exact current Level-2 model conditions: six KDA layers, B=2, H=3 derived
+  from depth 6/head dimension 128, sequence length 4096, global batch 32768,
+  BF16, seed 42, 2 warmup plus 5 measured optimizer steps. Set
+  `FLA_FLASH_KDA=0`, `FLA_TILELANG=0`, and `TORCH_COMPILE_DISABLE=1`; the
+  resolved backend was `fla_triton` with `fla-core 0.5.2`.
+
+**Artifacts**
+
+- `runs/kda-cuda-development/reference-benchmarks/fla-triton-001`.
+- Predeclared plan SHA-256:
+  `30675429377db428ed683f1583b32dd9d9ad44bce852892d165f565a4ec0e412`.
+- Final manifest SHA-256:
+  `d0bbd7a4759d03299e194b5a8ffcb17f84041aa12c2fe0ad23791cfb8926df4d`.
+- Append-only attempt/reference index SHA-256 after recording this benchmark:
+  `df7cea5e95cf21d163f49833da5559c7db54b0d76420f37010b1d7848868d1c2`.
+
+**Result**
+
+- Five valid run medians were `43750`, `43697`, `43613`, `43629`, and
+  `43680 tok/s`; the median-of-medians target is therefore **43680 tok/s**
+  with observed run-median range `43613-43750 tok/s`.
+- Median full-model peak allocation was `5550.471 MiB` (first compiled run
+  `5548.471 MiB`; subsequent runs `5550.471 MiB`).
+- Exact confirmed project-owned development commit `6c847515...` has a
+  confirmation-2 candidate median of `7333 tok/s` and `5511.408 MiB` peak.
+  The FLA target is `5.9566x` current project throughput, so the project-owned
+  path needs approximately 495.7% additional throughput to exceed it. The
+  project path currently uses about `39.063 MiB` less peak allocation.
+- Step 0 of the first FLA process included Triton compilation (`310 tok/s`),
+  but the two declared warmups excluded it from the five measured steps; all
+  measured steps were stable around 43.4-43.9k tok/s. Later processes reused
+  the reference cache and produced the same steady-state band.
+
+**Next**
+
+- Use `43680 tok/s` as the matched full-model throughput goal for project-owned
+  CUDA. Continue reporting both absolute tok/s and fraction of this target.
+- Do not import or link FLA in a candidate. Pursue the independently implemented
+  C=64 FP32 WY/UT path and preserve the current correctness, ownership,
+  sanitizer, memory, and confirmation gates.
