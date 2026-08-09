@@ -5518,3 +5518,61 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_079 \
   warp-pair barriers in the forward kernels. Prefer an axis that reduces
   pair-pack/accumulate traffic or group-boundary WMMA work without adding
   cross-warp synchronization.
+
+## 2026-08-09 [agent] reject shared group-boundary decay
+
+**Context**
+
+- Attempt 80 starts from accepted attempt 77 and changes only
+  `nanochat/mixers/cuda_kda/chunk_wy_backward.cu`. The group-boundary WMMA
+  kernel computes each chunk-end decay once per key into 128 shared FP32
+  values instead of calling the same `expf` independently for all 16 value
+  columns. Every state update retains the same multiply/add expression.
+- The intervention adds one CTA barrier per reconstructed chunk but does not
+  change WMMA, pair scheduling, equations, history, or allocation.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_080 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact seed-4101 B=2/H=3/T=4096 production capture against attempt 77,
+# followed by an independent candidate capture with fresh compiler caches.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_077 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_080 \
+  runs/kda-cuda-development/attempt-00080-boundary-decay-level1 \
+  --level2-order candidate-first
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_080 \
+  push -u origin kda-cuda/wy-boundary-decay-share-080
+```
+
+**Artifacts**
+
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00080-boundary-decay-protected-checker`, manifest `ba45e216610fe57aade33bd6bf3971d419c8a0691a81c70987c0b48ad6e8e081`.
+- Production comparison/repeat: `runs/kda-cuda-development/diagnostics/attempt-00080-boundary-decay-gradient`, manifest `03847a6c9f92536bb933ce72a8e645b8e3ba84ee621bfed8fac57e47e0110160`.
+- Level 1: `runs/kda-cuda-development/attempt-00080-boundary-decay-level1`, manifest `cf0d026441130484d626d0ef84369290a46ed6c47d18408773b7495775023870`.
+- Append-only attempt/reference index SHA-256: `ff192523ac8337cf564f5273a550de44b272f1c637e90b66d56843c0413e58cb`.
+
+**Result**
+
+- Pushed commit `1efc9391316e236796a59f62e8a47da2adfa4048`
+  passed ownership 1.0, protected runtime/profile audit, runtime FLA freedom,
+  bitwise output/all-gradient correctness against attempt 77, and a bitwise
+  fresh-cache repeat.
+- Level 1 rejected the candidate. T=4096 forward+backward regressed
+  `17.257 -> 17.758 ms` (2.90%), while memory ratio remained 1.0. The frozen
+  important-regression guard also failed because unchanged T=1024 forward
+  measured `4.115 -> 4.944 ms` (+20.17%). That unrelated row is preserved as
+  uncertainty and was not retested or used to rescue the backward result.
+- No sanitizer, Level 2, profile, confirmation, or retest ran. Sharing the
+  decay exponentials did not overcome the added per-chunk CTA barrier. Attempt
+  77 remains the accepted development baseline; this is neither quality nor
+  statistically confirmed evidence.
+
+**Next**
+
+- Preserve attempt 80 unchanged and continue from attempt 77. Avoid adding a
+  CTA-wide barrier solely to share the group-boundary decay. Target a larger
+  structural reduction in group-boundary WMMA or pair/BMM traffic.
