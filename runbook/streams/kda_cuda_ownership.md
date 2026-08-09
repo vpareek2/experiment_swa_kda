@@ -2872,3 +2872,95 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_033 \
   full token history or changing equation order, then rerun exact gradients and
   matched Level 1. Keep Level 2 and sanitizer confirmation gated on advancement
   or a declared strategy boundary.
+
+## 2026-08-09 [agent] accept local raw-gradient WY VJP baseline
+
+**Context**
+
+- A bounded Nsight Systems production profile of attempt 33 attributed 67.9%
+  of observed kernel time to eight launches of its parameter-gradient kernel:
+  each group recomputed sigmoid and raw-gate derivatives already produced by
+  finalization.
+- Attempt 34 changes only that lifetime. Finalization retains one group-local
+  FP32 raw-gate-gradient buffer, and the deterministic reverse parameter
+  reduction consumes it before the group is released.
+
+**Commands**
+
+```bash
+nsys profile --trace=cuda,nvtx,osrt --sample=none --cpuctxsw=none \
+  <exact B=2/H=3/T=4096 attempt-33 helper>
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_034 \
+  --lane optimization <isolated artifact/cache arguments> --sanitizers
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_028 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_034 \
+  runs/kda-cuda-development/attempt-00034-local-raw-gradient-level1
+# Executed the predeclared baseline-first Level-2 pair once after all gates.
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_034 \
+  push -u origin kda-cuda/wy-vjp-local-raw-grad-034
+```
+
+**Artifacts**
+
+- Attempt-33 production profile:
+  `runs/kda-cuda-development/diagnostics/attempt-00033-production-profile`,
+  manifest SHA-256
+  `9c39f2c26fc4964415731aae28b1a8fd0193059e752310aa87c2e2d2507a8a3a`.
+- Initial protected checker:
+  `runs/kda-cuda-development/diagnostics/attempt-00034-protected-checker`,
+  manifest SHA-256
+  `6443c0e4f023f4dc0d89392297b8da1d0acdad3e5d7cbf407a996db3a5c7d17d`.
+- Exact production comparison and repeat:
+  `runs/kda-cuda-development/diagnostics/attempt-00034-local-raw-gradient-exact`,
+  manifest SHA-256
+  `cd510bea8cb202a1e463efa08186b874c31e9719f6585604ce17cb2a6a214589`.
+- Full protected checker and all four sanitizers:
+  `runs/kda-cuda-development/validations/validation-00004-local-raw-gradient`,
+  manifest SHA-256
+  `cae4643b1320262825eaf48d732c71da8e8751f1f36335fc808f245cbc943161`.
+- Matched Level 1:
+  `runs/kda-cuda-development/attempt-00034-local-raw-gradient-level1`,
+  manifest SHA-256
+  `08b67b5775ca80f1fee830ce7aae238aa0c1e86176b04bb0049f5fb324dea3e9`.
+- Baseline-first Level-2 pair:
+  `runs/kda-cuda-development/attempt-00034-local-raw-gradient-level1/level2-execution`,
+  manifest SHA-256
+  `19fc41ddd14d813ac1889e1ae6bb80c739b7b0eff840df0be9fb949c716007e5`.
+- Development-baseline manifest:
+  `runs/kda-cuda-development/baseline/c46ac8d5a.json`, SHA-256
+  `f31fcbe614a3cad579460a87625b111abafdb06ba0b855055da1921048f6d912`.
+- Append-only attempt/reference index SHA-256:
+  `6c81673441cd5ad1867dd8d9736e2f1a67205dfcb0a61377d438005dc8d77004`.
+
+**Result**
+
+- Exact pushed commit `c46ac8d5aefdca82cd4fa2b38ecf8570f8cc1b13`
+  passed ownership 1.0, runtime/profile audit, runtime FLA freedom, and all four
+  sanitizers with zero-error summaries. Output and all seven production
+  gradients are bitwise identical to attempt 33; the deterministic repeat has
+  the same tensor-bundle SHA-256.
+- Level 1 advanced: T=4096 forward+backward improved
+  `58.732 -> 43.429 ms` (26.06%), with `1.0231x` peak allocation. Every other
+  runtime row stayed within the 5% limit; T=4096 forward-only was 3.47% slower.
+- The baseline-first Level-2 pair measured baseline
+  `[15873,15865,15873,15889,15890]`, median `15873 tok/s`, and candidate
+  `[19031,19014,18994,18990,19009]`, median `19009 tok/s`: a 19.76% point
+  improvement. Both reported `5508.533 MiB` peak. The candidate is 43.52% of
+  the matched `43680 tok/s` FLA target.
+- Two non-measurement bookkeeping failures are preserved: the first Level-2
+  wrapper resolved relative artifact paths from the baseline worktree and
+  stopped before launching training; the first derived finalization padded an
+  abbreviated candidate SHA with zeros. The raw pair was not rerun, and the
+  final summary was regenerated with the Git-resolved full SHA.
+- Attempt 34 is the accepted development baseline. It is not statistical
+  confirmation, official retention, a quality result, merge, or default
+  change. The official milestone remains `4d1a3b231...`.
+
+**Next**
+
+- Continue from `c46ac8d5...`. Profile the exact production backward after the
+  dominant parameter kernel removal, then attack the remaining pair VJP and
+  BMM/dispatch cost without restoring full histories or changing reduction
+  order. Continue toward at least 45k; do not treat 19k as a stopping point.
