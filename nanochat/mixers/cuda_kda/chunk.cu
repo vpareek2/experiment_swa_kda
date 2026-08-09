@@ -46,6 +46,28 @@ __device__ __forceinline__ int64_t history_index(
   return (((((b * heads + h) * (length + 1) + t) * value_dim + v) * key_dim) + k);
 }
 
+__device__ __forceinline__ int64_t boundary_history_index(
+    int64_t b, int64_t h, int64_t boundary, int64_t v, int64_t k,
+    int64_t heads, int64_t boundary_count,
+    int64_t value_dim, int64_t key_dim) {
+  return (((((b * heads + h) * boundary_count + boundary) * value_dim + v) *
+           key_dim) + k);
+}
+
+__device__ __forceinline__ int64_t local_history_index(
+    int64_t b, int64_t h, int64_t local_token, int64_t v, int64_t k,
+    int64_t heads, int64_t chunk_capacity,
+    int64_t value_dim, int64_t key_dim) {
+  return (((((b * heads + h) * (chunk_capacity + 1) + local_token) *
+           value_dim + v) * key_dim) + k);
+}
+
+__device__ __forceinline__ int64_t local_residual_index(
+    int64_t b, int64_t local_token, int64_t h, int64_t v,
+    int64_t heads, int64_t chunk_capacity, int64_t value_dim) {
+  return ((((b * chunk_capacity + local_token) * heads + h) * value_dim) + v);
+}
+
 __global__ void nanochat_kda_chunk_preprocess_kernel(
     const __nv_bfloat16* q,
     const __nv_bfloat16* k,
@@ -404,18 +426,23 @@ __global__ void nanochat_kda_chunk_forward_kernel(
   state[state_offset] = current_state;
 }
 
-__global__ void nanochat_kda_chunk_history_128_kernel(
+// Store only the state at fixed reverse-chunk boundaries.  The previous
+// production path materialized [B,H,T+1,V,K] (about 1.5 GiB at T=4096).
+// Boundary states are sufficient because each reverse chunk deterministically
+// recomputes its 32 local token states immediately before consuming them.
+__global__ void nanochat_kda_chunk_boundary_history_128_kernel(
     const __nv_bfloat16* v,
     const __nv_bfloat16* beta_logits,
     const float* normalized_k,
     const float* decay_exponential,
     const float* initial_state,
-    float* state_history,
-    float* residual_history,
+    float* boundary_history,
     int64_t batch,
     int64_t length,
     int64_t heads,
-    int64_t value_dim) {
+    int64_t value_dim,
+    int64_t chunk_capacity,
+    int64_t boundary_count) {
   const int64_t block = blockIdx.x;
   if (block >= batch * heads * value_dim) {
     return;
@@ -433,8 +460,9 @@ __global__ void nanochat_kda_chunk_history_128_kernel(
   const int64_t state = state_index(
       b, h, value, key, heads, value_dim, key_dim);
   float current_state = initial_state == nullptr ? 0.0f : initial_state[state];
-  state_history[history_index(
-      b, h, 0, value, key, heads, length, value_dim, key_dim)] = current_state;
+  boundary_history[boundary_history_index(
+      b, h, 0, value, key, heads, boundary_count,
+      value_dim, key_dim)] = current_state;
   __syncthreads();
 
   for (int64_t token = 0; token < length; ++token) {
@@ -454,7 +482,6 @@ __global__ void nanochat_kda_chunk_history_128_kernel(
       const int64_t value_offset = v_index(
           b, token, h, value, length, heads, value_dim);
       residual_shared = __bfloat162float(v[value_offset]) - prediction;
-      residual_history[value_offset] = residual_shared;
       const int64_t beta_offset = (b * length + token) * heads + h;
       beta_shared = chunk_sigmoid(__bfloat162float(beta_logits[beta_offset]));
     }
@@ -462,9 +489,88 @@ __global__ void nanochat_kda_chunk_history_128_kernel(
 
     current_state = decayed_state +
         beta_shared * normalized_key * residual_shared;
-    state_history[history_index(
-        b, h, token + 1, value, key,
-        heads, length, value_dim, key_dim)] = current_state;
+    const int64_t next_token = token + 1;
+    if (next_token % chunk_capacity == 0 || next_token == length) {
+      const int64_t boundary = token / chunk_capacity + 1;
+      boundary_history[boundary_history_index(
+          b, h, boundary, value, key, heads, boundary_count,
+          value_dim, key_dim)] = current_state;
+    }
+    __syncthreads();
+  }
+}
+
+__global__ void nanochat_kda_chunk_recompute_local_history_128_kernel(
+    const __nv_bfloat16* v,
+    const __nv_bfloat16* beta_logits,
+    const float* normalized_k,
+    const float* decay_exponential,
+    const float* boundary_history,
+    float* local_state_history,
+    float* local_residual_history,
+    int64_t batch,
+    int64_t length,
+    int64_t heads,
+    int64_t value_dim,
+    int64_t chunk_start,
+    int64_t chunk_end,
+    int64_t chunk_capacity,
+    int64_t boundary_count) {
+  const int64_t block = blockIdx.x;
+  if (block >= batch * heads * value_dim) {
+    return;
+  }
+  const int64_t value = block % value_dim;
+  const int64_t recurrence = block / value_dim;
+  const int64_t h = recurrence % heads;
+  const int64_t b = recurrence / heads;
+  const int64_t key = threadIdx.x;
+  constexpr int64_t key_dim = 128;
+  __shared__ float contribution[128];
+  __shared__ float residual_shared;
+  __shared__ float beta_shared;
+
+  const int64_t boundary = chunk_start / chunk_capacity;
+  float current_state = boundary_history[boundary_history_index(
+      b, h, boundary, value, key, heads, boundary_count,
+      value_dim, key_dim)];
+  local_state_history[local_history_index(
+      b, h, 0, value, key, heads, chunk_capacity,
+      value_dim, key_dim)] = current_state;
+  __syncthreads();
+
+  for (int64_t token = chunk_start; token < chunk_end; ++token) {
+    const int64_t local_token = token - chunk_start;
+    const int64_t q_base = q_index(
+        b, token, h, 0, length, heads, key_dim);
+    const float normalized_key = normalized_k[q_base + key];
+    const float decay_factor = decay_exponential[q_base + key];
+    const float decayed_state = current_state * decay_factor;
+    contribution[key] = (normalized_key * current_state) * decay_factor;
+    __syncthreads();
+
+    if (key == 0) {
+      float prediction = 0.0f;
+      for (int64_t reduction_key = 0; reduction_key < key_dim;
+           ++reduction_key) {
+        prediction += contribution[reduction_key];
+      }
+      const int64_t value_offset = v_index(
+          b, token, h, value, length, heads, value_dim);
+      residual_shared = __bfloat162float(v[value_offset]) - prediction;
+      local_residual_history[local_residual_index(
+          b, local_token, h, value, heads, chunk_capacity, value_dim)] =
+          residual_shared;
+      const int64_t beta_offset = (b * length + token) * heads + h;
+      beta_shared = chunk_sigmoid(__bfloat162float(beta_logits[beta_offset]));
+    }
+    __syncthreads();
+
+    current_state = decayed_state +
+        beta_shared * normalized_key * residual_shared;
+    local_state_history[local_history_index(
+        b, h, local_token + 1, value, key, heads, chunk_capacity,
+        value_dim, key_dim)] = current_state;
     __syncthreads();
   }
 }
@@ -1019,8 +1125,8 @@ __global__ void nanochat_kda_chunk_backward_kernel(
     const float* decay_exponential,
     const __nv_bfloat16* grad_output,
     __nv_bfloat16* dv,
-    const float* state_history,
-    const float* residual_history,
+    const float* local_state_history,
+    const float* local_residual_history,
     float* state_adjoint,
     float* residual_adjoint,
     float* query_tile_partial,
@@ -1088,11 +1194,11 @@ __global__ void nanochat_kda_chunk_backward_kernel(
         const int64_t value = value_start + local_value;
         const int64_t value_offset = v_index(
             b, token, h, value, length, heads, value_dim);
-        const int64_t history = history_index(
-            b, h, token + 1, value, key,
-            heads, length, value_dim, key_dim);
+        const int64_t history = local_history_index(
+            b, h, local_token + 1, value, key,
+            heads, chunk_capacity, value_dim, key_dim);
         partial += __bfloat162float(grad_output[value_offset]) *
-            state_history[history];
+            local_state_history[history];
       }
       const int64_t partial_offset =
           (((((tile * batch + b) * chunk_capacity + local_token) * heads + h) *
@@ -1107,8 +1213,8 @@ __global__ void nanochat_kda_chunk_backward_kernel(
       const int64_t value = value_start + lane;
       float gradient = 0.0f;
       float beta_partial = 0.0f;
-      const float residual = residual_history[v_index(
-          b, token, h, value, length, heads, value_dim)];
+      const float residual = local_residual_history[local_residual_index(
+          b, local_token, h, value, heads, chunk_capacity, value_dim)];
       for (int64_t key = 0; key < key_dim; ++key) {
         const int64_t state = state_index(
             b, h, value, key, heads, value_dim, key_dim);
@@ -1148,13 +1254,13 @@ __global__ void nanochat_kda_chunk_backward_kernel(
         const int64_t value = value_start + local_value;
         const int64_t state = state_index(
             b, h, value, key, heads, value_dim, key_dim);
-        const float residual = residual_history[v_index(
-            b, token, h, value, length, heads, value_dim)];
+        const float residual = local_residual_history[local_residual_index(
+            b, local_token, h, value, heads, chunk_capacity, value_dim)];
         const float residual_gradient = residual_adjoint[
             (b * heads + h) * value_dim + value];
-        const float previous = state_history[history_index(
-            b, h, token, value, key,
-            heads, length, value_dim, key_dim)];
+        const float previous = local_state_history[local_history_index(
+            b, h, local_token, value, key,
+            heads, chunk_capacity, value_dim, key_dim)];
         partial += state_adjoint[state] * beta_shared * residual -
             residual_gradient * previous * decay_factor;
       }
@@ -1180,9 +1286,9 @@ __global__ void nanochat_kda_chunk_backward_kernel(
             b, h, value, key, heads, value_dim, key_dim);
         const float residual_gradient = residual_adjoint[
             (b * heads + h) * value_dim + value];
-        const float previous = state_history[history_index(
-            b, h, token, value, key,
-            heads, length, value_dim, key_dim)];
+        const float previous = local_state_history[local_history_index(
+            b, h, local_token, value, key,
+            heads, chunk_capacity, value_dim, key_dim)];
         const float decayed_state = previous * decay_factor;
         const float decayed_gradient = state_adjoint[state] -
             residual_gradient * normalized_key;
@@ -1726,10 +1832,11 @@ chunk_backward_cuda(
   at::Tensor normalized_k = at::empty(k.sizes(), A_log.options());
   at::Tensor gate_sigmoid = at::empty(raw_gate.sizes(), A_log.options());
   at::Tensor decay_exponential = at::empty(raw_gate.sizes(), A_log.options());
-  at::Tensor state_history = at::empty(
-      {batch, heads, length + 1, value_dim, key_dim}, A_log.options());
-  at::Tensor residual_history = at::empty(
-      {batch, length, heads, value_dim}, A_log.options());
+  at::Tensor state_history;
+  at::Tensor residual_history;
+  at::Tensor boundary_history;
+  at::Tensor local_state_history;
+  at::Tensor local_residual_history;
   at::Tensor state_adjoint = at::empty(
       {batch, heads, value_dim, key_dim}, A_log.options());
   at::Tensor normalized_adjoint = at::empty(q.sizes(), A_log.options());
@@ -1744,6 +1851,14 @@ chunk_backward_cuda(
   if (key_dim == 128 && value_dim == 128) {
     constexpr int64_t tile_count = 8;
     constexpr int64_t chunk_capacity = 32;
+    const int64_t chunk_count =
+        (length + chunk_capacity - 1) / chunk_capacity;
+    boundary_history = at::empty(
+        {batch, heads, chunk_count + 1, value_dim, key_dim}, A_log.options());
+    local_state_history = at::empty(
+        {batch, heads, chunk_capacity + 1, value_dim, key_dim}, A_log.options());
+    local_residual_history = at::empty(
+        {batch, chunk_capacity, heads, value_dim}, A_log.options());
     query_tile_partial = at::empty(
         {tile_count, batch, chunk_capacity, heads, key_dim}, A_log.options());
     key_tile_partial = at::empty(
@@ -1752,6 +1867,11 @@ chunk_backward_cuda(
         {tile_count, batch, chunk_capacity, heads, key_dim}, A_log.options());
     beta_tile_partial = at::empty(
         {tile_count, batch, chunk_capacity, heads}, A_log.options());
+  } else {
+    state_history = at::empty(
+        {batch, heads, length + 1, value_dim, key_dim}, A_log.options());
+    residual_history = at::empty(
+        {batch, length, heads, value_dim}, A_log.options());
   }
 
   const int threads = 1024;
@@ -1784,16 +1904,20 @@ chunk_backward_cuda(
     if (key_dim == 128 && value_dim == 128) {
       constexpr int history_threads = 128;
       const int64_t history_count = recurrence_count * value_dim;
-      nanochat_kda_chunk_history_128_kernel<<<
+      constexpr int64_t chunk_capacity = 32;
+      const int64_t chunk_count =
+          (length + chunk_capacity - 1) / chunk_capacity;
+      const int64_t boundary_count = chunk_count + 1;
+      nanochat_kda_chunk_boundary_history_128_kernel<<<
           static_cast<int>(history_count), history_threads, 0, stream>>>(
           reinterpret_cast<const __nv_bfloat16*>(contiguous_v.data_ptr<at::BFloat16>()),
           reinterpret_cast<const __nv_bfloat16*>(contiguous_beta_logits.data_ptr<at::BFloat16>()),
           normalized_k.data_ptr<float>(),
           decay_exponential.data_ptr<float>(),
           initial_state.has_value() ? initial_state->data_ptr<float>() : nullptr,
-          state_history.data_ptr<float>(),
-          residual_history.data_ptr<float>(),
-          batch, length, heads, value_dim);
+          boundary_history.data_ptr<float>(),
+          batch, length, heads, value_dim,
+          chunk_capacity, boundary_count);
       C10_CUDA_KERNEL_LAUNCH_CHECK();
       const int64_t state_count = recurrence_count * value_dim * key_dim;
       const int state_blocks = static_cast<int>(
@@ -1806,9 +1930,6 @@ chunk_backward_cuda(
       C10_CUDA_KERNEL_LAUNCH_CHECK();
 
       constexpr int64_t tile_count = 8;
-      constexpr int64_t chunk_capacity = 32;
-      const int64_t chunk_count =
-          (length + chunk_capacity - 1) / chunk_capacity;
       for (int64_t chunk = chunk_count; chunk-- > 0;) {
         const int64_t chunk_start = chunk * chunk_capacity;
         const int64_t chunk_end =
@@ -1816,6 +1937,21 @@ chunk_backward_cuda(
             ? chunk_start + chunk_capacity
             : length;
         const int64_t chunk_length = chunk_end - chunk_start;
+        nanochat_kda_chunk_recompute_local_history_128_kernel<<<
+            static_cast<int>(history_count), history_threads, 0, stream>>>(
+            reinterpret_cast<const __nv_bfloat16*>(
+                contiguous_v.data_ptr<at::BFloat16>()),
+            reinterpret_cast<const __nv_bfloat16*>(
+                contiguous_beta_logits.data_ptr<at::BFloat16>()),
+            normalized_k.data_ptr<float>(),
+            decay_exponential.data_ptr<float>(),
+            boundary_history.data_ptr<float>(),
+            local_state_history.data_ptr<float>(),
+            local_residual_history.data_ptr<float>(),
+            batch, length, heads, value_dim,
+            chunk_start, chunk_end, chunk_capacity, boundary_count);
+        C10_CUDA_KERNEL_LAUNCH_CHECK();
+
         nanochat_kda_chunk_backward_kernel<<<
             static_cast<int>(recurrence_count * tile_count),
             threads, 0, stream>>>(
@@ -1827,8 +1963,8 @@ chunk_backward_cuda(
             reinterpret_cast<const __nv_bfloat16*>(
                 contiguous_grad_output.data_ptr<at::BFloat16>()),
             reinterpret_cast<__nv_bfloat16*>(dv.data_ptr<at::BFloat16>()),
-            state_history.data_ptr<float>(),
-            residual_history.data_ptr<float>(),
+            local_state_history.data_ptr<float>(),
+            local_residual_history.data_ptr<float>(),
             state_adjoint.data_ptr<float>(),
             residual_adjoint.data_ptr<float>(),
             query_tile_partial.data_ptr<float>(),
