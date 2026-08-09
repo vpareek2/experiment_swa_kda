@@ -3351,3 +3351,113 @@ uv run --no-sync python scripts/kda_cuda_development.py \
   algebraic M/A construction redesign (for example, matched transformed BMMs)
   with explicit recurrence-output/gradient tolerances, deterministic repeats,
   and the full protected gates before any performance claim.
+
+## 2026-08-09 [agent] preserve stable tiled-BMM M/A strategy boundary
+
+**Context**
+
+- Attempt 42 replaces both scalar C64 M/A builders with stable 16x16
+  transformed FP32 BMM tiles. A per-channel boundary center keeps every
+  exponent finite even at the frozen `lower_bound=-5`; the worst diagonal-tile
+  span is 15 steps. Existing P storage supplies both transform buffers and is
+  rebuilt exactly afterward, so no additional peak allocation is introduced.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_042 \
+  --lane optimization <isolated artifact/cache arguments>
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_038 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_042 \
+  runs/kda-cuda-development/attempt-00042-ma-tiled-bmm-level1
+nsys profile --trace=cuda,nvtx,osrt --sample=none --cpuctxsw=none \
+  <exact B=2/H=3/T=4096 attempt-42 helper>
+```
+
+**Artifacts**
+
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00042-protected-checker`, manifest `2708de56323f9c3bce43d036cc808793e43cb3542d6520a69c5be3ef5b59b7d6`.
+- Production output/gradients and repeat: `runs/kda-cuda-development/diagnostics/attempt-00042-ma-tiled-bmm-gradient`, manifest `be8ddc9ea877749682112c8aabffff151b17e551f50eca938df29f3f59fd442a`.
+- Level 1: `runs/kda-cuda-development/attempt-00042-ma-tiled-bmm-level1`, manifest `5f52fa10b86591ff7ede9ab8b19f2528fecf5e743547da06c4d8d3a501624d74`.
+- Profile: `runs/kda-cuda-development/diagnostics/attempt-00042-production-profile`, manifest `bb432bc30971ee7d67b5d71265a727edbd3e4c47a433596617441c73df582107`.
+
+**Result**
+
+- Pushed commit `332e0be865b67937d6d9231c4e4dd5495fb42e52` passed
+  ownership 1.0, runtime/profile gates, runtime FLA freedom, extreme-gate
+  finiteness, and a bitwise deterministic repeat. Against accepted attempt 38,
+  output max absolute difference was `6.1035e-05` and the largest gradient
+  difference was `1.819e-12`, far inside frozen `0.005/0.02` tolerances.
+- Level 1 was a near miss, not a win: T=4096 forward+backward improved
+  `29.071 -> 28.319 ms` (2.59%), below the 3% gate, with memory ratio 1.0 and
+  all guard rows passing. No retest, sanitizer, or Level 2 ran.
+- The boundary profile reduced M/A work from about `3.73 ms` at attempt 38 to
+  about `1.85 ms` per iteration; separate target transforms still duplicated
+  an exponent. Attempt 42 is a correct equation/performance milestone, not an
+  accepted baseline or confirmation.
+
+**Next**
+
+- Fuse q-left and k-left target transforms, retain stable right transforms, and
+  compare the cumulative result directly against accepted attempt 38.
+
+## 2026-08-09 [agent] accept fused stable M/A transform baseline
+
+**Context**
+
+- Attempt 43 fuses q-left, k-left, and right tile operands into one pass and
+  reuses three quarters of P storage as scratch. It is bitwise identical to
+  attempt 42, so the change affects execution only.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_043 \
+  --lane optimization <isolated artifact/cache arguments> --sanitizers
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_038 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_043 \
+  runs/kda-cuda-development/attempt-00043-ma-fused-transform-level1
+# Executed the predeclared baseline-first Level-2 pair once.
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_043 \
+  push -u origin kda-cuda/wy-ma-fused-transform-043
+```
+
+**Artifacts**
+
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00043-protected-checker`, manifest `9f195bdead6d7d7ee9b6bfda5b50a0af2d5eedc1b21c888971247f4c282a6ffd`.
+- Production comparison/repeat: `runs/kda-cuda-development/diagnostics/attempt-00043-ma-fused-transform-gradient`, manifest `dff463c1a4ff0bcc340a392cbea96045f7e16573757bac3ba3c98e1a23827c0b`.
+- Full sanitizer validation: `runs/kda-cuda-development/validations/validation-00007-ma-fused-transform`, manifest `ffd7a950d9600cb69b397004acf9aa72d9337b4fbf9edf525efaa90d26369ea0`.
+- Level 1: `runs/kda-cuda-development/attempt-00043-ma-fused-transform-level1`, manifest `143cee2a74fc2843371ecae25b6923cc45331e7ff5ff130dee520a0eb294e821`.
+- Level 2: `runs/kda-cuda-development/attempt-00043-ma-fused-transform-level2`, manifest `8b2564c66f86c6895d77bba54ecb82ec631cfba63a5cb1e310fec3896f46331f`.
+- Production profile: `runs/kda-cuda-development/diagnostics/attempt-00043-production-profile`, manifest `b71cb260838ab0cd46c562173e09b90b352071bc8b42beaee40ae6b0e9ac2273`.
+- Baseline manifest: `runs/kda-cuda-development/baseline/223e58634c.json`, SHA-256 `3509decf116505bde745b7371590fb396dbff19dc0e93c8068d0ea311528ef04`.
+- Append-only attempt/reference index SHA-256: `ec9ea49c574f672c5f1f100cfd5865dfd2bc3c447687b9770a447abd9311239c`.
+
+**Result**
+
+- Exact pushed commit `223e58634c6e03ef3cb4cc34960fc7be7c526af3`
+  passed ownership 1.0, runtime/profile audit, runtime FLA freedom, all four
+  sanitizers, and a bitwise deterministic production repeat. Its output and
+  all gradients are bitwise identical to attempt 42 and tolerance-correct
+  against accepted attempt 38.
+- Level 1 advanced without a retest: T=4096 forward+backward improved
+  `29.295 -> 28.152 ms` (3.90%) at memory ratio 1.0; all guard rows passed.
+- Level 2 measured baseline `[23826,23841,23843,23526,23810]`, median
+  `23826 tok/s`, and candidate `[24319,24334,24310,24282,24260]`, median
+  `24310 tok/s`: +2.03%, identical `5508.533 MiB`, and 55.65% of the fixed
+  43,680 tok/s reference.
+- The production profile shows the fused three-output transform at about
+  `1.46 ms` per iteration, slower than attempt 42's split transforms despite
+  the formal matched gates passing. Attempt 43 is the accepted development
+  baseline, not statistical confirmation, quality evidence, official
+  retention, a merge, or a default change.
+
+**Next**
+
+- Continue from attempt 43. Split target (q/k) and right transforms to reduce
+  three-output kernel pressure without reintroducing the duplicated target
+  exponent, then attack the still-dominant pair and parameter VJP kernels.
