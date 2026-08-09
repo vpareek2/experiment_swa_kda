@@ -6887,3 +6887,58 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_098 \
   fragment handoff from `P-QH` directly into the `T` MMA, matching the actual
   FlashKDA mechanism rather than merely its equation. Otherwise target the
   independent pair producer/accumulator global handoff.
+
+## 2026-08-09 [Codex] Attempt 99 register-accumulated U rejected at Level 1
+
+**Context**
+
+- Attempt 99 starts from accepted attempt 91 and tests the dependency-free half
+  of the FlashKDA-style forward fusion. It retains the efficient global
+  `W=TQ` BMM but accumulates `TP-WH` in one WMMA accumulator, eliminating U,
+  one BMM, the global U read, and the separate subtraction pass.
+- Unlike attempt 98, this candidate introduces no additional shared-memory
+  handoff, CTA phase, or barrier. The C64 schedule and FP32 recurrent state are
+  unchanged.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_099 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact seed-4101 production comparison and fresh-cache repeat against 91.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_091 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_099 \
+  runs/kda-cuda-development/attempt-00099-register-u-level1 \
+  --level2-order baseline-first
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_099 \
+  push -u origin kda-cuda/wy-register-u-forward-099
+```
+
+**Artifacts**
+
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00099-register-u-protected-checker`, summary SHA-256 `e0b94549ca8eff9a3f08a4cc06ef39e5c4f4e62e02d4757cb945df5e9b05e594`.
+- Invalid candidate-local environment invocation: `runs/kda-cuda-development/diagnostics/attempt-00099-register-u-protected-checker-invalid-env-001`, summary SHA-256 `f920f046ec70cf2490f2c898229ce8c848b3df7d4168b7f2034b8de0b2379d71`.
+- Production comparison/repeat: `runs/kda-cuda-development/diagnostics/attempt-00099-register-u-gradient`, manifest `d9cfbc61b58d1ce80a5accb6ca8e3fce8f3343c649b89205ad29b9fe5d0b886e`.
+- Level 1: `runs/kda-cuda-development/attempt-00099-register-u-level1`, manifest `45cfeb1da590d39343062c269f613458776ee11539ba2c69cd104852a9aef212`.
+- Append-only attempt/reference index SHA-256: `473a8af232b3c635d13fc10a8d817a81bf545e25a2c002a61e30bfcbbfaab60e`.
+
+**Result**
+
+- Pushed commit `65c2be729d6bb9f09930fdf397f5328d16dbaca6` passes ownership 1.0,
+  protected runtime/profile audit, and runtime FLA freedom. Production maximum
+  output delta is `4.8828125e-4`, maximum gradient delta is `2.056e-9`, every
+  tensor passes frozen tolerance, and the fresh-cache repeat is bitwise exact.
+- Level 1 rejects the candidate. T=4096 forward improves
+  `19.6917 -> 19.4168 ms` (1.40%), but forward+backward regresses
+  `13.5016 -> 13.7496 ms` (1.84%). Peak allocation is unchanged and all
+  important-row/memory guards pass. No sanitizer, Level 2, profile,
+  confirmation, or LM-quality evaluation ran.
+
+**Next**
+
+- Retain attempt 91 and keep both efficient global U/W BMMs. The forward
+  register-U result is insufficient in full autograd execution, closing this
+  partial-fusion boundary. The next independent high-value target is the pair
+  WMMA/ordered-accumulation handoff or a larger persistent backward fusion.
