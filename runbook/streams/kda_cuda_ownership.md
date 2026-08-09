@@ -3665,3 +3665,55 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_046 \
 - Implement the complete A/M pair VJP with stable tiled transforms and matched
   BMMs, retaining the scalar kernel only for R/E/P/Q/D terms. Do not replay the
   rejected attempt-39 shared ratio cache.
+
+## 2026-08-09 [agent] reject row-block finalization at Level 2
+
+**Context**
+
+- Attempt 47 maps each independent finalization row to one CUDA block while
+  preserving the ordered q/k normalization reductions. It tests whether wider
+  row-level occupancy can remove the remaining serial finalization loop.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_047 \
+  --lane optimization <isolated artifact/cache arguments>
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_validation_047 \
+  --lane optimization <isolated artifact/cache arguments> --sanitizers
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_046 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_047 \
+  runs/kda-cuda-development/attempt-00047-finalize-row-block-level1
+# Executed the predeclared baseline-first Level-2 pair once.
+```
+
+**Artifacts**
+
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00047-protected-checker`, manifest `86ba8b207525925d81c27c90b0c9723d890c5439b96462903c6152120a3769e0`.
+- Production comparison/repeat: `runs/kda-cuda-development/diagnostics/attempt-00047-finalize-row-block-gradient`, manifest `b0c1c58bb3eb297f604d0b2bf75f1ebde966a48146a2f326a31d6a2120fec856`.
+- Full sanitizer validation: `runs/kda-cuda-development/validations/validation-00010-finalize-row-block`, manifest `71324bf2a05d5056aaf37fadf92465bf52ee55c63d435c23798d8eb1a089d9e9`.
+- Level 1: `runs/kda-cuda-development/attempt-00047-finalize-row-block-level1`, manifest `7d47d2a551bf9fa5bf798fd306754649524a024c905821ff5728868d8c4a8edf`.
+- Level 2: `runs/kda-cuda-development/attempt-00047-finalize-row-block-level2`, manifest `5af9e0de0b1b6fb43ea4fd6c79894d32fc58c54afb059875b411cabaa12cb486`.
+- Append-only attempt/reference index SHA-256: `750dced9999fc7f3bb5f74b788b5cb0a04a1bafbb6f41d88e6633640d637f241`.
+
+**Result**
+
+- Pushed commit `a3dd2f236887b518c17c82e01d45c96ca9c25698`
+  passed ownership 1.0, runtime FLA freedom, all four sanitizers, and remained
+  bitwise equal to attempt 46 across output, all gradients, and its repeat.
+- Level 1 advanced: T=4096 forward+backward improved
+  `24.536 -> 23.214 ms` (5.39%) with memory ratio 1.0.
+- Level 2 measured baseline `[26216,26171,26223,26040,26221]`, median
+  `26216 tok/s`, and candidate `[26787,26685,26782,26453,26675]`, median
+  `26685 tok/s`: +1.79%, below the frozen 2% gate, with identical
+  `5508.533 MiB`. No retest was run.
+- Attempt 47 is a correct rejected milestone. Attempt 46 remains the accepted
+  development baseline; neither result is confirmation or quality evidence.
+
+**Next**
+
+- Stop independent finalization scheduling and move to the dominant complete
+  A/M pair VJP with a bounded algebraic/tiled strategy.
