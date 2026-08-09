@@ -2451,3 +2451,99 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_027 \
   reverse scan, then implement the complete WY/UT VJP. Do not run another
   confirmation until the next major strategy boundary, plateau, roughly
   four-hour checkpoint, or final candidate.
+
+## 2026-08-09 [agent] accept chunk-boundary backward recomputation
+
+**Context**
+
+- Attempt 28 began the C64 backward transition from exact accepted FP32 BMM
+  baseline `fb89c260...`. It changes only production K=V=128 backward history:
+  instead of materializing `[B,H,T+1,V,K]`, it stores fixed 32-token boundary
+  states and deterministically recomputes one local chunk before each reverse.
+- The existing analytical token VJP and every generic/state path remain
+  unchanged. This is the memory/recomputation scaffold for a later complete
+  WY/UT VJP, not that VJP itself.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_028 \
+  --lane optimization <isolated artifact/cache arguments>
+uv run --no-sync python scripts/kda_cuda_development.py \
+  --level2-order candidate-first \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_026 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_028 \
+  runs/kda-cuda-development/attempts/attempt-00028-level1
+# Exact B=2/H=3/T=4096 saved-output/gradient comparison, then the predeclared
+# candidate-first Level-2 pair.
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_028 \
+  push origin HEAD:kda-cuda/wy-backward-boundaries-028
+# Full checker plus memcheck/racecheck/synccheck/initcheck on an exact staged
+# candidate tree in the validation worktree.
+```
+
+**Artifacts**
+
+- Level 1:
+  `runs/kda-cuda-development/attempts/attempt-00028-level1`, manifest SHA-256
+  `3c9383e89ff7927a13a2ccc40c874d3da8652f20ccdb1c9468cf4632f41b3d1c`.
+- Level-2 candidate-first pair:
+  `runs/kda-cuda-development/attempts/attempt-00028-level1/level2-execution`,
+  final manifest SHA-256
+  `69f3f270893a237841e5156d97ad3ec5b12af72021013fd72e6e479dbed9f6a7`.
+- Exact production gradient comparison:
+  `runs/kda-cuda-development/diagnostics/attempt-00028-boundary-gradient-exact`,
+  manifest SHA-256
+  `fc4d483935a91de5ad6bf7280ee026bba25776ce71586f80fadbce8d72c7f263`.
+- Preserved invalid clean-worktree sanitizer invocation:
+  `runs/kda-cuda-development/validations/validation-00002-boundary-recompute`,
+  manifest SHA-256
+  `5226c420fcf7410a384e2696123d867c2104d6f0ee50b6e4460e6e237b3d164f`.
+- Valid staged-tree full checker and sanitizer boundary:
+  `runs/kda-cuda-development/validations/validation-00003-boundary-recompute`,
+  manifest SHA-256
+  `fdb8b0801b67878d115fb01ddff3e223ec43e872f35d6db6dd85f1f7a3968e0e`.
+- Development-baseline manifest:
+  `runs/kda-cuda-development/baseline/30a13734f.json`, SHA-256
+  `56521ea7c3ac85c38c06a3c0eac765a5c23a08482d62389d9cff15a4e1600805`.
+- Append-only attempt/reference index SHA-256:
+  `9aed69ae1d079d5e8beae1f523a6b3beac337d1bceee49758c65e06ef8ae92a5`.
+
+**Result**
+
+- Exact pushed commit `30a13734f22e0639f9d9aa05417a4ac69dfe62f1`,
+  source SHA-256
+  `191a2e00dc107aaa184120eb899d3c018c451ebddfc9cbf9f3e984558fc1a93c`,
+  passed the protected 21-check runtime audit, profile audit, ownership 1.0,
+  runtime FLA freedom, and all four sanitizers with genuine zero-error
+  summaries.
+- Exact B=2/H=3/T=4096 output and all seven gradients were bitwise identical
+  to parent `fb89c260...`; every result was finite.
+- Level 1 measured T=4096 forward+backward `63.457 -> 58.205 ms`, an 8.28%
+  improvement. Isolated peak allocation fell `1761199616 -> 201410048` bytes,
+  a `0.11436x` ratio. No other row exceeded the 5% regression gate.
+- The exact candidate-first Level-2 pair measured candidate
+  `[15928,15864,15908,15883,15895]`, median `15895 tok/s`, versus baseline
+  `[14860,14887,14913,14846,14842]`, median `14860 tok/s`: a 6.97% point
+  improvement. Both reported `5508.533 MiB` full-model peak. The candidate is
+  at 36.39% of the matched `43680 tok/s` FLA target.
+- Two setup failures were preserved and are invalid, not measurements: the
+  first draft benchmark accidentally ran `uv` from the candidate, created an
+  isolated empty environment, and failed `ModuleNotFoundError: torch`; that
+  environment was moved to `/tmp/kda028-accidental-venv-20260809`. The first
+  saved-gradient helper imported the package-level function and failed
+  `AttributeError`. A clean committed sanitizer invocation also emitted no
+  result because the checker correctly requires a staged source snapshot.
+- Attempt 28 is the accepted development baseline. It is not statistically
+  confirmed, official retention, a merge/default change, or an LM-quality
+  result.
+
+**Next**
+
+- Implement the complete independently authored C64 WY/UT VJP from exact
+  `30a13734...`, using boundary states and reverse chunk scan rather than
+  restoring token history. Keep the generic analytical recurrence fallback.
+- Continue toward 45k with Level 1/2 development evidence and defer another
+  confirmation to the next declared major strategy boundary, plateau,
+  roughly four-hour checkpoint, or final candidate.
