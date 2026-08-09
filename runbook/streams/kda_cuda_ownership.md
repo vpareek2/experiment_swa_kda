@@ -5333,3 +5333,79 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_076 \
 - Preserve attempt 76 unchanged. Continue from attempt 72. Do not pursue
   doubled-batch concatenation; target the reverse chunk scan itself or fuse
   BMM-adjacent elementwise/copy work without changing efficient BMM geometry.
+
+## 2026-08-09 [agent] accept fused reverse chunk transfers
+
+**Context**
+
+- Attempt 77 starts from accepted attempt 72 and preserves every FP32 BMM
+  shape and arithmetic path. One owned prepare kernel gathers the strided
+  recurrence-major `dstate_base` and `dZ` slices while saving the incoming
+  boundary adjoint; one finish kernel scatters updated `dZ` and advances the
+  state adjoint. This replaces five generic copy launches with two owned
+  transfers per reverse chunk. Chunk-boundary recomputation and the complete
+  WY/UT VJP remain unchanged.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_077 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact production-shape gradient capture and fresh-cache deterministic repeat.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_072 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_077 \
+  runs/kda-cuda-development/attempt-00077-reverse-transfer-level1
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_validation_077 \
+  --lane optimization <isolated artifact/cache arguments> --sanitizers
+# Executed one saved-shape candidate-first Level-2 pair, then one bounded
+# production-shape Nsight Systems profile.
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_077 \
+  push -u origin kda-cuda/wy-inplace-reverse-077
+```
+
+**Artifacts**
+
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00077-reverse-transfer-protected-checker`, manifest `b3ddf084f6e68026277b27cdde9d8a3467ee94e6344c4ad54d1101716909900d`.
+- Production comparison/repeat: `runs/kda-cuda-development/diagnostics/attempt-00077-reverse-transfer-gradient`, manifest `9e167c5cb423232f904b1af2404de44d32fddfef99a4408dd82232076340df9c`.
+- Full sanitizer validation: `runs/kda-cuda-development/validations/validation-00018-reverse-transfer`, manifest `d4489f04821ee38b18c8584bb3193fad040c232c2c6833711f9d9f19f6c40581`.
+- Level 1: `runs/kda-cuda-development/attempt-00077-reverse-transfer-level1`, manifest `532ba94bdb5af15c853ccae114729433dbc2b3871c54c6d3ac8c738f2df15041`.
+- Level 2: `runs/kda-cuda-development/attempt-00077-reverse-transfer-level2`, manifest `00072fe8c49cedd4e95cb230aba0b46d038fb189c0cf763900f9222afec1584f`.
+- Production profile: `runs/kda-cuda-development/diagnostics/attempt-00077-production-profile`, manifest `01dcb4ef84999db5b2872b3c4d99bd1cfe43d6de8f8de9727c3856a50c327d03`.
+- Invalid pre-launch sanitizer lane invocation: `runs/kda-cuda-development/diagnostics/attempt-00077-sanitizer-invalid-lane-001`, manifest `6d1ffc25fb9e4aaaa3ee6f8f0c3b4ec8ef2ce965adc30fb24424cffda32998bf`.
+- Baseline manifest: `runs/kda-cuda-development/baseline/8cfff8e89f.json`, SHA-256 `5ba063cc6e6c8a56c4f11f67712fd7a5f396bce46ace81e2d6296fa56b416ad7`.
+- Append-only attempt/reference index SHA-256: `b0ab3348cc31100d1969591bc098dfcad7b50d81f8320d31254846633c5f0f34`.
+
+**Result**
+
+- Pushed commit `8cfff8e89f994c038d01566f2ae9b0c1626d959e`
+  passed ownership 1.0, protected runtime/profile audit, runtime FLA freedom,
+  bitwise output/all-gradient correctness, a bitwise fresh-cache repeat, and
+  all four sanitizers with zero errors.
+- Level 1 advanced: T=4096 forward+backward improved
+  `18.286 -> 17.414 ms` (4.77%) with memory ratio 1.0. Every frozen
+  per-length regression and memory guard passed.
+- The candidate-first Level-2 pair measured candidate
+  `[29921,29956,29873,29825,29996]`, median `29921 tok/s`, and baseline
+  `[29656,29547,29642,29454,29581]`, median `29581 tok/s`: +1.15%, identical
+  `5508.533 MiB`, and 68.50% of the fixed 43,680 tok/s reference.
+- The production profile shows generic direct-copy instances falling from 656
+  to 144 across two profiled iterations. The new prepare/finish transfers total
+  `0.368 ms` per iteration. Remaining named targets are forward WMMA
+  (`2.164 ms`), group-boundary WMMA (`1.342 ms`), pair pack (`0.957 ms`), and
+  pair accumulation (`0.684 ms`).
+- The first sanitizer command used a nonexistent `validation` lane and failed
+  in argument parsing before GPU work. It is preserved as invalid and excluded;
+  the corrected optimization-lane sanitizer run passed.
+- Attempt 77 is the accepted development baseline. It is not statistically
+  confirmed, official retention, a merge/default change, or LM-quality
+  evidence.
+
+**Next**
+
+- Continue from attempt 77. Keep the efficient FP32 BMM geometries and target
+  the remaining reverse-loop add/sub launches, pair pack/accumulate traffic,
+  group-boundary WMMA, or forward WMMA. The campaign remains well below the
+  fixed 43,680 tok/s reference and the >=45k objective.
