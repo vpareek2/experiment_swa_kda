@@ -7587,3 +7587,80 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_110 \
   group-local backward GEMMs and their consumers while keeping deterministic
   ownership, or translate FlashKDA's token-parallel prepare plus head-persistent
   recurrence schedule to the C64 training equations without importing it.
+
+## 2026-08-09 [Codex] Attempt 111 group-major producer composition rejected at Level 2
+
+**Context**
+
+- Attempt 111 starts directly from accepted attempt 100 and tests a coherent
+  group-preparation boundary not covered by attempts 102 or 110 alone. It
+  constructs `P/Q/A/T` group-major, then uses one 40-KiB dual-WMMA CTA per
+  chunk to compute `U=T@P`, `W=T@Q`, and emit `R/E` plus optional `dO`.
+- The composition removes all group gather copies, 32 generic `U/W` BMM
+  launches, and separate `R/E/dO` packing launches. It retains eight-chunk
+  bounded history, complete analytical WY/UT VJP, and deterministic ownership.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_111 \
+  --lane optimization <isolated artifact/cache arguments>
+# Seed-4101 production comparison and independent fresh-cache repeat.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_100 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_111 \
+  runs/kda-cuda-development/attempt-00111-group-major-producer-level1 \
+  --level2-order baseline-first
+# Execute the saved Level-2 baseline-first pair exactly once.
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_111 \
+  push -u origin kda-cuda/wy-group-major-producer-111
+```
+
+**Artifacts**
+
+- Pushed commit `57270223521bec30b71a537e6120dd662a8fec7e`;
+  backward source SHA-256 `45488545c13f2071726e0b4ea238a2fe0a00b9782474a1a5054a43a80650684d`.
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00111-group-major-producer-protected-checker`,
+  manifest `6eab219dc68c7f646193460d523bbbf0ce81480aad96062f6521e1499aa9a30f`.
+- Production comparison/repeat: `runs/kda-cuda-development/diagnostics/attempt-00111-group-major-producer-gradient`,
+  manifest `1abd472796f42132488435f336e1d0d14fbb9a5b0039b2d807811896e393f310`.
+- Invalid environment-resolution capture: `runs/kda-cuda-development/diagnostics/attempt-00111-group-major-producer-gradient-invalid-env-001`,
+  manifest `f109a8ad33cec5b48ef66f4bf0ab241df5a86ca5d74162e0f09166a760c94303`.
+- Level 1: `runs/kda-cuda-development/attempt-00111-group-major-producer-level1`,
+  manifest `70300761a375fce53d8b01802fdbd49e17b553713d67429fc6bbb50fd55d4b29`.
+- Level 2: `runs/kda-cuda-development/attempt-00111-group-major-producer-level2`,
+  manifest `19f0cc4adbb1e7b413b37052fc489e2de219f915be1d257bf037309989930b0a`.
+- Append-only attempt/reference index SHA-256:
+  `ea5e34cdc13f0aed92dafb49e0239dace85e5891e067e1b03ceb56934a73883a`.
+
+**Result**
+
+- The pushed candidate passes ownership 1.0, protected runtime/profile audit,
+  runtime FLA freedom, finite gradients, and the frozen numerical contract.
+  Output is bitwise equal to attempt 100; maximum gradient delta is
+  `2.459273673593998e-09`, and the independent fresh-cache repeat is bitwise
+  exact for all eight tensors.
+- The first production capture resolved `nanochat` from the coordinator because
+  `PYTHONPATH` was absent and stopped before candidate CUDA execution with
+  `NotImplementedError: project-owned CUDA KDA backend is not implemented`.
+  It is preserved as invalid and excluded from evidence.
+- Level 1 advances: T=4096 forward+backward improves
+  `12.334400 -> 11.699584 ms` (5.147%) and peak allocation falls 2.327%.
+  T=256 and T=1024 regress 3.544% and 2.636%, within the 5% guard.
+- The exact saved baseline-first Level-2 pair rejects the candidate. Baseline
+  samples `[33826,33770,33736,33710,33790]` have median 33,770 tok/s;
+  candidate `[34041,34029,33880,33984,34083]` has median 34,029 tok/s.
+  The 0.767% gain is below the 2% retention gate, memory is equal at
+  5508.533 MiB, and the candidate reaches 77.905% of the 43,680 tok/s target.
+- No sanitizer, profile beyond the protected audit, confirmation, or LM-quality
+  evaluation ran. This evidence is not statistically confirmed.
+
+**Next**
+
+- Retain attempt 100. Attempt 111 is weaker in Level 2 than attempt 110, so do
+  not compose the 40-KiB dual-WMMA producer again.
+- Close chunk-owned group-producer fusion. The next strategy boundary should
+  reduce shared-memory residency and separate token-parallel preparation from
+  the low-parallelism recurrence, following FlashKDA's two-stage scheduling
+  principle while independently implementing the project training equations.
