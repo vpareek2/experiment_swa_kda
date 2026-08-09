@@ -8215,3 +8215,90 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_118 \
   pipeline the complete recurrence (`W H`, `qgamma H`, `A Z`, and `E^T Z`) or
   reduce the 80-register footprint with a producer/consumer ownership change;
   another isolated one-phase prefetch is not sufficient.
+
+## 2026-08-09 [Codex] Attempt 119 complete four-phase forward pipeline rejected by T256 guard
+
+**Context**
+
+- Attempt 119 starts directly from accepted attempt 100 and pipelines every
+  persistent forward recurrence product: `W H`, `qgamma H`, `A Z`, and
+  `E^T Z`. Each warp initializes its current 16x16 BF16 fragments, prefetches
+  only the immediately following tile into lane-local FP32 registers, executes
+  the current WMMA in unchanged order, then stages and consumes the prefetched
+  tile. No rejected attempt is inherited and the accepted backward remains
+  byte-for-byte unchanged.
+- Static cubin inspection reports 128 registers, 50,176 bytes shared, no stack,
+  and no local spill versus 59 registers for accepted attempt 100. The shared
+  footprint already bounds the 256-thread kernel to two CTAs per SM; 128
+  registers still permits exactly two CTAs on the GB10, so the candidate was
+  evaluated rather than rejected solely from static resource use.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_119 \
+  --lane optimization <isolated artifact/cache arguments>
+# Seed-4101 production comparison and independent fresh-cache repeat.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_100 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_119 \
+  runs/kda-cuda-development/attempt-00119-forward-full-pipeline-level1 \
+  --level2-order baseline-first
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_119 \
+  push -u origin kda-cuda/wy-forward-full-pipeline-119
+```
+
+**Artifacts**
+
+- Pushed commit `fd106237ad11d828ce732c6dd5a843b637ff7de4`;
+  forward source SHA-256
+  `bf4f9bd74fc817d7d037d4010e03ee94a13b18d8b5b89dddafe41db47809fc5d`.
+- Preserved invalid empty-stage checker setup:
+  `runs/kda-cuda-development/diagnostics/attempt-00119-forward-full-pipeline-protected-checker-invalid-empty-stage-001`,
+  manifest `bcb3846a69c09cf2a88e870e219499e49ddea1ac9160d7b4eb61a3ca3f77d0df`.
+- Protected checker:
+  `runs/kda-cuda-development/diagnostics/attempt-00119-forward-full-pipeline-protected-checker-002`,
+  manifest `464ebb9364f018daa879be9dc9c1b403618fdafa31d9c710f5f2ae7665b66b34`.
+- Production comparison/repeat:
+  `runs/kda-cuda-development/diagnostics/attempt-00119-forward-full-pipeline-gradient`,
+  manifest `97b4cf4b990bbc3f064b2b1d358355846e99aa0b48034db0d1345d633d4fd46f`.
+- Level 1:
+  `runs/kda-cuda-development/attempt-00119-forward-full-pipeline-level1`,
+  manifest `1c9080ec3dd421dc1037173934690b06db57f7984abe60441316b5cd46a1e1dd`.
+- Append-only attempt/reference index has 123 valid JSONL entries, SHA-256
+  `c6b73a999cc0e205874665e62f1c00b4935e297866ee2c6ffb9fb3fe10a5d230`.
+- The first checker wrapper staged from the coordinator cwd and stopped before
+  build/GPU work with `pathspec ... did not match any files` followed by
+  `candidate checker requires at least one staged source change`. The first
+  tensor-capture wrapper created its relative parent inside the candidate and
+  then stopped before Python/GPU work because the absolute log parent did not
+  exist. Both exact incidents and the ignored partial candidate directory are
+  preserved; fresh namespaces were used for valid work.
+
+**Result**
+
+- The committed candidate passes ownership 1.0, protected runtime/profile
+  audit, runtime FLA freedom, finite-gradient checks, and is bitwise equal to
+  attempt 100 for output and all seven gradients. The independent fresh-cache
+  repeat is also bitwise exact for all eight tensors.
+- T=4096 forward+backward improves `12.633040 -> 11.937632 ms` (5.505%),
+  T=1024 forward+backward improves 2.548%, and allocation is unchanged.
+  T=4096 forward-only regresses 0.311%.
+- Level 1 nevertheless rejects the candidate because T=256 forward+backward
+  regresses `4.098336 -> 4.338400 ms` (5.858%), exceeding the frozen 5% guard.
+  The intervention's specialized C64 source is selected for the exact 4K path,
+  but the matched harness guard is authoritative; the row is not discarded or
+  retested as noise. No sanitizer, Level 2, confirmation, or LM-quality
+  evaluation ran.
+
+**Next**
+
+- Retain attempt 100 and do not advance or retest attempt 119. The coherent
+  pipeline establishes a substantial long-sequence signal, but its 128-register
+  implementation is not acceptable under the complete frozen gate.
+- Preserve the four-phase insight while changing the schedule: reduce the
+  simultaneous `next_a`/`next_b` live range through producer/consumer ownership
+  or stage one operand ahead while streaming the other. A follow-up must start
+  directly from attempt 100 and must continue protecting T=256; do not compose
+  attempt 119 as an accepted baseline.
