@@ -7820,3 +7820,77 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_113 \
   Audit the current reverse-group schedule for a deterministic batched
   post-reverse VJP, or design a coupled forward persistent recurrence with
   pipelined global loads and register-resident producer handoff.
+
+## 2026-08-09 [Codex] Attempt 114 one-token preparation split rejected at Level 1
+
+**Context**
+
+- Attempt 114 starts directly from accepted attempt 100 and tests FlashKDA's
+  offline K1/K2 scheduling principle without importing or linking reference
+  code. Forward and backward normalization/gating preparation move from one
+  CTA serially traversing 64 rows to one CTA per token, followed by a separate
+  one-lane-per-channel ascending C64 prefix/Q pass.
+- C64 chunking, FP32 recurrence and saved tensors, exact ascending norm sums,
+  WY/UT equations, backward recomputation, ownership, and allocation remain
+  fixed. The intervention exposes token parallelism but deliberately does not
+  claim FlashKDA's cooperative multi-row/TMA implementation.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_114 \
+  --lane optimization <isolated artifact/cache arguments>
+# Seed-4101 production comparison and independent fresh-cache repeat.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_100 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_114 \
+  runs/kda-cuda-development/attempt-00114-token-parallel-preprocess-level1 \
+  --level2-order candidate-first
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_114 \
+  push -u origin kda-cuda/wy-token-parallel-preprocess-114
+```
+
+**Artifacts**
+
+- Pushed commit `f700561aef23c803f671cdc209ece97da56abdfe`;
+  forward/backward source SHA-256 values
+  `e81fa0b34f03f0fb8fdcc22a4989c606e012afa86e51980970a642a9f04b8f04`
+  and `267705f7842d75812a4384021a413d6f42995284ea4d7ba8a72ff3cc70bd9826`.
+- Protected checker:
+  `runs/kda-cuda-development/diagnostics/attempt-00114-token-parallel-preprocess-protected-checker`,
+  manifest `dee7b46c62eb157a87e968fa2a4a1117e115c4188664c4905c57ffcfca2db0fc`.
+- Production comparison/repeat:
+  `runs/kda-cuda-development/diagnostics/attempt-00114-token-parallel-preprocess-gradient`,
+  manifest `0b7526e9ddedd7043fbdcc2491eb86b6f58a5f11aed32fa278fb61bdef42b503`.
+- Level 1:
+  `runs/kda-cuda-development/attempt-00114-token-parallel-preprocess-level1`,
+  manifest `2de4d2a87743e47d5ef5d232dd0faa6757cd7e6bf38debda308de5b6c8b40d85`.
+- Append-only attempt/reference index SHA-256:
+  `a79174111c79768db366e15c6f3919b2932500518c2100727dc5a6aae2df6285`.
+
+**Result**
+
+- The committed candidate passes ownership 1.0, protected runtime/profile
+  audit, runtime FLA freedom, finite-gradient checks, and the frozen numerical
+  contract. Maximum output delta is `0.000244140625`, maximum gradient delta is
+  `8.519034366827327e-10`, and the independent fresh-cache repeat is bitwise
+  exact for all eight tensors.
+- Level 1 rejects the one-token schedule. T=4096 forward+backward regresses
+  `12.181520 -> 12.681200 ms` (4.102%) and forward-only regresses 0.817%, with
+  unchanged 202,770,944-byte peak allocation. T=256 and T=1024
+  forward+backward improve 3.220% and 2.757%, so all frozen regression and
+  memory guards still pass despite the failed production target.
+- The 24,576 one-token CTAs plus the separate prefix launch cost more at long
+  sequence than the eliminated chunk-row barriers. No sanitizer, Level 2,
+  production profile, confirmation, or LM-quality evaluation ran.
+
+**Next**
+
+- Retain attempt 100. Do not replay one-token preprocessing or treat the
+  inference reference's K1/K2 split as sufficient by itself.
+- FlashKDA's transferable preparation mechanism requires cooperative multi-row
+  CTAs, shared-memory lifetime reuse, and efficient norm reductions together;
+  any follow-up must implement that complete scheduling unit. Otherwise move
+  to a pipelined persistent recurrence or a backward launch/global-handoff
+  boundary large enough to affect the remaining 30% throughput gap.
