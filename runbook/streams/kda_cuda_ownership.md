@@ -7032,3 +7032,63 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_100 \
   transferable idea is a register-fragment handoff across the residual solve
   and output MMA; attempts 98/99 show that partial reassociation or one removed
   BMM is too small. Only revisit forward with an end-to-end fused pipeline.
+
+## 2026-08-09 [Codex] Attempt 101 reverse-initialization fusion rejected at Level 1
+
+**Context**
+
+- Attempt 101 starts from accepted attempt 100 and folds the two pre-reverse
+  dense adjoint products into the persistent reverse-group kernel. Each
+  16-value-column owner initializes `dZ = A^T dO + E dstate_next` and the local
+  state adjoint as `R^T dO + D dstate_next` before the existing `W^T dZ`
+  update. This removes two BMM calls, their launch/global handoff, and the full
+  FP32 `dstate_base` allocation.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_101 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact seed-4101 production comparison and fresh-cache repeat against 100.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_100 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_101 \
+  runs/kda-cuda-development/attempt-00101-persistent-reverse-init-level1 \
+  --level2-order baseline-first
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_101 \
+  push -u origin kda-cuda/wy-persistent-reverse-init-101
+```
+
+**Artifacts**
+
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00101-persistent-reverse-init-protected-checker`, manifest `45264e6a6fcf5d5ebe910b57aa90bc413c481877350d25168d391acd4cd1f0eb`.
+- Production comparison/repeat: `runs/kda-cuda-development/diagnostics/attempt-00101-persistent-reverse-init-gradient`, manifest `8bf7dd0a3534b998f5972c67381c8ab4e60d2391f57a6c4f46ab80bee6720457`.
+- Invalid log-race capture: `runs/kda-cuda-development/diagnostics/attempt-00101-persistent-reverse-init-gradient-invalid-log-race-001`, manifest `b111ea71b965e05d36b68fd324d67f85a74bb7466d0e5ce309de746b54485f27`.
+- Level 1: `runs/kda-cuda-development/attempt-00101-persistent-reverse-init-level1`, manifest `278546b7d7100d1a820bd2b0d0bc0c9b4007e7d9a2fc20aa96c37be73acd5266`.
+- Append-only attempt/reference index SHA-256: `36aca268804b3f364330e833521507c868c5336aae661059b2a05f58cbd9b276`.
+
+**Result**
+
+- Pushed commit `8ed2b03147fe3d98aa33aff4d076576ac4909271` passes ownership 1.0,
+  protected runtime/profile audit, and runtime FLA freedom. Production output
+  and `dq` are bitwise equal to attempt 100; maximum gradient delta is
+  `5.821e-11`, all tensors pass frozen tolerance, and the independent repeat is
+  bitwise exact.
+- Level 1 rejects the candidate. T=4096 forward+backward improves only
+  `12.4379 -> 12.3309 ms` (0.86%), below the 3% gate. T=256 and T=1024
+  forward+backward regress 3.84% and 3.77%. Peak allocation improves 1.55%,
+  from 202,770,944 to 199,625,216 bytes; all frozen guards still pass.
+- The extra WMMA phases serialize inside the persistent reverse owner and
+  largely consume the launch/global-memory savings. No sanitizer, Level 2,
+  profile, confirmation, or LM-quality evaluation ran. The first capture was
+  excluded because its `tee` log sink raced directory creation; its tensors
+  and exact failure marker are preserved.
+
+**Next**
+
+- Retain attempt 100. Keep `A^T dO` and `R^T dO` in the efficient generic GEMM
+  path until they can be absorbed by a broader parallel row-owner VJP. Avoid
+  adding more work to the persistent reverse CTA. The next viable large axis is
+  fusing group-boundary packing/build work or designing a complete multi-CTA
+  WY/UT VJP with deterministic reduction boundaries.
