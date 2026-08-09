@@ -4058,3 +4058,59 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_053 \
   without replaying attempt 52's pair-batch-width tuning. Preserve stable
   transforms, ordered reductions, BF16 rounding, and every ownership and
   correctness gate while continuing toward 45k.
+
+## 2026-08-09 [agent] reject fast pair exponentials
+
+**Context**
+
+- Attempt 54 substitutes CUDA's fast FP32 exponential only inside the stable,
+  tile-centered pair pack and accumulation transforms. Batch width, equations,
+  reduction order, scratch storage, and BF16 writes remain identical to
+  accepted attempt 53.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_054 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact seeded B=2/H=3/T=4096 saved-gradient comparison plus repeat.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_053 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_054 \
+  runs/kda-cuda-development/attempt-00054-pair-fast-exp-level1
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_054 \
+  push -u origin kda-cuda/wy-pair-fast-exp-054
+```
+
+**Artifacts**
+
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00054-protected-checker`, manifest `ac91482ee89898e2c9887d844270dbf9055daa9b8b12a7d0969e9e9c98bdc79c`.
+- Production comparison/repeat: `runs/kda-cuda-development/diagnostics/attempt-00054-pair-fast-exp-gradient`, manifest `ce3bd72044733794515aade7b612612cbf4ff1607ede94fa3c2bcbde2546842b`.
+- Invalid source-root invocation: `runs/kda-cuda-development/diagnostics/attempt-00054-gradient-invalid-source-root-001`, manifest `6717d6f6efa76cdfb0d1da612e2b8d51fbe046b321295d11321f385443090ce8`.
+- Invalid package-precedence invocation: `runs/kda-cuda-development/diagnostics/attempt-00054-gradient-invalid-pythonpath-002`, manifest `da8eb5820dcfe3e516b20662065007f722240fa1b1ce6a7c36e6ae3fab2df5d0`.
+- Level 1: `runs/kda-cuda-development/attempt-00054-pair-fast-exp-level1`, manifest `b2305a6982edb3e9d57c8da40c25036771224c909690a9c52d1c2f47381979fa`.
+- Append-only attempt/reference index SHA-256: `766a92d78d5530a65818a1b9b53aa8216bb6a34906272339bea5647527b8b556`.
+
+**Result**
+
+- Pushed commit `576797a09c196a0035236f5948c0681a8e365b05`
+  passed ownership 1.0, runtime/profile audit, and runtime FLA freedom. The
+  production comparison was deterministic and inside frozen tolerances;
+  output, `dv`, and `dbeta` are bitwise equal to attempt 53, and the largest
+  gradient delta is `3.638e-12`.
+- Two setup failures occurred before CUDA or measurement: first the source root
+  resolved against the coordinator, then `uv --project` imported the
+  coordinator package before the candidate. Both are preserved as invalid
+  invocations; the valid run pinned candidate working directory and
+  `PYTHONPATH` while using the coordinator environment.
+- Level 1 rejected the intervention: T=4096 forward+backward changed
+  `21.402 -> 22.156 ms` (-3.52%) with memory ratio 1.0. No sanitizer, Level 2,
+  profile, or retest ran.
+- Attempt 53 remains the accepted development baseline. This result is neither
+  confirmation nor quality evidence.
+
+**Next**
+
+- Stop pair exponential intrinsic substitution. Select a distinct structural
+  backward axis from exact attempt 53; do not resume pair-batch-width tuning.
