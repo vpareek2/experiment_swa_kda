@@ -2547,3 +2547,74 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_028 \
 - Continue toward 45k with Level 1/2 development evidence and defer another
   confirmation to the next declared major strategy boundary, plateau,
   roughly four-hour checkpoint, or final candidate.
+
+## 2026-08-09 [agent] preserve complete C64 WY/UT VJP equation milestone
+
+**Context**
+
+- Attempt 29 replaces the production-shape analytical token recurrence VJP
+  with an independently derived reverse-mode implementation of the complete
+  C64 WY/UT equations. It retains attempt 28's chunk-boundary discipline and
+  keeps the generic/state paths unchanged.
+- An FP64 multi-chunk equation prototype first matched PyTorch autograd to
+  `7.11e-15` or better across q, k, v, beta, and gate increments. The committed
+  CUDA scaffold then passed the protected generic runtime/profile audit before
+  its production-only specialization was evaluated separately.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_029 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact seeded B=2/H=3/T=4096 saved-output/gradient comparison against
+# attempt 28, followed by a candidate-only production microbenchmark/profile.
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_029 \
+  push -u origin kda-cuda/wy-full-vjp-029
+```
+
+**Artifacts**
+
+- Protected checker, including isolated caches and raw logs:
+  `runs/kda-cuda-development/diagnostics/attempt-00029-protected-checker`,
+  manifest SHA-256
+  `b5f1de7c727b1115d0d686e6a4f3cb737394f8a2930fdf51de11a96ed170c3cd`.
+- Exact production output/gradient comparison:
+  `runs/kda-cuda-development/diagnostics/attempt-00029-wy-vjp-gradient-exact`,
+  manifest SHA-256
+  `39a88b8eebb4d48ddb7509e483d149fe984bc9b5f60ed2060325cfd447dc90d0`.
+- Production microbenchmark and operator profile:
+  `runs/kda-cuda-development/diagnostics/attempt-00029-wy-vjp-draft`,
+  manifest SHA-256
+  `c57ba5da88e14673c39eda2e2c243d78baed845670601b8c1374df0494219fee`.
+- Append-only attempt/reference index SHA-256:
+  `7a62eed577f43ffa99c9da7babbca042da9b3174d0717988c0afbdfd28110b21`.
+
+**Result**
+
+- Exact pushed commit `b54d72e6f36397c49772770fa336b2899e2f32ef`
+  passed the protected 21-check runtime audit and profile audit at ownership
+  1.0 with no runtime FLA. At B=2/H=3/T=4096 its output is bitwise identical
+  to accepted parent `30a13734...`; all seven gradients are finite and the
+  largest absolute parent delta is `3.637978807091713e-12` (`dk`). This clears
+  the production equation gate for the complete WY/UT VJP.
+- The scaffold is performance-rejected: T=4096 forward+backward measured
+  `111.892 ms` versus attempt 28 diagnostic `58.973 ms` (`1.8973x`), while
+  peak allocation rose `201410048 -> 305376768` bytes. The operator profile
+  counted 1,284 `aten::bmm` calls and 23.612 ms of self CPU dispatch time.
+- The first baseline gradient launch was invalid before CUDA because it used
+  the coordinator as the build-helper working directory; its exact traceback
+  is preserved as `baseline-invalid-001` and is not a measurement.
+- Attempt 29 is a correct equation milestone, not the selected development
+  baseline, statistical confirmation, official retention, a merge/default
+  change, or an LM-quality result. Attempt 28 remains selected.
+
+**Next**
+
+- Start a new attempt from the exact attempt-29 equations. Batch all
+  chunk-independent dR/dA/dE/dW/dT/dP/dQ/dM products across the 384 chunk rows,
+  precompute the chunk-local dstate/dZ sources, and retain only the two
+  genuinely recurrent matrix products per reverse chunk.
+- Re-run the exact production gradient comparison before the normal Level-1
+  gate. Do not launch Level 2 unless Level 1 advances, and keep the next full
+  sanitizer/confirmation boundary sparse as declared.
