@@ -598,6 +598,66 @@ __global__ void nanochat_kda_wy_backward_sub_c64_kernel(
   }
 }
 
+// Gather the strided recurrence-major slices needed by one reverse chunk and
+// save its incoming state adjoint in the group history with one launch.
+__global__ void nanochat_kda_wy_backward_prepare_reverse_chunk_c64_kernel(
+    const float* dstate_next,
+    const float* dstate_base_group,
+    const float* dZ_group,
+    float* dstate_next_group,
+    float* local_dstate,
+    float* local_dZ,
+    int local_chunk,
+    int group_chunks) {
+  const int index = blockIdx.x * blockDim.x + threadIdx.x;
+  constexpr int kStatePerRecurrence = kDim * kDim;
+  constexpr int kVectorPerRecurrence = kChunk * kDim;
+  constexpr int kStateElements = kRecurrences * kStatePerRecurrence;
+  constexpr int kVectorElements = kRecurrences * kVectorPerRecurrence;
+  if (index < kStateElements) {
+    const int recurrence = index / kStatePerRecurrence;
+    const int within = index - recurrence * kStatePerRecurrence;
+    const int group_n = recurrence * group_chunks + local_chunk;
+    const int64_t group_offset =
+        static_cast<int64_t>(group_n) * kStatePerRecurrence + within;
+    dstate_next_group[group_offset] = dstate_next[index];
+    local_dstate[index] = dstate_base_group[group_offset];
+  }
+  if (index < kVectorElements) {
+    const int recurrence = index / kVectorPerRecurrence;
+    const int within = index - recurrence * kVectorPerRecurrence;
+    const int group_n = recurrence * group_chunks + local_chunk;
+    local_dZ[index] = dZ_group[
+        static_cast<int64_t>(group_n) * kVectorPerRecurrence + within];
+  }
+}
+
+// Scatter the completed chunk adjoints and advance the recurrent state
+// adjoint together, replacing two generic strided copy launches.
+__global__ void nanochat_kda_wy_backward_finish_reverse_chunk_c64_kernel(
+    const float* local_dstate,
+    const float* local_dZ,
+    float* dstate_next,
+    float* dZ_group,
+    int local_chunk,
+    int group_chunks) {
+  const int index = blockIdx.x * blockDim.x + threadIdx.x;
+  constexpr int kStatePerRecurrence = kDim * kDim;
+  constexpr int kVectorPerRecurrence = kChunk * kDim;
+  constexpr int kStateElements = kRecurrences * kStatePerRecurrence;
+  constexpr int kVectorElements = kRecurrences * kVectorPerRecurrence;
+  if (index < kStateElements) {
+    dstate_next[index] = local_dstate[index];
+  }
+  if (index < kVectorElements) {
+    const int recurrence = index / kVectorPerRecurrence;
+    const int within = index - recurrence * kVectorPerRecurrence;
+    const int group_n = recurrence * group_chunks + local_chunk;
+    dZ_group[static_cast<int64_t>(group_n) * kVectorPerRecurrence + within] =
+        local_dZ[index];
+  }
+}
+
 __global__ void nanochat_kda_wy_backward_negate_c64_kernel(
     float* values, int elements) {
   const int index = blockIdx.x * blockDim.x + threadIdx.x;
@@ -1332,14 +1392,8 @@ nanochat_kda_chunk_wy_backward_c64(
     at::Tensor dZ_group_flat = at::empty_like(dO_group);
     at::bmm_out(dstate_base, R_group.transpose(1, 2), dO_group);
     at::bmm_out(dZ_group_flat, A_group.transpose(1, 2), dO_group);
-    at::Tensor dstate_base_chunks = dstate_base.view(
-        {kRecurrences, kGroupChunks, kDim, kDim});
-    at::Tensor dZ_group = dZ_group_flat.view(
-        {kRecurrences, kGroupChunks, kChunk, kDim});
     at::Tensor dstate_next_group_flat = at::empty(
         {kGroupRows, kDim, kDim}, fp32);
-    at::Tensor dstate_next_group = dstate_next_group_flat.view(
-        {kRecurrences, kGroupChunks, kDim, kDim});
     at::Tensor local_dstate = at::empty_like(dstate_next);
     at::Tensor local_dZ = at::empty({kRecurrences, kChunk, kDim}, fp32);
     at::Tensor temp_vector = at::empty_like(local_dZ);
@@ -1347,9 +1401,15 @@ nanochat_kda_chunk_wy_backward_c64(
 
     for (int local_chunk = kGroupChunks; local_chunk-- > 0;) {
       const int chunk_id = chunk_start + local_chunk;
-      dstate_next_group.select(1, local_chunk).copy_(dstate_next);
-      local_dstate.copy_(dstate_base_chunks.select(1, local_chunk));
-      local_dZ.copy_(dZ_group.select(1, local_chunk));
+      nanochat_kda_wy_backward_prepare_reverse_chunk_c64_kernel<<<
+          (kStateElements + kThreads - 1) / kThreads,
+          kThreads, 0, stream>>>(
+          dstate_next.data_ptr<float>(), dstate_base.data_ptr<float>(),
+          dZ_group_flat.data_ptr<float>(),
+          dstate_next_group_flat.data_ptr<float>(),
+          local_dstate.data_ptr<float>(), local_dZ.data_ptr<float>(),
+          local_chunk, kGroupChunks);
+      C10_CUDA_KERNEL_LAUNCH_CHECK();
       const at::Tensor E_chunk = E_group_chunks.select(1, local_chunk);
       at::bmm_out(temp_vector, E_chunk, dstate_next);
       nanochat_kda_wy_backward_add_c64_kernel<<<
@@ -1358,7 +1418,6 @@ nanochat_kda_chunk_wy_backward_c64(
           local_dZ.data_ptr<float>(), temp_vector.data_ptr<float>(),
           kVectorElements);
       C10_CUDA_KERNEL_LAUNCH_CHECK();
-      dZ_group.select(1, local_chunk).copy_(local_dZ);
       const at::Tensor H = H_group.select(1, local_chunk);
       nanochat_kda_wy_backward_boundary_terms_c64_kernel<<<
           kRecurrences * kDim, kDim, 0, stream>>>(
@@ -1373,7 +1432,13 @@ nanochat_kda_chunk_wy_backward_c64(
           kThreads, 0, stream>>>(local_dstate.data_ptr<float>(),
           temp_state.data_ptr<float>(), kStateElements);
       C10_CUDA_KERNEL_LAUNCH_CHECK();
-      dstate_next.copy_(local_dstate);
+      nanochat_kda_wy_backward_finish_reverse_chunk_c64_kernel<<<
+          (kStateElements + kThreads - 1) / kThreads,
+          kThreads, 0, stream>>>(
+          local_dstate.data_ptr<float>(), local_dZ.data_ptr<float>(),
+          dstate_next.data_ptr<float>(), dZ_group_flat.data_ptr<float>(),
+          local_chunk, kGroupChunks);
+      C10_CUDA_KERNEL_LAUNCH_CHECK();
     }
 
     at::Tensor dR_group = at::empty_like(dO_group);
