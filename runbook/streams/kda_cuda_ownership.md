@@ -6614,3 +6614,85 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_094 \
   recurrence kernel with register-resident intermediates. In backward, the
   more direct route remains a persistent full group VJP that removes several
   dependent GEMMs and ordered accumulation/finalization launches together.
+
+## 2026-08-09 [agent] reject persistent post-reverse VJP at Level 2
+
+**Context**
+
+- Attempt 95 starts from accepted attempt 91 and replaces the ten dependent
+  post-reverse FP32 BMMs in every backward group. One CTA owns one chunk and
+  its eight warps own the 16-column output tiles while a 48-KiB shared buffer
+  is reused across `dR/dA/dE/dW/dT/dP/dQ` and the two final inverse-VJP
+  products.
+- The accepted persistent reverse scan and its two required pre-scan BMMs are
+  unchanged. The new kernel has single-writer tile ownership, ordered FP32
+  accumulation, BF16 WMMA operands, no atomics, and no cross-CTA reduction.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --config configs/research/kda_cuda_ownership.toml \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_095 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact seed-4101 production comparison/repeat against attempt 91.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_091 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_095 \
+  runs/kda-cuda-development/attempt-00095-postreverse-vjp-level1 \
+  --level2-order candidate-first
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_validation_095 \
+  --lane optimization --sanitizers <isolated artifact/cache arguments>
+# Executed the saved candidate-first Level-2 commands exactly once, followed
+# by one bounded production Nsight Systems profile.
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_095 \
+  push -u origin kda-cuda/wy-postreverse-vjp-wmma-095
+```
+
+**Artifacts**
+
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00095-postreverse-vjp-protected-checker`, manifest `96f72558b6273d5026a55842828e653f0345d424c6c4c55295038591e7109786`.
+- Production comparison/repeat: `runs/kda-cuda-development/diagnostics/attempt-00095-postreverse-vjp-gradient`, manifest `e227a5b771ca196c37e312e4d398d4935e9417b1a1d0c336917bcb346a7d2664`.
+- Level 1: `runs/kda-cuda-development/attempt-00095-postreverse-vjp-level1`, manifest `a00437b0eed47db793a00fbf90dea735b4d1e1d4a01abd6d5796e78bbf4abe82`.
+- Full sanitizer validation: `runs/kda-cuda-development/validations/validation-00025-postreverse-vjp`, manifest `3506afa278451a07da155f0b5a34aa3812a3d9dabf8869986330cf66ded952c1`.
+- Level 2: `runs/kda-cuda-development/attempt-00095-postreverse-vjp-level2`, manifest `c478dc129c23131d3dbec6c8dd54bdeefaaf467b5552d76644217153f595e469`.
+- Production profile: `runs/kda-cuda-development/diagnostics/attempt-00095-production-profile`, manifest `6b728f731539a2bad97de8dc517628dde92618529181abd3a987cd164477c811`.
+- Append-only attempt/reference index SHA-256: `7cb3ebfeb36914127af3e23e9949664b9f0154670083187164f1313b896af90f`.
+
+**Result**
+
+- Pushed commit `9da42195c4a7853ea8bf7eae2c21ecfeaf5ea35f` passed ownership 1.0,
+  the complete protected runtime/profile audit, runtime FLA freedom, and all
+  four sanitizers with zero errors or hazards. Production output is bitwise
+  equal to attempt 91, maximum gradient delta is `5.821e-11`, every tensor
+  passes the frozen tolerance, and the fresh-cache repeat is bitwise exact.
+- Level 1 advanced: T=4096 forward+backward improved
+  `13.6405 -> 12.9604 ms` (4.99%) with identical 202,770,944-byte peak
+  allocation. All important-row and memory guards passed.
+- The single candidate-first Level-2 pair measured candidate
+  `[33282, 33435, 33348, 33475, 33307]` tok/s, median 33,348, and baseline
+  `[32612, 32921, 32825, 32835, 32751]` tok/s, median 32,825. The 1.59%
+  development gain is below the frozen 2% gate; peak memory is identical at
+  5,508.533 MiB, and candidate throughput is 76.35% of the fixed 43,680 tok/s
+  reference. No retest ran.
+- Profiling confirms that generic GEMMs fell from 130 to 50 per profiled
+  iteration and from 1.953 to 0.888 ms/iteration. The new post-reverse kernel
+  costs 0.755 ms/iteration, so its one-CTA-per-chunk serial schedule recovers
+  much of the removed tensor-core benefit. Remaining named costs are forward
+  WMMA 2.385 ms, group-boundary WMMA 1.328 ms, pair WMMA 0.991 ms, persistent
+  reverse 0.774 ms, and ordered pair accumulation 0.578 ms per iteration.
+- Attempt 95 is a correct rejected strategy milestone. Attempt 91 remains the
+  accepted development baseline and the official retained milestone remains
+  `4d1a3b231da2c99882324efbda5306a1815e21c7`. No confirmation or LM-quality
+  evaluation ran, and this is not statistically confirmed evidence.
+
+**Next**
+
+- Preserve the correct fused algebra but do not compose attempt 95 into the
+  baseline. The next backward variant should start from attempt 91 and replace
+  the 48-KiB one-CTA-per-chunk schedule with row-tile ownership: several CTAs
+  per chunk, small phase-local shared tiles, and deterministic single-writer
+  output tiles. This targets the measured 0.755-ms serialization while keeping
+  the 80-GEMM elimination. Pair accumulation and the forward scan remain the
+  next independent structural boundaries.
