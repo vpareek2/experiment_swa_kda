@@ -44,6 +44,70 @@ __device__ __forceinline__ int64_t history_index(
   return (((((b * heads + h) * (length + 1) + t) * value_dim + v) * key_dim) + k);
 }
 
+__global__ void nanochat_kda_chunk_preprocess_kernel(
+    const __nv_bfloat16* q,
+    const __nv_bfloat16* k,
+    const __nv_bfloat16* raw_gate,
+    const float* A_log,
+    const float* dt_bias,
+    float* q_square_sum,
+    float* k_square_sum,
+    float* q_inverse_norm,
+    float* k_inverse_norm,
+    float* normalized_q,
+    float* normalized_k,
+    float* gate_sigmoid,
+    float* decay_exponential,
+    int64_t heads,
+    int64_t key_dim,
+    int64_t row_count,
+    float lower_bound) {
+  const int64_t row = blockIdx.x;
+  if (row >= row_count) {
+    return;
+  }
+  const int64_t h = row % heads;
+  const int64_t key_base = row * key_dim;
+  __shared__ float q_inverse_norm_shared;
+  __shared__ float k_inverse_norm_shared;
+
+  // Lane zero deliberately preserves the recurrence kernels' ascending-key
+  // FP32 accumulation order.  Other lanes only begin after both norms exist.
+  if (threadIdx.x == 0) {
+    float query_sum = 0.0f;
+    float key_sum = 0.0f;
+    for (int64_t key = 0; key < key_dim; ++key) {
+      const float query_value = __bfloat162float(q[key_base + key]);
+      const float key_value = __bfloat162float(k[key_base + key]);
+      query_sum += query_value * query_value;
+      key_sum += key_value * key_value;
+    }
+    const float query_inverse = rsqrtf(fmaxf(query_sum, 1.0e-24f));
+    const float key_inverse = rsqrtf(fmaxf(key_sum, 1.0e-24f));
+    q_square_sum[row] = query_sum;
+    k_square_sum[row] = key_sum;
+    q_inverse_norm[row] = query_inverse;
+    k_inverse_norm[row] = key_inverse;
+    q_inverse_norm_shared = query_inverse;
+    k_inverse_norm_shared = key_inverse;
+  }
+  __syncthreads();
+
+  const float a = expf(A_log[h]);
+  for (int64_t key = threadIdx.x; key < key_dim; key += blockDim.x) {
+    const int64_t offset = key_base + key;
+    normalized_q[offset] =
+        __bfloat162float(q[offset]) * q_inverse_norm_shared;
+    normalized_k[offset] =
+        __bfloat162float(k[offset]) * k_inverse_norm_shared;
+    const float biased_gate =
+        __bfloat162float(raw_gate[offset]) + dt_bias[h * key_dim + key];
+    const float activated_gate = chunk_sigmoid(a * biased_gate);
+    gate_sigmoid[offset] = activated_gate;
+    decay_exponential[offset] = expf(lower_bound * activated_gate);
+  }
+}
+
 __global__ void nanochat_kda_chunk_forward_kernel(
     const __nv_bfloat16* q,
     const __nv_bfloat16* k,
@@ -124,7 +188,7 @@ __global__ void nanochat_kda_chunk_forward_kernel(
   }
 }
 
-__global__ void nanochat_kda_chunk_backward_kernel(
+__global__ void nanochat_kda_chunk_forward_kernel_shared_cache(
     const __nv_bfloat16* q,
     const __nv_bfloat16* k,
     const __nv_bfloat16* v,
@@ -132,6 +196,108 @@ __global__ void nanochat_kda_chunk_backward_kernel(
     const __nv_bfloat16* beta_logits,
     const float* A_log,
     const float* dt_bias,
+    const float* initial_state,
+    __nv_bfloat16* output,
+    float* state,
+    int64_t batch,
+    int64_t length,
+    int64_t heads,
+    int64_t key_dim,
+    int64_t value_dim,
+    float lower_bound,
+    float scale) {
+  const int64_t block = blockIdx.x;
+  if (block >= batch * heads) {
+    return;
+  }
+  const int64_t b = block / heads;
+  const int64_t h = block - b * heads;
+  const int64_t lane = threadIdx.x;
+  const int64_t value = lane;
+  const int64_t state_base = state_index(
+      b, h, value, 0, heads, value_dim, key_dim);
+  extern __shared__ float token_cache[];
+  float* normalized_q = token_cache;
+  float* normalized_k = normalized_q + key_dim;
+  float* decay_exp = normalized_k + key_dim;
+  __shared__ float q_inverse_norm_shared;
+  __shared__ float k_inverse_norm_shared;
+  __shared__ float beta_shared;
+
+  for (int64_t key = 0; key < key_dim; ++key) {
+    state[state_base + key] = initial_state == nullptr
+        ? 0.0f
+        : initial_state[state_base + key];
+  }
+
+  const float a = expf(A_log[h]);
+  for (int64_t token = 0; token < length; ++token) {
+    const int64_t q_base = q_index(
+        b, token, h, 0, length, heads, key_dim);
+    if (lane == 0) {
+      float q_square_sum = 0.0f;
+      float k_square_sum = 0.0f;
+      for (int64_t key = 0; key < key_dim; ++key) {
+        const float q_value = __bfloat162float(q[q_base + key]);
+        const float k_value = __bfloat162float(k[q_base + key]);
+        q_square_sum += q_value * q_value;
+        k_square_sum += k_value * k_value;
+      }
+      q_inverse_norm_shared = rsqrtf(fmaxf(q_square_sum, 1.0e-24f));
+      k_inverse_norm_shared = rsqrtf(fmaxf(k_square_sum, 1.0e-24f));
+      const int64_t beta_offset = (b * length + token) * heads + h;
+      beta_shared = chunk_sigmoid(__bfloat162float(beta_logits[beta_offset]));
+    }
+    __syncthreads();
+
+    for (int64_t key = lane; key < key_dim; key += blockDim.x) {
+      normalized_q[key] = __bfloat162float(q[q_base + key]) *
+          q_inverse_norm_shared * scale;
+      normalized_k[key] = __bfloat162float(k[q_base + key]) *
+          k_inverse_norm_shared;
+      const float gate_input = __bfloat162float(raw_gate[q_base + key]);
+      const float decay = lower_bound * chunk_sigmoid(
+          a * (gate_input + dt_bias[h * key_dim + key]));
+      decay_exp[key] = expf(decay);
+    }
+    __syncthreads();
+
+    float prediction = 0.0f;
+    for (int64_t key = 0; key < key_dim; ++key) {
+      const float decayed_state = state[state_base + key] * decay_exp[key];
+      state[state_base + key] = decayed_state;
+      prediction += normalized_k[key] * decayed_state;
+    }
+
+    const int64_t value_offset = v_index(
+        b, token, h, value, length, heads, value_dim);
+    const float residual = __bfloat162float(v[value_offset]) - prediction;
+    float output_value = 0.0f;
+    for (int64_t key = 0; key < key_dim; ++key) {
+      const float updated_state = state[state_base + key] +
+          beta_shared * normalized_k[key] * residual;
+      state[state_base + key] = updated_state;
+      output_value += normalized_q[key] * updated_state;
+    }
+    output[value_offset] = __float2bfloat16_rn(output_value);
+    __syncthreads();
+  }
+}
+
+__global__ void nanochat_kda_chunk_backward_kernel(
+    const __nv_bfloat16* v,
+    const __nv_bfloat16* raw_gate,
+    const __nv_bfloat16* beta_logits,
+    const float* A_log,
+    const float* dt_bias,
+    const float* q_square_sum,
+    const float* k_square_sum,
+    const float* q_inverse_norm,
+    const float* k_inverse_norm,
+    const float* normalized_q,
+    const float* normalized_k,
+    const float* gate_sigmoid,
+    const float* decay_exponential,
     const float* initial_state,
     const __nv_bfloat16* grad_output,
     const float* grad_final_state,
@@ -164,10 +330,6 @@ __global__ void nanochat_kda_chunk_backward_kernel(
   const int64_t lane = threadIdx.x;
   const int64_t lanes = blockDim.x;
   extern __shared__ float reduction[];
-  __shared__ float q_inverse_norm_shared;
-  __shared__ float k_inverse_norm_shared;
-  __shared__ float q_square_sum_shared;
-  __shared__ float k_square_sum_shared;
   __shared__ float beta_shared;
   __shared__ float query_dot_shared;
   __shared__ float key_dot_shared;
@@ -206,12 +368,6 @@ __global__ void nanochat_kda_chunk_backward_kernel(
       const int64_t q_base = q_index(
           b, token, h, 0, length, heads, key_dim);
       if (lane == 0) {
-        float k_square_sum = 0.0f;
-        for (int64_t key = 0; key < key_dim; ++key) {
-          const float key_value = __bfloat162float(k[q_base + key]);
-          k_square_sum += key_value * key_value;
-        }
-        k_inverse_norm_shared = rsqrtf(fmaxf(k_square_sum, 1.0e-24f));
         const int64_t beta_offset = (b * length + token) * heads + h;
         beta_shared = chunk_sigmoid(__bfloat162float(beta_logits[beta_offset]));
       }
@@ -220,29 +376,22 @@ __global__ void nanochat_kda_chunk_backward_kernel(
       for (int64_t value = lane; value < value_dim; value += lanes) {
         float prediction = 0.0f;
         for (int64_t key = 0; key < key_dim; ++key) {
-          const float gate_input = __bfloat162float(raw_gate[q_base + key]);
-          const float decay = lower_bound * chunk_sigmoid(
-              a * (gate_input + dt_bias[h * key_dim + key]));
           const float previous = state_history[history_index(
               b, h, token, value, key, heads, length, value_dim, key_dim)];
-          prediction += __bfloat162float(k[q_base + key]) *
-              k_inverse_norm_shared * previous * expf(decay);
+          prediction += normalized_k[q_base + key] * previous *
+              decay_exponential[q_base + key];
         }
         const int64_t value_offset = v_index(
             b, token, h, value, length, heads, value_dim);
         const float residual = __bfloat162float(v[value_offset]) - prediction;
         residual_history[value_offset] = residual;
         for (int64_t key = 0; key < key_dim; ++key) {
-          const float gate_input = __bfloat162float(raw_gate[q_base + key]);
-          const float decay = lower_bound * chunk_sigmoid(
-              a * (gate_input + dt_bias[h * key_dim + key]));
           const float previous = state_history[history_index(
               b, h, token, value, key, heads, length, value_dim, key_dim)];
-          const float normalized_key = __bfloat162float(k[q_base + key]) *
-              k_inverse_norm_shared;
           state_history[history_index(
               b, h, token + 1, value, key, heads, length, value_dim, key_dim)] =
-              previous * expf(decay) + beta_shared * normalized_key * residual;
+              previous * decay_exponential[q_base + key] +
+              beta_shared * normalized_k[q_base + key] * residual;
         }
       }
       __syncthreads();
@@ -262,21 +411,9 @@ __global__ void nanochat_kda_chunk_backward_kernel(
     for (int64_t token = length; token-- > 0;) {
       const int64_t q_base = q_index(
           b, token, h, 0, length, heads, key_dim);
+      const int64_t row = (b * length + token) * heads + h;
       if (lane == 0) {
-        float q_square_sum = 0.0f;
-        float k_square_sum = 0.0f;
-        for (int64_t key = 0; key < key_dim; ++key) {
-          const float query_value = __bfloat162float(q[q_base + key]);
-          const float key_value = __bfloat162float(k[q_base + key]);
-          q_square_sum += query_value * query_value;
-          k_square_sum += key_value * key_value;
-        }
-        q_square_sum_shared = q_square_sum;
-        k_square_sum_shared = k_square_sum;
-        q_inverse_norm_shared = rsqrtf(fmaxf(q_square_sum, 1.0e-24f));
-        k_inverse_norm_shared = rsqrtf(fmaxf(k_square_sum, 1.0e-24f));
-        const int64_t beta_offset = (b * length + token) * heads + h;
-        beta_shared = chunk_sigmoid(__bfloat162float(beta_logits[beta_offset]));
+        beta_shared = chunk_sigmoid(__bfloat162float(beta_logits[row]));
       }
       __syncthreads();
 
@@ -287,8 +424,7 @@ __global__ void nanochat_kda_chunk_backward_kernel(
             b, h, value, key, heads, value_dim, key_dim);
         const int64_t value_offset = v_index(
             b, token, h, value, length, heads, value_dim);
-        const float normalized_query = __bfloat162float(q[q_base + key]) *
-            q_inverse_norm_shared * scale;
+        const float normalized_query = normalized_q[q_base + key] * scale;
         state_adjoint[state] +=
             __bfloat162float(grad_output[value_offset]) * normalized_query;
       }
@@ -311,18 +447,16 @@ __global__ void nanochat_kda_chunk_backward_kernel(
         float query_dot = 0.0f;
         for (int64_t key = 0; key < key_dim; ++key) {
           query_dot += normalized_adjoint[q_base + key] *
-              (__bfloat162float(q[q_base + key]) * q_inverse_norm_shared);
+              normalized_q[q_base + key];
         }
         query_dot_shared = query_dot;
       }
       __syncthreads();
       for (int64_t key = lane; key < key_dim; key += lanes) {
-        const float query_value = __bfloat162float(q[q_base + key]);
-        const float normalized_query = query_value * q_inverse_norm_shared;
-        const float projection = q_square_sum_shared > 1.0e-24f
-            ? normalized_query * query_dot_shared
+        const float projection = q_square_sum[row] > 1.0e-24f
+            ? normalized_q[q_base + key] * query_dot_shared
             : 0.0f;
-        const float input_gradient = scale * q_inverse_norm_shared *
+        const float input_gradient = scale * q_inverse_norm[row] *
             (normalized_adjoint[q_base + key] - projection);
         dq[q_base + key] = __float2bfloat16_rn(input_gradient);
       }
@@ -335,10 +469,10 @@ __global__ void nanochat_kda_chunk_backward_kernel(
         for (int64_t key = 0; key < key_dim; ++key) {
           const int64_t state = state_index(
               b, h, value, key, heads, value_dim, key_dim);
-          const float normalized_key = __bfloat162float(k[q_base + key]) *
-              k_inverse_norm_shared;
-          gradient += state_adjoint[state] * beta_shared * normalized_key;
-          beta_partial += state_adjoint[state] * normalized_key * residual;
+          gradient += state_adjoint[state] * beta_shared *
+              normalized_k[q_base + key];
+          beta_partial += state_adjoint[state] *
+              normalized_k[q_base + key] * residual;
         }
         residual_adjoint[(b * heads + h) * value_dim + value] = gradient;
         dv[v_index(b, token, h, value, length, heads, value_dim)] =
@@ -357,10 +491,7 @@ __global__ void nanochat_kda_chunk_backward_kernel(
       }
 
       for (int64_t key = lane; key < key_dim; key += lanes) {
-        const float gate_input = __bfloat162float(raw_gate[q_base + key]);
-        const float decay = lower_bound * chunk_sigmoid(
-            a * (gate_input + dt_bias[h * key_dim + key]));
-        const float decay_exponential = expf(decay);
+        const float decay_factor = decay_exponential[q_base + key];
         float normalized_gradient = 0.0f;
         for (int64_t value = 0; value < value_dim; ++value) {
           const int64_t state = state_index(
@@ -372,7 +503,7 @@ __global__ void nanochat_kda_chunk_backward_kernel(
           const float previous = state_history[history_index(
               b, h, token, value, key, heads, length, value_dim, key_dim)];
           normalized_gradient += state_adjoint[state] * beta_shared * residual -
-              residual_gradient * previous * decay_exponential;
+              residual_gradient * previous * decay_factor;
         }
         normalized_adjoint[q_base + key] = normalized_gradient;
       }
@@ -381,18 +512,16 @@ __global__ void nanochat_kda_chunk_backward_kernel(
         float key_dot = 0.0f;
         for (int64_t key = 0; key < key_dim; ++key) {
           key_dot += normalized_adjoint[q_base + key] *
-              (__bfloat162float(k[q_base + key]) * k_inverse_norm_shared);
+              normalized_k[q_base + key];
         }
         key_dot_shared = key_dot;
       }
       __syncthreads();
       for (int64_t key = lane; key < key_dim; key += lanes) {
-        const float key_value = __bfloat162float(k[q_base + key]);
-        const float normalized_key = key_value * k_inverse_norm_shared;
-        const float projection = k_square_sum_shared > 1.0e-24f
-            ? normalized_key * key_dot_shared
+        const float projection = k_square_sum[row] > 1.0e-24f
+            ? normalized_k[q_base + key] * key_dot_shared
             : 0.0f;
-        const float input_gradient = k_inverse_norm_shared *
+        const float input_gradient = k_inverse_norm[row] *
             (normalized_adjoint[q_base + key] - projection);
         dk[q_base + key] = __float2bfloat16_rn(input_gradient);
       }
@@ -400,12 +529,10 @@ __global__ void nanochat_kda_chunk_backward_kernel(
       for (int64_t key = lane; key < key_dim; key += lanes) {
         const float gate_input = __bfloat162float(raw_gate[q_base + key]);
         const float biased_gate = gate_input + dt_bias[h * key_dim + key];
-        const float gate_sigmoid = chunk_sigmoid(a * biased_gate);
-        const float decay = lower_bound * gate_sigmoid;
-        const float decay_exponential = expf(decay);
+        const float activated_gate = gate_sigmoid[q_base + key];
+        const float decay_factor = decay_exponential[q_base + key];
         float decay_gradient = 0.0f;
-        const float normalized_key = __bfloat162float(k[q_base + key]) *
-            k_inverse_norm_shared;
+        const float normalized_key = normalized_k[q_base + key];
         for (int64_t value = 0; value < value_dim; ++value) {
           const int64_t state = state_index(
               b, h, value, key, heads, value_dim, key_dim);
@@ -413,14 +540,14 @@ __global__ void nanochat_kda_chunk_backward_kernel(
               (b * heads + h) * value_dim + value];
           const float previous = state_history[history_index(
               b, h, token, value, key, heads, length, value_dim, key_dim)];
-          const float decayed_state = previous * decay_exponential;
+          const float decayed_state = previous * decay_factor;
           const float decayed_gradient = state_adjoint[state] -
               residual_gradient * normalized_key;
           decay_gradient += decayed_gradient * decayed_state;
-          state_adjoint[state] = decayed_gradient * decay_exponential;
+          state_adjoint[state] = decayed_gradient * decay_factor;
         }
         const float activated_gradient = decay_gradient * lower_bound *
-            gate_sigmoid * (1.0f - gate_sigmoid);
+            activated_gate * (1.0f - activated_gate);
         const float raw_gradient = activated_gradient * a;
         draw_gate[q_base + key] = __float2bfloat16_rn(raw_gradient);
         ddt_bias_partial[parameter_base + key] += raw_gradient;
@@ -573,22 +700,42 @@ std::tuple<at::Tensor, c10::optional<at::Tensor>> chunk_forward_cuda(
   const int64_t count = batch * heads * value_dim;
   if (count > 0) {
     const int threads = 128;
-    const int blocks = static_cast<int>((count + threads - 1) / threads);
-    nanochat_kda_chunk_forward_kernel<<<blocks, threads, 0,
-        at::cuda::getCurrentCUDAStream(q.get_device())>>>(
-        reinterpret_cast<const __nv_bfloat16*>(contiguous_q.data_ptr<at::BFloat16>()),
-        reinterpret_cast<const __nv_bfloat16*>(contiguous_k.data_ptr<at::BFloat16>()),
-        reinterpret_cast<const __nv_bfloat16*>(contiguous_v.data_ptr<at::BFloat16>()),
-        reinterpret_cast<const __nv_bfloat16*>(contiguous_raw_gate.data_ptr<at::BFloat16>()),
-        reinterpret_cast<const __nv_bfloat16*>(contiguous_beta_logits.data_ptr<at::BFloat16>()),
-        A_log.data_ptr<float>(),
-        dt_bias.data_ptr<float>(),
-        initial_pointer,
-        reinterpret_cast<__nv_bfloat16*>(output.data_ptr<at::BFloat16>()),
-        state.data_ptr<float>(),
-        batch, length, heads, key_dim, value_dim,
-        static_cast<float>(lower_bound), static_cast<float>(scale));
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    const cudaStream_t stream = at::cuda::getCurrentCUDAStream(q.get_device());
+    if (key_dim == 128 && value_dim == 128) {
+      const int64_t recurrence_count = batch * heads;
+      const size_t shared_bytes = static_cast<size_t>(3 * key_dim) * sizeof(float);
+      nanochat_kda_chunk_forward_kernel_shared_cache<<<
+          static_cast<int>(recurrence_count), threads, shared_bytes, stream>>>(
+          reinterpret_cast<const __nv_bfloat16*>(contiguous_q.data_ptr<at::BFloat16>()),
+          reinterpret_cast<const __nv_bfloat16*>(contiguous_k.data_ptr<at::BFloat16>()),
+          reinterpret_cast<const __nv_bfloat16*>(contiguous_v.data_ptr<at::BFloat16>()),
+          reinterpret_cast<const __nv_bfloat16*>(contiguous_raw_gate.data_ptr<at::BFloat16>()),
+          reinterpret_cast<const __nv_bfloat16*>(contiguous_beta_logits.data_ptr<at::BFloat16>()),
+          A_log.data_ptr<float>(),
+          dt_bias.data_ptr<float>(),
+          initial_pointer,
+          reinterpret_cast<__nv_bfloat16*>(output.data_ptr<at::BFloat16>()),
+          state.data_ptr<float>(),
+          batch, length, heads, key_dim, value_dim,
+          static_cast<float>(lower_bound), static_cast<float>(scale));
+      C10_CUDA_KERNEL_LAUNCH_CHECK();
+    } else {
+      const int blocks = static_cast<int>((count + threads - 1) / threads);
+      nanochat_kda_chunk_forward_kernel<<<blocks, threads, 0, stream>>>(
+          reinterpret_cast<const __nv_bfloat16*>(contiguous_q.data_ptr<at::BFloat16>()),
+          reinterpret_cast<const __nv_bfloat16*>(contiguous_k.data_ptr<at::BFloat16>()),
+          reinterpret_cast<const __nv_bfloat16*>(contiguous_v.data_ptr<at::BFloat16>()),
+          reinterpret_cast<const __nv_bfloat16*>(contiguous_raw_gate.data_ptr<at::BFloat16>()),
+          reinterpret_cast<const __nv_bfloat16*>(contiguous_beta_logits.data_ptr<at::BFloat16>()),
+          A_log.data_ptr<float>(),
+          dt_bias.data_ptr<float>(),
+          initial_pointer,
+          reinterpret_cast<__nv_bfloat16*>(output.data_ptr<at::BFloat16>()),
+          state.data_ptr<float>(),
+          batch, length, heads, key_dim, value_dim,
+          static_cast<float>(lower_bound), static_cast<float>(scale));
+      C10_CUDA_KERNEL_LAUNCH_CHECK();
+    }
   }
   c10::optional<at::Tensor> final_state = c10::nullopt;
   if (output_final_state) {
@@ -666,6 +813,14 @@ chunk_backward_cuda(
     dinitial_pointer = dinitial_state->data_ptr<float>();
   }
 
+  at::Tensor q_square_sum = at::empty({batch, length, heads}, A_log.options());
+  at::Tensor k_square_sum = at::empty({batch, length, heads}, A_log.options());
+  at::Tensor q_inverse_norm = at::empty({batch, length, heads}, A_log.options());
+  at::Tensor k_inverse_norm = at::empty({batch, length, heads}, A_log.options());
+  at::Tensor normalized_q = at::empty(q.sizes(), A_log.options());
+  at::Tensor normalized_k = at::empty(k.sizes(), A_log.options());
+  at::Tensor gate_sigmoid = at::empty(raw_gate.sizes(), A_log.options());
+  at::Tensor decay_exponential = at::empty(raw_gate.sizes(), A_log.options());
   at::Tensor state_history = at::empty(
       {batch, heads, length + 1, value_dim, key_dim}, A_log.options());
   at::Tensor residual_history = at::empty(
@@ -678,19 +833,46 @@ chunk_backward_cuda(
 
   const int threads = 256;
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream(q.get_device());
+  const int64_t row_count = batch * length * heads;
+  if (row_count > 0) {
+    nanochat_kda_chunk_preprocess_kernel<<<
+        static_cast<int>(row_count), threads, 0, stream>>>(
+        reinterpret_cast<const __nv_bfloat16*>(contiguous_q.data_ptr<at::BFloat16>()),
+        reinterpret_cast<const __nv_bfloat16*>(contiguous_k.data_ptr<at::BFloat16>()),
+        reinterpret_cast<const __nv_bfloat16*>(contiguous_raw_gate.data_ptr<at::BFloat16>()),
+        A_log.data_ptr<float>(),
+        dt_bias.data_ptr<float>(),
+        q_square_sum.data_ptr<float>(),
+        k_square_sum.data_ptr<float>(),
+        q_inverse_norm.data_ptr<float>(),
+        k_inverse_norm.data_ptr<float>(),
+        normalized_q.data_ptr<float>(),
+        normalized_k.data_ptr<float>(),
+        gate_sigmoid.data_ptr<float>(),
+        decay_exponential.data_ptr<float>(),
+        heads, key_dim, row_count,
+        static_cast<float>(lower_bound));
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+  }
   const int64_t recurrence_count = batch * heads;
   if (recurrence_count > 0) {
     const size_t shared_bytes = static_cast<size_t>(
         key_dim > value_dim ? key_dim : value_dim) * sizeof(float);
     nanochat_kda_chunk_backward_kernel<<<
         static_cast<int>(recurrence_count), threads, shared_bytes, stream>>>(
-        reinterpret_cast<const __nv_bfloat16*>(contiguous_q.data_ptr<at::BFloat16>()),
-        reinterpret_cast<const __nv_bfloat16*>(contiguous_k.data_ptr<at::BFloat16>()),
         reinterpret_cast<const __nv_bfloat16*>(contiguous_v.data_ptr<at::BFloat16>()),
         reinterpret_cast<const __nv_bfloat16*>(contiguous_raw_gate.data_ptr<at::BFloat16>()),
         reinterpret_cast<const __nv_bfloat16*>(contiguous_beta_logits.data_ptr<at::BFloat16>()),
         A_log.data_ptr<float>(),
         dt_bias.data_ptr<float>(),
+        q_square_sum.data_ptr<float>(),
+        k_square_sum.data_ptr<float>(),
+        q_inverse_norm.data_ptr<float>(),
+        k_inverse_norm.data_ptr<float>(),
+        normalized_q.data_ptr<float>(),
+        normalized_k.data_ptr<float>(),
+        gate_sigmoid.data_ptr<float>(),
+        decay_exponential.data_ptr<float>(),
         initial_state.has_value() ? initial_state->data_ptr<float>() : nullptr,
         reinterpret_cast<const __nv_bfloat16*>(
             contiguous_grad_output.data_ptr<at::BFloat16>()),
