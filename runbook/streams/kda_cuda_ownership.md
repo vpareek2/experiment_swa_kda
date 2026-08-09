@@ -6401,3 +6401,64 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_091 \
   replay isolated prepacking, barrier sharing, group widening, or copy-only
   variants. The fixed reference remains 43,680 tok/s and the objective remains
   at least 45,000 tok/s.
+
+## 2026-08-09 [agent] reject prepared BF16 group-boundary recurrence
+
+**Context**
+
+- Pair-WMMA production and ordered accumulation cannot be directly fused while
+  preserving determinism: the producer owns tile pairs, whereas the consumer
+  owns output rows and ordered contributions. Direct fusion would require
+  atomics, duplicate products, or rejected pair-batch widening.
+- Attempt 92 therefore starts from accepted attempt 91 and tests the next
+  structural group-boundary axis. `W/E` are rounded once during the existing
+  group pack into dead scratch, and the persistent eight-chunk boundary kernel
+  keeps its local state in BF16 while retaining FP32 WMMA accumulation and
+  explicit FP32-to-BF16 chunk-boundary rounding.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --config configs/research/kda_cuda_ownership.toml \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_092 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact seed-4101 production comparison/repeat against attempt 91.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_091 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_092 \
+  runs/kda-cuda-development/attempt-00092-bf16-group-recurrence-level1 \
+  --level2-order candidate-first
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_092 \
+  push -u origin kda-cuda/wy-bf16-group-recurrence-092
+```
+
+**Artifacts**
+
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00092-bf16-group-recurrence-protected-checker`, manifest `7d22c49f5e3df5c98aa47f60be44cf409e1e9506f0c8fcf996800015a214dd6b`.
+- Production comparison/repeat: `runs/kda-cuda-development/diagnostics/attempt-00092-bf16-group-recurrence-gradient`, manifest `5e87e5c241ae4094f43e62b8067ba7adbf7c082c5f8febb6ecaeb3b95a6be1f6`.
+- Level 1: `runs/kda-cuda-development/attempt-00092-bf16-group-recurrence-level1`, manifest `e963639540fafe6b3db8b520f38c181d474a72ddaeb7ac0977e2c7cd1ea42a60`.
+- Append-only attempt/reference index SHA-256: `f3783635ea56d1def333ab6855946a129993b6587def62c1cec146c36f68b573`.
+
+**Result**
+
+- Pushed commit `82b397b1f4492b8d412d78514918ef9701776b3c` passed ownership 1.0,
+  the complete protected runtime/profile audit, and runtime FLA freedom.
+  Output, `dv`, and `dbeta` are bitwise equal to attempt 91; the maximum
+  gradient delta is `3.638e-12`, every tensor passes the frozen tolerance, and
+  the independent repeat is bitwise exact.
+- Level 1 rejected the candidate. T=4096 forward+backward regressed
+  `13.2552 -> 13.4394 ms` (1.39%); T=1024 regressed 1.26% and T=256 regressed
+  3.40%. Memory ratio is 1.0 and all frozen guards remain within their limits.
+- No sanitizer, Level 2, profile, confirmation, or LM-quality evaluation ran.
+  Attempt 91 remains the accepted development baseline and the official
+  retained milestone remains `4d1a3b231da2c99882324efbda5306a1815e21c7`.
+  This is not statistically confirmed evidence.
+
+**Next**
+
+- Preserve FP32 local state and in-kernel operand conversion in the
+  group-boundary path. Continue from attempt 91; do not compose attempt 92 or
+  retry direct pair producer/consumer fusion. Target a larger ownership-aligned
+  fusion, especially the post-pair accumulation/prefix/finalize chain or a
+  custom producer that removes group `T@P/T@Q` materialization entirely.
