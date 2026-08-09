@@ -5931,3 +5931,99 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_085 \
   barrier is too small to retain; target a larger structural reduction in the
   persistent forward scan, group-boundary scan, or pair accumulation without
   replaying prior scheduling variants.
+
+## 2026-08-09 [agent] preserve persistent build/solve fusion after sub-threshold Level 2
+
+**Context**
+
+- Attempt 86 starts from accepted attempt 84 and changes only
+  `nanochat/mixers/cuda_kda/chunk_wy_forward.cu` and
+  `nanochat/mixers/cuda_kda/chunk_wy_backward.cu`. One persistent CTA per
+  chunk computes all ten stable A/M tile pairs, retains M and T in shared
+  memory, performs the ordered unit-lower triangular solve, and writes A/T.
+- This removes the global M tensor, eighteen extra pair-builder launches, and
+  two separate solve launches over forward construction plus backward
+  recomputation. The recurrence, C64 chunk geometry, FP32 state, bounded
+  backward state, and declared model configuration remain unchanged.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --config configs/research/kda_cuda_ownership.toml \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_086 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact seed-4101 production capture and fresh-cache repeat against attempt 84.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_084 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_086 \
+  runs/kda-cuda-development/attempt-00086-build-solve-level1 \
+  --level2-order candidate-first
+# After staging the exact committed patch in detached validation worktree 086:
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_validation_086 \
+  --lane optimization --sanitizers <isolated artifact/cache arguments>
+# Executed the saved candidate-first Level-2 plan exactly once with absolute
+# raw-log paths, followed by one bounded two-iteration production profile.
+PYTHONPATH=/home/veer/Master/projects/experiment_swa_kda_cuda_attempt_086 \
+TORCH_EXTENSIONS_DIR=/tmp/kda086-production-profile-ext-001 \
+nsys profile --trace=cuda,nvtx,osrt --sample=none --cpuctxsw=none \
+  --force-overwrite=true --output=<artifact>/trace \
+  /home/veer/Master/projects/experiment_swa_kda/.venv/bin/python \
+  /tmp/kda033_nsys.py
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_086 \
+  push -u origin kda-cuda/wy-persistent-build-solve-086
+```
+
+**Artifacts**
+
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00086-build-solve-protected-checker`, manifest `d0ea75134907bcdb15c246e9b5f4fd3460bfab39ca74eaa2b8ad645c4695cdcd`.
+- Production comparison/repeat: `runs/kda-cuda-development/diagnostics/attempt-00086-build-solve-gradient`, manifest `4209d1dd5fecad4fcccb3f68b1ce930f2f389a23ccb26d0877c86df7eba75f2d`.
+- Invalid pre-GPU sanitizer staging: `runs/kda-cuda-development/diagnostics/attempt-00086-validation-stage-invalid-001`, manifest `0cdeca256e8bcd0f030847958812df2efa1bd4e4d7b16d472fade0ac87c67f44`.
+- Level 1: `runs/kda-cuda-development/attempt-00086-build-solve-level1`, manifest `266fb4e60294b5962aa4c4c13b0219c3ee904691ec2ee8264456cae0392d8764`.
+- Full sanitizer validation: `runs/kda-cuda-development/validations/validation-00021-build-solve`, manifest `3193d8d31c0e84a8f336dd9c240f8347fb0a540a7dc463143aef3e3b071ef7ca`.
+- Level 2: `runs/kda-cuda-development/attempt-00086-build-solve-level2`, manifest `d08c693cb5d6b457d09cf98e710efdb68840806aec33d59c71a11ae8bdc2e4f5`.
+- Production profile: `runs/kda-cuda-development/diagnostics/attempt-00086-production-profile`, manifest `4aed887bb92d09077a1f11b52510cd05509611f2f5583bb4d4605787b69fa44b`.
+- Append-only attempt/reference index SHA-256: `24a80445ce7437d6bc6478b1b9ba0bd6324440b32c5605cea29ae053ee8b31bb`.
+
+**Result**
+
+- Pushed commit `8ce6d2ad8b1f5cf43e2477f5a111b947442d2d6e` passed ownership 1.0,
+  the protected runtime/profile audit, runtime FLA freedom, and all four
+  sanitizers with zero errors or hazards. Output and `dq` are bitwise equal to
+  attempt 84; the maximum gradient delta is `2.056e-9`, every tensor is finite
+  and within the frozen tolerance, and the fresh-cache repeat is bitwise exact.
+- Level 1 advanced: T=4096 forward+backward improved
+  `15.285 -> 14.691 ms` (3.89%) with memory ratio 1.0 and all guards true.
+  T=256 forward+backward improved 5.24%; T=1024 forward+backward regressed
+  1.64%, within the declared guard.
+- The candidate-first Level-2 pair measured candidate
+  `[32177, 31846, 32043, 31981, 31872]` tok/s, median 31,981, and baseline
+  `[31853, 31882, 31877, 31782, 31805]` tok/s, median 31,853. The 0.40%
+  development improvement is sub-threshold, with peak memory 5,507.033 versus
+  5,508.533 MiB and candidate throughput at 73.22% of the fixed 43,680 tok/s
+  external FLA reference.
+- The profile measured build+solve at 0.709 ms/iteration versus 0.962 ms for
+  attempt 84, an estimated targeted saving of only 0.253 ms/iteration. The
+  largest remaining owned kernels are forward WMMA at 2.185 ms/iteration,
+  group-boundary WMMA at 1.357 ms, and pair-WMMA plus ordered accumulation at
+  1.566 ms.
+- The first detached validation staging command used invalid guessed revision
+  `8ce6d2aa95b3daf73b891306405d5bf9a50c4f95` and failed before checker or GPU
+  work with `fatal: bad object` and `No valid patches in input`. No redirected
+  raw log exists; that preservation limitation and the exact errors are saved.
+- Attempt 86 is preserved but does not replace attempt 84 as the accepted
+  development baseline. The official retained milestone remains
+  `4d1a3b231da2c99882324efbda5306a1815e21c7`. No confirmation or LM-quality
+  evaluation ran, and this is not statistically confirmed evidence.
+
+**Next**
+
+- Continue from attempt 84. FlashKDA's offline forward design separates a
+  token-parallel preparation kernel from the persistent recurrence and feeds
+  the latter pre-decayed/pre-restored BF16 operands. Test the corresponding
+  project-owned mechanism without importing or linking FlashKDA: compact the
+  FP32 `W`, decayed q, restored k, and A scan operands to BF16 once after
+  construction, then remove their repeated per-value-tile conversions while
+  retaining FP32 state and accumulation. Preserve every correctness and
+  provenance gate.
