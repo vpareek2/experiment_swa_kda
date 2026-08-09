@@ -22,6 +22,7 @@ constexpr int kHeads = 3;
 constexpr int kLength = 4096;
 constexpr int kDim = 128;
 constexpr int kChunk = 64;
+constexpr int kMatrixTile = 16;
 constexpr int kChunks = kLength / kChunk;
 constexpr int kRecurrences = kBatch * kHeads;
 constexpr int kChunkRows = kRecurrences * kChunks;
@@ -166,6 +167,102 @@ __global__ void nanochat_kda_wy_backward_build_m_a_c64_kernel(
     M[chunk_matrix_index(n, i, s)] = m_value;
     A[chunk_matrix_index(n, i, s)] = a_value;
   }
+}
+
+__global__ void nanochat_kda_wy_backward_transform_pair_c64_kernel(
+    const float* left_source,
+    const float* khat,
+    const float* prefix_g,
+    float* left,
+    float* right,
+    int target_start,
+    int source_start) {
+  const int index = blockIdx.x * blockDim.x + threadIdx.x;
+  constexpr int kElements = kChunkRows * kMatrixTile * kDim;
+  if (index >= kElements) {
+    return;
+  }
+  const int n = index / (kMatrixTile * kDim);
+  const int within = index - n * kMatrixTile * kDim;
+  const int local_row = within / kDim;
+  const int d = within - local_row * kDim;
+  const int target_row = target_start + local_row;
+  const int source_row = source_start + local_row;
+  const int center_row =
+      target_start == source_start ? target_start : target_start - 1;
+  const float center = prefix_g[chunk_vector_index(n, center_row, d)];
+  const int64_t target = chunk_vector_index(n, target_row, d);
+  const int64_t source = chunk_vector_index(n, source_row, d);
+  left[index] = left_source[target] * expf(prefix_g[target] - center);
+  right[index] = khat[source] * expf(center - prefix_g[source]);
+}
+
+__global__ void nanochat_kda_wy_backward_transform_left_k_c64_kernel(
+    const float* khat,
+    const float* prefix_g,
+    float* left,
+    int target_start,
+    int source_start) {
+  const int index = blockIdx.x * blockDim.x + threadIdx.x;
+  constexpr int kElements = kChunkRows * kMatrixTile * kDim;
+  if (index >= kElements) {
+    return;
+  }
+  const int n = index / (kMatrixTile * kDim);
+  const int within = index - n * kMatrixTile * kDim;
+  const int local_row = within / kDim;
+  const int d = within - local_row * kDim;
+  const int target_row = target_start + local_row;
+  const int center_row =
+      target_start == source_start ? target_start : target_start - 1;
+  const int64_t target = chunk_vector_index(n, target_row, d);
+  const float center = prefix_g[chunk_vector_index(n, center_row, d)];
+  left[index] = khat[target] * expf(prefix_g[target] - center);
+}
+
+__global__ void nanochat_kda_wy_backward_finish_m_a_c64_kernel(
+    const float* beta,
+    float* M,
+    float* A) {
+  const int index = blockIdx.x * blockDim.x + threadIdx.x;
+  constexpr int kElements = kChunkRows * kChunk * kChunk;
+  if (index >= kElements) {
+    return;
+  }
+  const int n = index / (kChunk * kChunk);
+  const int within = index - n * kChunk * kChunk;
+  const int row = within / kChunk;
+  const int source = within - row * kChunk;
+  if (source > row) {
+    A[index] = 0.0f;
+  }
+  if (source >= row) {
+    M[index] = 0.0f;
+  } else {
+    M[index] *= beta[static_cast<int64_t>(n) * kChunk + row];
+  }
+}
+
+__global__ void nanochat_kda_wy_backward_rebuild_p_c64_kernel(
+    const __nv_bfloat16* v,
+    const float* beta,
+    float* P) {
+  const int index = blockIdx.x * blockDim.x + threadIdx.x;
+  constexpr int kElements = kChunkRows * kChunk * kDim;
+  if (index >= kElements) {
+    return;
+  }
+  const int n = index / (kChunk * kDim);
+  const int within = index - n * kChunk * kDim;
+  const int row = within / kDim;
+  const int d = within - row * kDim;
+  const int chunk_id = n % kChunks;
+  const int recurrence = n / kChunks;
+  const int h = recurrence % kHeads;
+  const int b = recurrence / kHeads;
+  const int token = chunk_id * kChunk + row;
+  P[index] = beta[static_cast<int64_t>(n) * kChunk + row] *
+      __bfloat162float(v[input_vector_index(b, token, h, d)]);
 }
 
 __global__ void nanochat_kda_wy_backward_solve_c64_kernel(
@@ -762,11 +859,49 @@ nanochat_kda_chunk_wy_backward_c64(
       prefix_g.data_ptr<float>(), beta.data_ptr<float>(),
       P.data_ptr<float>(), Q.data_ptr<float>(), lower_bound, scale);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
-  nanochat_kda_wy_backward_build_m_a_c64_kernel<<<
-      kChunkRows, kThreads, 0, stream>>>(
-      qbar.data_ptr<float>(), khat.data_ptr<float>(),
-      prefix_g.data_ptr<float>(), beta.data_ptr<float>(),
-      M.data_ptr<float>(), A.data_ptr<float>());
+  constexpr int kTileElements = kChunkRows * kMatrixTile * kDim;
+  at::Tensor P_flat = P.view({-1});
+  at::Tensor tile_left = P_flat.narrow(0, 0, kTileElements).view(
+      {kChunkRows, kMatrixTile, kDim});
+  at::Tensor tile_right = P_flat.narrow(0, kTileElements, kTileElements).view(
+      {kChunkRows, kMatrixTile, kDim});
+  for (int target_start = 0; target_start < kChunk;
+       target_start += kMatrixTile) {
+    for (int source_start = 0; source_start <= target_start;
+         source_start += kMatrixTile) {
+      nanochat_kda_wy_backward_transform_pair_c64_kernel<<<
+          (kTileElements + kThreads - 1) / kThreads,
+          kThreads, 0, stream>>>(
+          qbar.data_ptr<float>(), khat.data_ptr<float>(),
+          prefix_g.data_ptr<float>(), tile_left.data_ptr<float>(),
+          tile_right.data_ptr<float>(), target_start, source_start);
+      C10_CUDA_KERNEL_LAUNCH_CHECK();
+      at::Tensor A_tile = A.narrow(1, target_start, kMatrixTile)
+          .narrow(2, source_start, kMatrixTile);
+      at::bmm_out(A_tile, tile_left, tile_right.transpose(1, 2));
+      nanochat_kda_wy_backward_transform_left_k_c64_kernel<<<
+          (kTileElements + kThreads - 1) / kThreads,
+          kThreads, 0, stream>>>(
+          khat.data_ptr<float>(), prefix_g.data_ptr<float>(),
+          tile_left.data_ptr<float>(), target_start, source_start);
+      C10_CUDA_KERNEL_LAUNCH_CHECK();
+      at::Tensor M_tile = M.narrow(1, target_start, kMatrixTile)
+          .narrow(2, source_start, kMatrixTile);
+      at::bmm_out(M_tile, tile_left, tile_right.transpose(1, 2));
+    }
+  }
+  constexpr int kAllMatrixElements = kChunkRows * kChunk * kChunk;
+  nanochat_kda_wy_backward_finish_m_a_c64_kernel<<<
+      (kAllMatrixElements + kThreads - 1) / kThreads,
+      kThreads, 0, stream>>>(
+      beta.data_ptr<float>(), M.data_ptr<float>(), A.data_ptr<float>());
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  constexpr int kAllVectorElements = kChunkRows * kChunk * kDim;
+  nanochat_kda_wy_backward_rebuild_p_c64_kernel<<<
+      (kAllVectorElements + kThreads - 1) / kThreads,
+      kThreads, 0, stream>>>(
+      reinterpret_cast<const __nv_bfloat16*>(v.data_ptr<at::BFloat16>()),
+      beta.data_ptr<float>(), P.data_ptr<float>());
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   nanochat_kda_wy_backward_solve_c64_kernel<<<
       kChunkRows, kChunk, 0, stream>>>(M.data_ptr<float>(), T.data_ptr<float>());
