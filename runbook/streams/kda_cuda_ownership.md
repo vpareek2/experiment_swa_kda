@@ -6105,3 +6105,61 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_087 \
   compose that with attempt 86's correct persistent build/solve. The measured
   upper bound is roughly 0.426 ms/iteration from scan prepacking plus 0.253 ms
   from build/solve before the new direct-pack cost.
+
+## 2026-08-09 [agent] preserve sub-threshold direct dead-buffer prepack composition
+
+**Context**
+
+- Attempt 88 composes attempt 86's correct persistent A/M build+solve with a
+  cheaper realization of attempt 87's BF16 scan prepack. After U/W are formed,
+  two flat kernels write qgamma/restored-k/W/A directly into dead P/Q/T/qbar
+  backing storage. No new allocation or shared snapshot is used.
+- The candidate differs from accepted attempt 84 only in
+  `nanochat/mixers/cuda_kda/chunk_wy_forward.cu` and
+  `nanochat/mixers/cuda_kda/chunk_wy_backward.cu`; FP32 recurrent state and
+  accumulation remain unchanged.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_088 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact seed-4101 production comparison/repeat against attempt 84.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_084 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_088 \
+  runs/kda-cuda-development/attempt-00088-direct-prepack-level1 \
+  --level2-order candidate-first
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_088 \
+  push -u origin kda-cuda/wy-direct-prepack-build-solve-088
+```
+
+**Artifacts**
+
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00088-direct-prepack-protected-checker`, manifest `3a8a2257437120d616ff932b7cb701a5fde5b1c8d41e48f81cf5a9ec2bd529e7`.
+- Production comparison/repeat: `runs/kda-cuda-development/diagnostics/attempt-00088-direct-prepack-gradient`, manifest `10c90f2d9297a4ca42fdb45f1c38351e730a80d6b66d17849b93fe8602560d67`.
+- Level 1: `runs/kda-cuda-development/attempt-00088-direct-prepack-level1`, manifest `335956cac5afb2c69f52c1e3bfc7d80785ff9f2451248bc43e1eb9a62f59726a`.
+- Append-only attempt/reference index SHA-256: `a626cae78d7daad50a19431b5e5b3bba46546c7151ed4a6d9c4f772bf8606d4d`.
+
+**Result**
+
+- Pushed commit `eeb08e6c927b43ccc6bdce5019b885edaef0bf4e` passed ownership 1.0,
+  protected runtime/profile audit, and runtime FLA freedom. Output and `dq` are
+  bitwise equal to attempt 84, maximum gradient delta is `2.056e-9`, all
+  tensors pass frozen tolerances, and the fresh-cache repeat is bitwise exact.
+- Level 1 is directionally positive but sub-threshold: T=4096 forward improved
+  `19.579 -> 19.086 ms` (2.52%) and forward+backward improved
+  `14.708 -> 14.445 ms` (1.79%). Memory ratio is 1.0 and every regression guard
+  passed. No sanitizer, Level 2, profile, confirmation, or retest ran.
+- Attempt 84 remains the accepted development baseline. The official retained
+  milestone remains `4d1a3b231da2c99882324efbda5306a1815e21c7`; this is not
+  statistically confirmed or LM-quality evidence.
+
+**Next**
+
+- Test BF16 storage for the inter-chunk recurrent state as a separate axis on
+  top of attempt 88. The scan already rounds that state to BF16 before every
+  WMMA, while BF16 storage can halve its shared footprint and remove repeated
+  state casts. Keep the frozen forward/gradient tolerances unchanged and reject
+  immediately if the inter-chunk decay/update rounding exceeds them.
