@@ -5182,3 +5182,52 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_073 \
 - Preserve attempt 73 unchanged. Continue from attempt 72 and target pair
   pack/transforms or generic FP32 BMM groups rather than doubling forward CTA
   count.
+
+## 2026-08-09 [agent] reject pair-factor caching traffic
+
+**Context**
+
+- Attempt 74 starts from accepted attempt 72. The pair-pack kernel writes its
+  already computed target/source exponential factors into `dR_group` and
+  `dE_group` after their last reads; pair accumulation reloads those factors
+  instead of recomputing exponentials. The buffers are group-local and dead,
+  so allocation and history are unchanged.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_074 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact production comparison/repeat.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_072 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_074 \
+  runs/kda-cuda-development/attempt-00074-pair-factor-level1
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_074 \
+  push -u origin kda-cuda/wy-pair-factor-cache-074
+```
+
+**Artifacts**
+
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00074-pair-factor-protected-checker`, manifest `1380487dd92ff420ed0aac69f5a02a14ba4e074c576f135216d3bb994f00add2`.
+- Production comparison/repeat: `runs/kda-cuda-development/diagnostics/attempt-00074-pair-factor-gradient`, manifest `5264a67b26eaae5d3addc25724736bce24cfdd7629d315a7194216233c7e49f8`.
+- Level 1: `runs/kda-cuda-development/attempt-00074-pair-factor-level1`, manifest `1bb0c0119131e7669572e75aa7937d55ef9c9f15a3876b7389f34de8f2e4435c`.
+- Append-only attempt/reference index SHA-256: `d57206bd61fe859d2fa37dc7294f5a5fd4392b88b72a8741710901b8b788612d`.
+
+**Result**
+
+- Pushed commit `3b6ca582a008f9255393d2279a8e3ad1c74441a3`
+  passed ownership 1.0, runtime/profile audit, runtime FLA freedom, bitwise
+  output/all-gradient correctness, and a bitwise repeat.
+- Level 1 rejected the cache: T=4096 forward+backward regressed
+  `18.374 -> 18.584 ms` (1.15%), and T=256 forward+backward regressed 6.32%,
+  exceeding the frozen guard. The factor writes and reloads cost more than the
+  removed exponentials save; allocation is unchanged.
+- No sanitizers, Level 2, profile, confirmation, or retest ran. Attempt 72
+  remains accepted, without quality or statistical claims.
+
+**Next**
+
+- Preserve attempt 74 unchanged. Continue from attempt 72; avoid materializing
+  factor caches and favor eliminating a BMM or fusing existing traffic.
