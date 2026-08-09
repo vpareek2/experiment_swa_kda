@@ -6549,3 +6549,68 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_093 \
   post-pair ordered accumulation, prefix reverse, and finalization chain while
   preserving deterministic ownership. Do not compose attempt 93 into the
   baseline or retest its Level-2 pair.
+
+## 2026-08-09 [agent] reject isolated C16 forward chunking
+
+**Context**
+
+- Offline review of pinned FlashKDA `1ce47ea3bb22c84eb9cc665028399cf35e8ffb0b`
+  identified its C16 inverse and two-kernel prepare/recurrence split. Attempt
+  94 tests the smallest separable hypothesis from accepted attempt 91: change
+  only the existing project-owned forward scaffold from C64 to C16, leaving
+  the accepted C64 backward recomputation and complete VJP unchanged.
+- The recurrent equation is algebraically chunk-invariant, but the changed
+  rounding boundary and the performance of the unfused 256-chunk recurrence
+  remain gated by production comparison rather than assumed equivalent.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --config configs/research/kda_cuda_ownership.toml \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_094 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact seed-4101 B=2/H=3/T=4096 production comparison against attempt 91 and
+# one independent fresh-extension-cache repeat.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_091 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_094 \
+  runs/kda-cuda-development/attempt-00094-c16-forward-level1 \
+  --level2-order baseline-first
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_094 \
+  push -u origin kda-cuda/wy-c16-forward-094
+```
+
+**Artifacts**
+
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00094-c16-forward-protected-checker`, manifest `2b08ba49f4e09cb72fe7e848a558df7b95e55019e9bcadbd3ae9ff19085a7246`.
+- Production comparison/repeat: `runs/kda-cuda-development/diagnostics/attempt-00094-c16-forward-gradient`, manifest `ad08e014569fdfb4e3828d29965a2dc38df508987c38a2adc0bf0cc685c02c9d`.
+- Level 1: `runs/kda-cuda-development/attempt-00094-c16-forward-level1`, manifest `cd0cf628496daa08f41822a6112ca60453a8f4abb23323b4a570a48a8876c4f5`.
+- Append-only attempt/reference index SHA-256: `8b3727e13cfbedfa47e5c727402c366ef6c341b578810963606c404492e2e8d7`.
+
+**Result**
+
+- Pushed commit `6ba89593979ee6e19980c088dc4387e56c5cb059` passed ownership 1.0,
+  the complete protected runtime/profile audit, and runtime FLA freedom.
+  Production maximum output delta is `2.44140625e-4`, maximum gradient delta
+  is `1.530e-7`, all tensors pass the frozen tolerance, and the independent
+  fresh-cache repeat is bitwise exact.
+- Level 1 decisively rejected isolated C16 chunking. T=4096 forward-only
+  improved just `19.5644 -> 19.4466 ms` (0.60%), while forward+backward
+  regressed `13.5316 -> 16.6248 ms` (22.86%). Peak allocation is identical.
+  No sanitizer, Level 2, profile, confirmation, or LM-quality evaluation ran.
+- C16 itself is not the transferable FlashKDA optimization. Its advantage
+  depends on the complete two-kernel schedule: token-parallel fused prepare,
+  head-parallel pipelined recurrence, BF16 on-chip state, and register-resident
+  handoffs between dependent MMAs. Attempt 91 remains the accepted development
+  baseline and the official retained milestone remains
+  `4d1a3b231da2c99882324efbda5306a1815e21c7`.
+
+**Next**
+
+- Continue from attempt 91 and do not compose attempt 94. If pursuing the
+  FlashKDA direction, implement the structural schedule rather than another
+  chunk-size sweep: one high-occupancy prepare kernel and one persistent
+  recurrence kernel with register-resident intermediates. In backward, the
+  more direct route remains a persistent full group VJP that removes several
+  dependent GEMMs and ordered accumulation/finalization launches together.
