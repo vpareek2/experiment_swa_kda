@@ -7376,3 +7376,76 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_107 \
   WY/UT VJP across producer-consumer boundaries. FlashKDA remains useful for
   scheduling ideas in the forward path, but the remaining gap is now more
   strongly localized to training-only backward/recompute work.
+
+## 2026-08-09 [Codex] Attempt 108 BF16 state composition rejected at Level 1
+
+**Context**
+
+- Inspection of accepted attempt 100 confirms that it already retains only
+  eight group boundaries, recomputes chunk-local `H/Z`, performs a persistent
+  reverse scan, and implements the complete analytical WY/UT VJP. The original
+  campaign note requesting that transition is therefore stale and must not be
+  replayed as unfinished work.
+- Attempt 108 composes only the previously validated attempt-89 BF16
+  inter-chunk forward-state representation with attempt 100's accepted
+  colored-pair backward VJP. It excludes attempt 107's fused preparation
+  producer and changes no backward equation or schedule.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_108 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact seed-4101 production comparison and independent fresh-cache repeat.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_100 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_108 \
+  runs/kda-cuda-development/attempt-00108-bf16-state-colored-pair-level1 \
+  --level2-order candidate-first
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_108 \
+  push -u origin kda-cuda/wy-bf16-state-colored-pair-108
+```
+
+**Artifacts**
+
+- Pushed commit `2f866f1c16deec3663ee1c0000ee39785d2548f5`;
+  source SHA-256 `822b81c0de590f2d859e76ade4672cdb73aed31d8a93e98ef1af7dfcfb1d72a4`.
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00108-bf16-state-colored-pair-protected-checker`,
+  manifest `06feaf2a77f7ab3532a359c11a60e862cf17447f0d2cde7993726e90e866e2e4`.
+- Production comparison/repeat: `runs/kda-cuda-development/diagnostics/attempt-00108-bf16-state-colored-pair-gradient`,
+  manifest `be7ee70610b2aebcffe87280ff8453c3fef1d808401fcd40b511ca640c3ffb5e`.
+- Level 1: `runs/kda-cuda-development/attempt-00108-bf16-state-colored-pair-level1`,
+  manifest `baf71858e6004803328820682699bdd3ad889c2c6129a6f75492eaac7e826fa4`.
+- The first capture log was redirected beside the artifact before its parent
+  existed; the valid 305-byte raw log is preserved as
+  `runs/kda-cuda-development/diagnostics/attempt-00108-bf16-state-colored-pair-gradient-candidate.log`
+  and copied verbatim into the finalized gradient artifact.
+- Append-only attempt/reference index SHA-256:
+  `9b02bb31ccebfda6c9e559736d6034608f2789b410febe82b5f1d5c6c4cd1730`.
+
+**Result**
+
+- The candidate passes ownership 1.0, the complete protected runtime/profile
+  audit, runtime FLA freedom, finite-gradient checks, and the frozen numerical
+  contract. Production output and all seven gradients are bitwise equal to
+  attempt 100; every tensor in the independent fresh-cache repeat is also
+  bitwise exact.
+- Level 1 rejects the composition. T=4096 forward-only improves
+  `19.372560 -> 19.003695 ms` (1.904%), but forward+backward regresses
+  `12.457520 -> 12.649696 ms` (1.543%). T=256 and T=1024 forward+backward
+  regress 2.528% and 1.109%; allocation is unchanged and all guards remain
+  within their declared limits.
+- No sanitizer, Level-2, profile, confirmation, or LM-quality evaluation ran.
+  This is development evidence only and is not statistically confirmed.
+
+**Next**
+
+- Retain attempt 100. Pure BF16 inter-chunk state makes the largest forward
+  kernel faster but is too small to survive full autograd timing, so do not
+  compose or retest it again.
+- The next boundary should amortize repeated group-local GEMM and launch work
+  while preserving the existing eight-chunk recomputation and reverse order.
+  In particular, evaluate whether adjacent completed reverse groups can share
+  batched post-reverse VJP launches without restoring full token history or
+  exceeding the frozen 3% allocation guard.
