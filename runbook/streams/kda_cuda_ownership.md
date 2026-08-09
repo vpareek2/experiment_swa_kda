@@ -3864,3 +3864,79 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_050 \
   transition: replace full token history with chunk-boundary recomputation and
   reverse scan, then implement the complete WY/UT VJP without replaying the
   pathological naive parent.
+
+## 2026-08-09 [agent] accept bounded stable pair VJP baseline
+
+**Context**
+
+- Attempt 51 replaces the scalar complete A/M pair loops with stable 16x16
+  transformed FP32 VJPs. It batches four of the ten causal tile pairs at a
+  time inside each eight-chunk reverse group, reducing each batch to two
+  stacked adjoint BMMs plus one pre-M BMM.
+- The implementation retains attempt 46's group-boundary reconstruction and
+  reverse state scan. Dead U/Q/H/state/W/R group buffers supply all pair
+  operands and outputs, so the intervention adds no measured allocation and
+  does not restore full token-state history.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_051 \
+  --lane optimization <isolated artifact/cache arguments>
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_046 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_051 \
+  runs/kda-cuda-development/attempt-00051-pair-batched-tiles-level1
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_validation_051 \
+  --lane optimization <isolated artifact/cache arguments> --sanitizers
+# Executed the saved baseline-first Level-2 plan exactly once, then one
+# candidate production profile.
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_051 \
+  push -u origin kda-cuda/wy-pair-batched-tiles-051
+```
+
+**Artifacts**
+
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00051-protected-checker`, manifest `a50ee44a3833f4aae1e9b56d4f35c1e5d50527faa3e141dff1e4573b02d653e5`.
+- Invalid compile checker: `runs/kda-cuda-development/diagnostics/attempt-00051-protected-checker-invalid-compile-001`, manifest `a015ffc0158b15312abcd769cd1258f989955c11f39e112fa7008e5e3b1c9f42`.
+- Pre-equation-fix checker: `runs/kda-cuda-development/diagnostics/attempt-00051-protected-checker-pre-equation-fix-002`, manifest `a24ff5b1b2ccdb235cb8b3f6075bbff96f28e7d5895745b382cf83070b519161`.
+- Invalid production equation bundle: `runs/kda-cuda-development/diagnostics/attempt-00051-pair-tiles-gradient-invalid-equation-001`, manifest `3f345070de64422746b425c33815ced26444389546bc39b0402bab5d69f30980`.
+- Correct production comparison/repeat: `runs/kda-cuda-development/diagnostics/attempt-00051-pair-tiles-gradient`, manifest `ebbfa5fd406a0f3c0f6c5499c5b9cc309a7d1e1eeceefa62347ee303b1d89ae4`.
+- Full sanitizer validation: `runs/kda-cuda-development/validations/validation-00011-pair-batched-tiles`, manifest `1524b99d5a259ef5ed1ce134b2e0beeb50ed8968cd00336b1817369d78d5340a`.
+- Level 1: `runs/kda-cuda-development/attempt-00051-pair-batched-tiles-level1`, manifest `f94c24411514e01eaaf42271e2499c305a91e945c043225c76d545ccf1151478`.
+- Level 2: `runs/kda-cuda-development/attempt-00051-pair-batched-tiles-level2`, manifest `0c576eb5138d1b14ac69bb27ffbcfc8e28cb6f99c6c005d200d3f3cf2a0bb6ab`.
+- Production profile: `runs/kda-cuda-development/diagnostics/attempt-00051-production-profile`, manifest `f0fb168150323383fcc207685f031b3c0c3f88b7841c20b2664391a48ad05f20`.
+- Baseline manifest: `runs/kda-cuda-development/baseline/336a084f4d.json`, SHA-256 `fc354f9424cec752c8f533bb362cdcc5e15360f2b4d0f9b6351614f8a65795b0`.
+- Append-only attempt/reference index SHA-256: `d1fecf64a16e5547bcfcb7a097c656c1aded9110ddba567120ce4762595c1905`.
+
+**Result**
+
+- Pushed commit `336a084f4d8ef34b673619ee020076d9e77a7399`
+  passed ownership 1.0, runtime/profile audit, runtime FLA freedom, all four
+  sanitizers, and a bitwise deterministic repeat. Output, `dv`, and `dbeta`
+  are bitwise equal to attempt 46; the largest gradient delta is `3.638e-12`.
+- The first compiled snapshot omitted the transform factors when mapping BMM
+  adjoints back to q/k and failed the production equation gate by orders of
+  magnitude. It was never timed. The exact failed tensors and the preceding
+  const-output compile failure are preserved.
+- Level 1 advanced: T=4096 forward+backward improved
+  `24.586 -> 22.662 ms` (7.83%) at memory ratio 1.0; every guard row passed.
+- The single Level-2 pair measured baseline
+  `[26073,26126,26105,26008,26010]`, median `26073 tok/s`, and candidate
+  `[27043,27043,27070,26966,26945]`, median `27043 tok/s`: +3.72%, identical
+  `5508.533 MiB`, and 61.91% of the fixed 43,680 tok/s reference.
+- Profiling reduced the old scalar complete-pair kernel from `4.769 ms` to a
+  `0.493 ms` base-vector kernel plus `0.923 ms` pair packing and `0.649 ms`
+  pair accumulation per iteration, excluding the associated BMM kernels.
+  Finalization is now the largest named project kernel at `1.163 ms`.
+- Attempt 51 is the accepted development baseline. It is not statistically
+  confirmed, official retention, a merge/default change, or quality evidence.
+
+**Next**
+
+- Test a five-pair batch with explicitly released dead H/state storage to cut
+  pair pack/accumulate dispatches from three to two batches per reverse group,
+  while retaining the 3% memory gate. If that does not advance, profile-guided
+  finalization fusion is the next distinct axis. Continue toward 45k.
