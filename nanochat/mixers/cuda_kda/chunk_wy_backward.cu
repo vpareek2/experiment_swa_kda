@@ -456,25 +456,29 @@ __global__ void nanochat_kda_wy_backward_boundary_terms_c64_kernel(
     float* dstate,
     float* dD,
     int chunk_id) {
-  const int index = blockIdx.x * blockDim.x + threadIdx.x;
-  const int state_elements = kRecurrences * kDim * kDim;
-  if (index < state_elements) {
-    const int recurrence = index / (kDim * kDim);
-    const int within = index - recurrence * kDim * kDim;
-    const int key = within / kDim;
-    const int n = recurrence * kChunks + chunk_id;
-    const float D = expf(prefix_g[chunk_vector_index(n, kChunk - 1, key)]);
-    dstate[index] += D * dstate_next[index];
+  const int recurrence_key = blockIdx.x;
+  const int value = threadIdx.x;
+  if (recurrence_key >= kRecurrences * kDim || value >= kDim) {
+    return;
   }
-  const int d_index = index;
-  if (d_index < kRecurrences * kDim) {
-    const int recurrence = d_index / kDim;
-    const int key = d_index - recurrence * kDim;
+  const int recurrence = recurrence_key / kDim;
+  const int key = recurrence_key - recurrence * kDim;
+  const int n = recurrence * kChunks + chunk_id;
+  const int64_t state_offset =
+      (static_cast<int64_t>(recurrence) * kDim + key) * kDim + value;
+  __shared__ float D;
+  __shared__ float dD_terms[kDim];
+  if (value == 0) {
+    D = expf(prefix_g[chunk_vector_index(n, kChunk - 1, key)]);
+  }
+  dD_terms[value] = dstate_next[state_offset] * state[state_offset];
+  __syncthreads();
+  dstate[state_offset] += D * dstate_next[state_offset];
+  if (value == 0) {
     float sum = 0.0f;
-    for (int value = 0; value < kDim; ++value) {
-      const int64_t state_offset =
-          (static_cast<int64_t>(recurrence) * kDim + key) * kDim + value;
-      sum += dstate_next[state_offset] * state[state_offset];
+    for (int reduction_value = 0; reduction_value < kDim;
+         ++reduction_value) {
+      sum += dD_terms[reduction_value];
     }
     dD[(static_cast<int64_t>(recurrence) * kChunks + chunk_id) * kDim + key] =
         sum;
@@ -1086,8 +1090,8 @@ nanochat_kda_chunk_wy_backward_c64(
       dZ_group.select(1, local_chunk).copy_(local_dZ);
       const at::Tensor H = H_group.select(1, local_chunk);
       nanochat_kda_wy_backward_boundary_terms_c64_kernel<<<
-          (kStateElements + kThreads - 1) / kThreads,
-          kThreads, 0, stream>>>(prefix_g.data_ptr<float>(), H.data_ptr<float>(),
+          kRecurrences * kDim, kDim, 0, stream>>>(
+          prefix_g.data_ptr<float>(), H.data_ptr<float>(),
           dstate_next.data_ptr<float>(), local_dstate.data_ptr<float>(),
           dD.data_ptr<float>(), chunk_id);
       C10_CUDA_KERNEL_LAUNCH_CHECK();
