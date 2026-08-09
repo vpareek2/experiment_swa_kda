@@ -26,6 +26,17 @@ constexpr int kMatrixTile = 16;
 constexpr int kChunks = kLength / kChunk;
 constexpr int kRecurrences = kBatch * kHeads;
 constexpr int kChunkRows = kRecurrences * kChunks;
+constexpr int kTilePairs = 10;
+
+__device__ __forceinline__ void causal_tile_pair(
+    int pair, int& target_tile, int& source_tile) {
+  target_tile = 0;
+  while (pair >= target_tile + 1) {
+    pair -= target_tile + 1;
+    ++target_tile;
+  }
+  source_tile = pair;
+}
 
 __device__ __forceinline__ float wy_sigmoid(float x) {
   if (x >= 0.0f) {
@@ -485,9 +496,165 @@ __global__ void nanochat_kda_wy_backward_boundary_terms_c64_kernel(
   }
 }
 
-// Complete vector/pair VJP for all chunks.  This is the profile-visible
-// production backward kernel: every lane owns one key channel and accumulates
-// all appearances of that channel in R/E/P/Q/A/M without atomics.
+// Pack every causal 16x16 A/M tile pair in an eight-chunk group into two
+// stacked FP32 products.  A per-channel tile center bounds both exponentials.
+__global__ void nanochat_kda_wy_backward_pack_pair_tiles_c64_kernel(
+    const float* qbar,
+    const float* khat,
+    const float* prefix_g,
+    const float* beta,
+    const float* dA,
+    const float* dM,
+    float* upstream,
+    float* right,
+    float* forward_left,
+    int chunk_start,
+    int group_chunks,
+    int pair_start,
+    int pair_count) {
+  const int pair_n = blockIdx.x;
+  const int d = threadIdx.x;
+  const int local_n = pair_n / pair_count;
+  const int pair = pair_start + pair_n - local_n * pair_count;
+  if (local_n >= kRecurrences * group_chunks || d >= kDim) {
+    return;
+  }
+  int target_tile;
+  int source_tile;
+  causal_tile_pair(pair, target_tile, source_tile);
+  const int recurrence = local_n / group_chunks;
+  const int chunk_id = chunk_start + local_n % group_chunks;
+  const int n = recurrence * kChunks + chunk_id;
+  const int target_start = target_tile * kMatrixTile;
+  const int source_start = source_tile * kMatrixTile;
+  const int center_row = target_tile == source_tile
+      ? target_start : target_start - 1;
+  const float center = prefix_g[chunk_vector_index(n, center_row, d)];
+  const int64_t vector_base = static_cast<int64_t>(pair_n) *
+      kMatrixTile * kDim;
+  const int64_t left_base = static_cast<int64_t>(pair_n) *
+      (2 * kMatrixTile) * kDim;
+  const int64_t matrix_base = static_cast<int64_t>(pair_n) *
+      (2 * kMatrixTile) * kMatrixTile;
+  for (int local_row = 0; local_row < kMatrixTile; ++local_row) {
+    const int target_row = target_start + local_row;
+    const int source_row = source_start + local_row;
+    const int64_t target = chunk_vector_index(n, target_row, d);
+    const int64_t source = chunk_vector_index(n, source_row, d);
+    const float target_factor = expf(prefix_g[target] - center);
+    forward_left[left_base + local_row * kDim + d] =
+        qbar[target] * target_factor;
+    forward_left[left_base + (kMatrixTile + local_row) * kDim + d] =
+        khat[target] * target_factor;
+    right[vector_base + local_row * kDim + d] =
+        khat[source] * expf(center - prefix_g[source]);
+  }
+  if (d < kMatrixTile) {
+    for (int target_local = 0; target_local < kMatrixTile; ++target_local) {
+      const int target_row = target_start + target_local;
+      const int source_row = source_start + d;
+      const bool a_active = source_row <= target_row;
+      const bool m_active = source_row < target_row;
+      const int64_t source = chunk_matrix_index(local_n, target_row, source_row);
+      upstream[matrix_base + target_local * kMatrixTile + d] =
+          a_active ? dA[source] : 0.0f;
+      upstream[matrix_base +
+          (kMatrixTile + target_local) * kMatrixTile + d] =
+          m_active ? dM[source] * beta[
+              static_cast<int64_t>(n) * kChunk + target_row] : 0.0f;
+    }
+  }
+}
+
+__global__ void nanochat_kda_wy_backward_accumulate_pair_tiles_c64_kernel(
+    const float* prefix_g,
+    const float* forward_left,
+    const float* right,
+    const float* target_gradient,
+    const float* source_gradient,
+    const float* pre_m,
+    const float* dM,
+    float* dqbar,
+    float* dkhat,
+    float* dbeta,
+    float* dprefix,
+    int chunk_start,
+    int group_chunks,
+    int pair_start,
+    int pair_count) {
+  const int local_n = blockIdx.x / kChunk;
+  const int row = blockIdx.x - local_n * kChunk;
+  const int d = threadIdx.x;
+  if (local_n >= kRecurrences * group_chunks || d >= kDim) {
+    return;
+  }
+  const int recurrence = local_n / group_chunks;
+  const int chunk_id = chunk_start + local_n % group_chunks;
+  const int n = recurrence * kChunks + chunk_id;
+  float query_gradient = 0.0f;
+  float key_gradient = 0.0f;
+  float prefix_gradient = 0.0f;
+  float beta_gradient = 0.0f;
+  for (int local_pair = 0; local_pair < pair_count; ++local_pair) {
+    const int pair = pair_start + local_pair;
+    int target_tile;
+    int source_tile;
+    causal_tile_pair(pair, target_tile, source_tile);
+    const int target_start = target_tile * kMatrixTile;
+    const int source_start = source_tile * kMatrixTile;
+    const int center_row = target_tile == source_tile
+        ? target_start : target_start - 1;
+    const float center = prefix_g[chunk_vector_index(n, center_row, d)];
+    const int pair_n = local_n * pair_count + local_pair;
+    const int64_t left_base = static_cast<int64_t>(pair_n) *
+        (2 * kMatrixTile) * kDim;
+    const int64_t vector_base = static_cast<int64_t>(pair_n) *
+        kMatrixTile * kDim;
+    if (row >= target_start && row < target_start + kMatrixTile) {
+      const int local_row = row - target_start;
+      const int64_t q_index = left_base + local_row * kDim + d;
+      const int64_t k_index = left_base +
+          (kMatrixTile + local_row) * kDim + d;
+      const float target_factor = expf(
+          prefix_g[chunk_vector_index(n, row, d)] - center);
+      query_gradient += target_gradient[q_index] * target_factor;
+      key_gradient += target_gradient[k_index] * target_factor;
+      prefix_gradient += target_gradient[q_index] * forward_left[q_index] +
+          target_gradient[k_index] * forward_left[k_index];
+      if (d == 0) {
+        const int64_t matrix_base = static_cast<int64_t>(pair_n) *
+            kMatrixTile * kMatrixTile;
+        for (int source_local = 0; source_local < kMatrixTile;
+             ++source_local) {
+          const int source_row = source_start + source_local;
+          if (source_row < row) {
+            beta_gradient +=
+                dM[chunk_matrix_index(local_n, row, source_row)] *
+                pre_m[matrix_base + local_row * kMatrixTile + source_local];
+          }
+        }
+      }
+    }
+    if (row >= source_start && row < source_start + kMatrixTile) {
+      const int local_row = row - source_start;
+      const int64_t source_index = vector_base + local_row * kDim + d;
+      const float source_factor = expf(
+          center - prefix_g[chunk_vector_index(n, row, d)]);
+      key_gradient += source_gradient[source_index] * source_factor;
+      prefix_gradient -= source_gradient[source_index] * right[source_index];
+    }
+  }
+  const int64_t local = chunk_vector_index(local_n, row, d);
+  dqbar[local] += query_gradient;
+  dkhat[local] += key_gradient;
+  dprefix[local] += prefix_gradient;
+  if (d == 0) {
+    dbeta[static_cast<int64_t>(local_n) * kChunk + row] += beta_gradient;
+  }
+}
+
+// Vector VJP for all chunks. Pair terms are added by the batched stable-tile
+// products above, while each lane retains exact ownership of one key channel.
 __global__ void nanochat_kda_chunk_backward_kernel(
     const __nv_bfloat16* v,
     const float* qbar,
@@ -513,7 +680,7 @@ __global__ void nanochat_kda_chunk_backward_kernel(
   const int local_n = blockIdx.x / kChunk;
   const int row = blockIdx.x - local_n * kChunk;
   const int d = threadIdx.x;
-  __shared__ float dbeta_terms[kChunk * kDim];
+  __shared__ float dbeta_terms[kDim];
   if (local_n >= kRecurrences * group_chunks || d >= kDim) {
     return;
   }
@@ -542,50 +709,7 @@ __global__ void nanochat_kda_chunk_backward_kernel(
              exp_g * khat[offset]) -
         dE[local] * E[local];
 
-    for (int source = 0; source <= row; ++source) {
-      const int64_t source_offset = chunk_vector_index(n, source, d);
-      const float ratio = expf(g - prefix_g[source_offset]);
-      query_gradient += dA[chunk_matrix_index(local_n, row, source)] *
-          khat[source_offset] * ratio;
-      if (source < row) {
-        const float term =
-            dA[chunk_matrix_index(local_n, row, source)] *
-            qbar[offset] * khat[source_offset] * ratio;
-        prefix_gradient += term;
-      }
-    }
-    for (int target = row; target < kChunk; ++target) {
-      const int64_t target_offset = chunk_vector_index(n, target, d);
-      const float ratio = expf(prefix_g[target_offset] - g);
-      key_gradient += dA[chunk_matrix_index(local_n, target, row)] *
-          qbar[target_offset] * ratio;
-      if (target > row) {
-        const float term =
-            dA[chunk_matrix_index(local_n, target, row)] *
-            qbar[target_offset] * khat[offset] * ratio;
-        prefix_gradient -= term;
-      }
-    }
-
     const float beta_row = beta[static_cast<int64_t>(n) * kChunk + row];
-    for (int source = 0; source < row; ++source) {
-      const int64_t source_offset = chunk_vector_index(n, source, d);
-      const float ratio = expf(g - prefix_g[source_offset]);
-      const float upstream =
-          dM[chunk_matrix_index(local_n, row, source)] * beta_row;
-      key_gradient += upstream * khat[source_offset] * ratio;
-      prefix_gradient += upstream * khat[offset] * khat[source_offset] * ratio;
-    }
-    for (int target = row + 1; target < kChunk; ++target) {
-      const int64_t target_offset = chunk_vector_index(n, target, d);
-      const float ratio = expf(prefix_g[target_offset] - g);
-      const float upstream =
-          dM[chunk_matrix_index(local_n, target, row)] *
-          beta[static_cast<int64_t>(n) * kChunk + target];
-      key_gradient += upstream * khat[target_offset] * ratio;
-      prefix_gradient -= upstream * khat[target_offset] * khat[offset] * ratio;
-    }
-
     if (row == kChunk - 1) {
       float end_contribution = dD[static_cast<int64_t>(n) * kDim + d] * exp_g;
       for (int source = 0; source < kChunk; ++source) {
@@ -621,22 +745,7 @@ __global__ void nanochat_kda_chunk_backward_kernel(
   }
   __syncthreads();
 
-  for (int source = 0; source < row; ++source) {
-    const int64_t source_offset = chunk_vector_index(n, source, d);
-    dbeta_terms[source * kDim + d] =
-        khat[offset] * khat[source_offset] *
-        expf(prefix_g[offset] - prefix_g[source_offset]);
-  }
-  __syncthreads();
   if (d == 0) {
-    for (int source = 0; source < row; ++source) {
-      float dot = 0.0f;
-      for (int key = 0; key < kDim; ++key) {
-        dot += dbeta_terms[source * kDim + key];
-      }
-      beta_gradient +=
-          dM[chunk_matrix_index(local_n, row, source)] * dot;
-    }
     dbeta[static_cast<int64_t>(local_n) * kChunk + row] = beta_gradient;
   }
 }
@@ -831,6 +940,8 @@ nanochat_kda_chunk_wy_backward_c64(
   constexpr int kGroupChunks = 8;
   constexpr int kGroups = kChunks / kGroupChunks;
   constexpr int kGroupRows = kRecurrences * kGroupChunks;
+  constexpr int kPairBatch = 4;
+  constexpr int kPairRows = kGroupRows * kPairBatch;
   constexpr int kVectorElements = kRecurrences * kChunk * kDim;
   constexpr int kGroupVectorElements = kGroupRows * kChunk * kDim;
   constexpr int kStateElements = kRecurrences * kDim * kDim;
@@ -1145,6 +1256,37 @@ nanochat_kda_chunk_wy_backward_c64(
     at::Tensor dbeta_group = at::empty({kGroupRows, kChunk}, fp32);
     at::Tensor dprefix_group = at::empty_like(P_group);
     at::Tensor raw_gate_gradient_group = at::empty_like(P_group);
+
+    // Reuse dead group buffers for the complete stable A/M pair VJP.  The
+    // three products cover target q/k adjoints, combined source-k adjoints,
+    // and the unscaled M dot needed by dbeta without increasing allocation.
+    constexpr int64_t kPairUpstreamElements =
+        static_cast<int64_t>(kPairRows) * 2 * kMatrixTile * kMatrixTile;
+    constexpr int64_t kPairVectorElements =
+        static_cast<int64_t>(kPairRows) * kMatrixTile * kDim;
+    constexpr int64_t kPairLeftElements = 2 * kPairVectorElements;
+    constexpr int64_t kPairMatrixElements =
+        static_cast<int64_t>(kPairRows) * kMatrixTile * kMatrixTile;
+    at::Tensor U_flat = U_group.view({-1});
+    at::Tensor pair_upstream = U_flat.narrow(
+        0, 0, kPairUpstreamElements).view(
+            {kPairRows, 2 * kMatrixTile, kMatrixTile});
+    at::Tensor pair_right = Q_group.view({-1}).narrow(
+        0, 0, kPairVectorElements).view(
+            {kPairRows, kMatrixTile, kDim});
+    at::Tensor pair_forward_left = H_group_flat.view({-1}).narrow(
+        0, 0, kPairLeftElements).view(
+            {kPairRows, 2 * kMatrixTile, kDim});
+    at::Tensor pair_target_gradient = dstate_base.view({-1}).narrow(
+        0, 0, kPairLeftElements).view(
+            {kPairRows, 2 * kMatrixTile, kDim});
+    at::Tensor W_flat = W_group.view({-1});
+    at::Tensor pair_source_gradient = W_flat.narrow(
+        0, 0, kPairVectorElements).view(
+            {kPairRows, kMatrixTile, kDim});
+    at::Tensor pair_pre_m = R_group.view({-1}).narrow(
+        0, 0, kPairMatrixElements).view(
+            {kPairRows, kMatrixTile, kMatrixTile});
     nanochat_kda_chunk_backward_kernel<<<
         kGroupRows * kChunk, kDim, 0, stream>>>(
         reinterpret_cast<const __nv_bfloat16*>(v.data_ptr<at::BFloat16>()),
@@ -1160,6 +1302,49 @@ nanochat_kda_chunk_wy_backward_c64(
         dbeta_group.data_ptr<float>(), dprefix_group.data_ptr<float>(),
         chunk_start, kGroupChunks);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
+    for (int pair_start = 0; pair_start < kTilePairs;
+         pair_start += kPairBatch) {
+      const int pair_count =
+          pair_start + kPairBatch <= kTilePairs
+          ? kPairBatch : kTilePairs - pair_start;
+      const int pair_rows = kGroupRows * pair_count;
+      const at::Tensor upstream_batch = pair_upstream.narrow(
+          0, 0, pair_rows);
+      const at::Tensor right_batch = pair_right.narrow(0, 0, pair_rows);
+      const at::Tensor forward_left_batch = pair_forward_left.narrow(
+          0, 0, pair_rows);
+      at::Tensor target_gradient_batch = pair_target_gradient.narrow(
+          0, 0, pair_rows);
+      at::Tensor source_gradient_batch = pair_source_gradient.narrow(
+          0, 0, pair_rows);
+      at::Tensor pre_m_batch = pair_pre_m.narrow(0, 0, pair_rows);
+      nanochat_kda_wy_backward_pack_pair_tiles_c64_kernel<<<
+          pair_rows, kDim, 0, stream>>>(
+          qbar.data_ptr<float>(), khat.data_ptr<float>(),
+          prefix_g.data_ptr<float>(), beta.data_ptr<float>(),
+          dA_group.data_ptr<float>(), dT_group.data_ptr<float>(),
+          upstream_batch.data_ptr<float>(), right_batch.data_ptr<float>(),
+          forward_left_batch.data_ptr<float>(), chunk_start, kGroupChunks,
+          pair_start, pair_count);
+      C10_CUDA_KERNEL_LAUNCH_CHECK();
+      at::bmm_out(target_gradient_batch, upstream_batch, right_batch);
+      at::bmm_out(source_gradient_batch, upstream_batch.transpose(1, 2),
+                  forward_left_batch);
+      at::bmm_out(pre_m_batch,
+                  forward_left_batch.narrow(1, kMatrixTile, kMatrixTile),
+                  right_batch.transpose(1, 2));
+      nanochat_kda_wy_backward_accumulate_pair_tiles_c64_kernel<<<
+          kGroupRows * kChunk, kDim, 0, stream>>>(
+          prefix_g.data_ptr<float>(), forward_left_batch.data_ptr<float>(),
+          right_batch.data_ptr<float>(),
+          target_gradient_batch.data_ptr<float>(),
+          source_gradient_batch.data_ptr<float>(),
+          pre_m_batch.data_ptr<float>(), dT_group.data_ptr<float>(),
+          dqbar_group.data_ptr<float>(), dkhat_group.data_ptr<float>(),
+          dbeta_group.data_ptr<float>(), dprefix_group.data_ptr<float>(),
+          chunk_start, kGroupChunks, pair_start, pair_count);
+      C10_CUDA_KERNEL_LAUNCH_CHECK();
+    }
 
     nanochat_kda_wy_backward_prefix_reverse_c64_kernel<<<
         kGroupRows, kDim, 0, stream>>>(
