@@ -5780,3 +5780,95 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_083 \
   ordered-accumulation path (1.594 ms/iter). Preserve all gates and use sparse
   confirmation only at a major strategy boundary, plateau, checkpoint, or
   final candidate.
+
+## 2026-08-09 [agent] accept fused stable A/M builder as development baseline
+
+**Context**
+
+- Attempt 84 starts from accepted attempt 83 and changes only
+  `nanochat/mixers/cuda_kda/chunk_wy_forward.cu` and
+  `nanochat/mixers/cuda_kda/chunk_wy_backward.cu`. In both forward construction
+  and backward recomputation, one CTA packs each stable 16x16 tile pair once
+  and evaluates the A and M products with explicit BF16 WMMA operands and FP32
+  accumulators.
+- The fused builder masks/scales directly into the final matrices. This removes
+  the two generic pair BMMs, transform scratch, the finish kernel, and the P
+  rebuild from each phase without changing the equations, recurrence, scan
+  geometry, bounded backward state, pair-batch width, or model configuration.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --config configs/research/kda_cuda_ownership.toml \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_084 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact seed-4101 B=2/H=3/T=4096 matched production capture and fresh-cache
+# repeat against attempt 83.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_083 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_084 \
+  runs/kda-cuda-development/attempt-00084-build-pair-wmma-level1 \
+  --level2-order candidate-first
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_validation_084 \
+  --lane optimization --sanitizers <isolated artifact/cache arguments>
+# Executed the saved candidate-first Level-2 plan exactly once with absolute
+# raw-log paths, then one bounded production-shape Nsight Systems profile.
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_084 \
+  push -u origin kda-cuda/wy-build-pair-wmma-084
+```
+
+**Artifacts**
+
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00084-build-pair-wmma-protected-checker`, manifest `5578c1d29d0517de668bb0bae7eabe6b517fc425710168a0cf6ad5202d586ca4`.
+- Production comparison/repeat: `runs/kda-cuda-development/diagnostics/attempt-00084-build-pair-wmma-gradient`, manifest `2d38acdfa738e431592e494a87dde98e8c28f2fdab210abe8bde24e000368ed4`.
+- Invalid production captures: `runs/kda-cuda-development/diagnostics/attempt-00084-build-pair-wmma-gradient-invalid-001`, manifest `cf8f38c62e994982f812f0041c3a3e88a45b9f76112ccbb0bbd134f27e828ea1`, and `attempt-00084-build-pair-wmma-gradient-invalid-002`, manifest `d598963bbaf8bf0e798e0d0f5db2e6ff99f188b513b75a1d80055462413e306d`.
+- Level 1: `runs/kda-cuda-development/attempt-00084-build-pair-wmma-level1`, manifest `edfc63b15555ebafec6b92583718df13fe51f787a1a84d949da771cdd1b7e2e7`.
+- Invalid empty-stage sanitizer launch: `runs/kda-cuda-development/diagnostics/attempt-00084-sanitizer-invalid-empty-stage-001`, manifest `efbebb6e2ee5b16ddfd4f4eeb14fcac54070852d79fae43f2170db1cd172e680`.
+- Full sanitizer validation: `runs/kda-cuda-development/validations/validation-00020-build-pair-wmma`, manifest `6f8c7db814db9a9863d2de8913a43a791bdbbd0f3087c12da98b3b9cd869c042`.
+- Level 2: `runs/kda-cuda-development/attempt-00084-build-pair-wmma-level2`, manifest `5162210f4c7d6bd26a5dd2307001ea981b291e1386a6516eaa28c60592f47a80`.
+- Production profile: `runs/kda-cuda-development/diagnostics/attempt-00084-production-profile`, manifest `bb9883c6601493e9f937d1671ec344e2385398bf6e4a63436dc81bdc683e707f`.
+- Development-baseline manifest: `runs/kda-cuda-development/baseline/af8d2198e7.json`, SHA-256 `1898346162216d0d8d3e71dac1bc7dd62439dd7cf480127b699d1360d5f149fe`.
+- Append-only attempt/reference index SHA-256: `5a3f19d4fa7897378a3af2686eb921938e2072cb9530eddc6b17749cac5fd212`.
+
+**Result**
+
+- Pushed commit `af8d2198e75bb7977b2448b6f516e8185bf44ffd`
+  passed ownership 1.0, the complete protected runtime/profile audit, runtime
+  FLA freedom, and all four sanitizers with zero errors. Against attempt 83,
+  maximum output delta is `4.8828125e-4` and maximum gradient delta is
+  `2.055e-09`; all tensors are finite and within frozen tolerances. The
+  fresh-cache candidate repeat is bitwise identical.
+- Level 1 advanced: T=4096 forward+backward improved
+  `16.526 -> 14.769 ms` (10.63%) at memory ratio 1.0. T=4096 forward improved
+  0.54%, T=1024 forward+backward improved 1.38%, and T=256 forward+backward
+  improved 5.84%; every regression and memory guard passed.
+- The candidate-first Level-2 pair measured candidate
+  `[31747, 31903, 31823, 31724, 31724]` tok/s, median 31,747, and baseline
+  `[30675, 30587, 30703, 30535, 30598]` tok/s, median 30,598. This is a 3.76%
+  matched development improvement with identical 5,508.533 MiB peak memory
+  and 72.68% of the fixed 43,680 tok/s external FLA reference.
+- The profile removed 80 small-N TN BMM launches, 40 transform launches, four
+  finish launches, and four P-rebuild launches over two iterations. The new
+  forward/backward builders total 0.794 ms/iter versus 2.416 ms/iter for the
+  removed attempt-83 path, an estimated targeted reduction of 1.622 ms/iter.
+- Two capture harness invocations failed before the project operator ran: the
+  first selected an empty candidate-local environment and could not import
+  PyTorch; the second imported the package-level function instead of the KDA
+  dispatcher module. Both raw logs are preserved and excluded. A sanitizer
+  invocation also stopped before build/GPU work because the detached staging
+  command used invalid revision `af8d2192`; the checker created no raw artifact,
+  and that preservation limitation is recorded explicitly.
+- Attempt 84 is accepted only as the new development baseline. The official
+  retained milestone remains `4d1a3b231da2c99882324efbda5306a1815e21c7`.
+  No confirmation or LM-quality evaluation ran, and this is not statistically
+  confirmed evidence.
+
+**Next**
+
+- Continue from attempt 84. The largest named owned paths are the forward WMMA
+  scan (2.410 ms/iter), group-boundary WMMA (1.363 ms/iter), and fused pair
+  WMMA plus ordered accumulation (1.546 ms/iter). Prefer structural work that
+  reduces operands, synchronization, or launches; do not replay prior tile,
+  group-width, pair-batch, or fast-exponential variants.
