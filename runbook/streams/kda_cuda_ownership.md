@@ -2253,3 +2253,61 @@ uv run --no-sync research cuda-candidate-check   --worktree /home/veer/Master/pr
   path.
 - Continue toward the overall 45k target without treating intermediate latency
   aims as automatic stop conditions; preserve every diagnostic and rollback.
+
+## 2026-08-09 [agent] preserve correct FP32 C64 WY forward scaffold
+
+**Context**
+
+- With convolution reduced to 1.23% of GPU time, attempt 25 began the planned
+  algorithmic transition. It changed only exact production training forward;
+  the project token recurrence remains the analytical backward and every other
+  shape/state/inference call remains on the project compatibility kernels.
+
+**Commands**
+
+```bash
+# Protected runtime/profile preflight, exact parent-recurrence equation checks,
+# then the normal Level-1 artifact against 2a0a08e.
+.venv/bin/python scripts/kda_cuda_development.py <attempt24> <attempt25>   runs/kda-cuda-development/attempts/attempt-00025-level1
+# Nsight-stage diagnostic on the preserved rejected candidate.
+```
+
+**Artifacts**
+
+- `runs/kda-cuda-development/attempts/attempt-00025-level1`.
+- Stage profile:
+  `runs/kda-cuda-development/attempts/attempt-00025-level1/diagnostic-stage-profile`,
+  final manifest SHA-256
+  `f248e42237f0a730d30abe5fab2e50d62f0add7248588156b957474618a1740f`.
+- Append-only attempt/reference index SHA-256:
+  `6d48a29d4248fd2d6351275bffaf8869f7456212e834f7065eb55d6537ffd927`.
+
+**Result**
+
+- Exact pushed commit `a34661d8fd6e85d8ec2275f44aba71a32f26dece`
+  added project-owned FP32 C=64 preprocessing, stable pair matrices, fixed-order
+  unit-lower solve, NoTF32 ATen U/W BMMs, and a fixed-order SIMT boundary scan.
+  It uses no PTX, WMMA, atomics, hidden allocation, or runtime reference.
+- C=1/2/3/7/64 equation checks matched through `1.82e-6` output and `2.09e-7`
+  state. Exact production output matched the project recurrence at max abs
+  `6.1035e-5`, all gradients were finite, the protected runtime/profile audit
+  passed, ownership remained 1.0, and runtime remained FLA-free.
+- Level 1 honestly rejected the first correctness scaffold: T=4096
+  forward+backward was `79.091 -> 87.362 ms` (10.46% regression), with a small
+  `1.00486x` kernel-memory ratio. T=256/1024 stayed on the fallback and were
+  effectively unchanged. Level 2 was not run.
+- Profiling localized the issue rather than invalidating the equations. Per
+  specialized call: scan `25.712 ms`, M/A build `1.891 ms`, preprocess
+  `0.380 ms`, U/W BMM `0.257 ms`, and solve `0.083 ms`. The scan alone explains
+  the regression; the other independently testable stages are already small.
+- Attempt 25 is preserved as a correct equation milestone, not a development
+  baseline or performance win. Exact `2a0a08e...` remains the comparison
+  baseline.
+
+**Next**
+
+- Branch from the attempt-25 equation scaffold and replace only its forward
+  scan with a faster matrix path; compare the cumulative candidate to exact
+  `2a0a08e...`. Do not rewrite the validated F0-F3 stages.
+- Keep intermediate targets advisory while continuing toward 45k, but never
+  weaken correctness, ownership, sanitizer, or provenance requirements.
