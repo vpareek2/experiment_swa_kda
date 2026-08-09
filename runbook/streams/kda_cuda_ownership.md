@@ -8130,3 +8130,88 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_117 \
   prefetch one K tile while the current MMA executes, or redesign ownership so
   producer fragments feed their immediate consumer—rather than retaining all
   eight state fragments across the intervening `A Z` work.
+
+## 2026-08-09 [Codex] Attempt 118 one-tile forward pipeline rejected at Level 2
+
+**Context**
+
+- Attempt 118 starts directly from accepted attempt 100 and applies a
+  short-lived software pipeline only to the first persistent recurrence phase.
+  Each warp loads the next FP32 `W` and state K tile into registers before the
+  current tensor-core MMA, then casts/stages and immediately consumes it. This
+  preserves exact MMA order while overlapping independent next-tile loads.
+- Unlike attempt 117, it does not retain eight state fragments across the
+  residual and `A Z` phase. Cubin inspection reports 80 registers versus 59
+  for attempt 100 and 84 for attempt 117, with unchanged 50,176-byte shared
+  memory and no stack/local spill.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_118 \
+  --lane optimization <isolated artifact/cache arguments>
+# Seed-4101 production comparison and independent fresh-cache repeat.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_100 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_118 \
+  runs/kda-cuda-development/attempt-00118-forward-tile-prefetch-level1 \
+  --level2-order candidate-first
+# Exact source staged in validation worktree 118; all four sanitizers.
+# Execute the saved candidate-first Level-2 pair exactly once.
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_118 \
+  push -u origin kda-cuda/wy-forward-tile-prefetch-118
+```
+
+**Artifacts**
+
+- Pushed commit `78f327c40a5f041b61d413b1ebf74ab404d9cd02`;
+  forward source SHA-256
+  `2afc85607800b3f07b9d1ceb203f0ae6e63bc35407a393d7af2f23f6353de434`.
+- Protected checker:
+  `runs/kda-cuda-development/diagnostics/attempt-00118-forward-tile-prefetch-protected-checker`,
+  manifest `35ad4eab46be8b6ec7597d0dbd185b61d463c9411c879f8fe087b825518de45f`.
+- Production comparison/repeat:
+  `runs/kda-cuda-development/diagnostics/attempt-00118-forward-tile-prefetch-gradient`,
+  manifest `80aa092bb9fae948b1b25059031dca6f3ee8aa7a66e509f4788a89759a7b3f49`.
+- Level 1: `runs/kda-cuda-development/attempt-00118-forward-tile-prefetch-level1`,
+  manifest `9b472f1fab162e46da3d1399181f19b0acb103835e91d878c6502cc4c80272d2`.
+- Full sanitizer validation:
+  `runs/kda-cuda-development/validations/validation-00029-forward-tile-prefetch`,
+  manifest `fc0b985ad1bb24fede30fe01d85a567b1bed3b9621d10bbd60c0f44d0c717c65`.
+- Level 2: `runs/kda-cuda-development/attempt-00118-forward-tile-prefetch-level2`,
+  manifest `bd2643ffa16ebf53eae668831158f0c5aef53ff98b6c8f5e6b07706411ff0d0b`.
+- Append-only attempt/reference index SHA-256:
+  `4e0d9af87671c33f90502a75262ccfa6932589f7c95f942ea8042aca59fa410e`.
+- The candidate Level-2 process completed once, but stdout/stderr redirection
+  was omitted. Its exact seven structured records and final result were
+  transcribed from the coordinator capture into `candidate-payload.json`; the
+  limitation is preserved in `candidate-capture-incident.txt`, and no rerun or
+  synthetic raw log was made. The baseline process has complete raw logs.
+
+**Result**
+
+- Attempt 118 passes ownership 1.0, protected runtime/profile audit, runtime
+  FLA freedom, finite-gradient checks, and is bitwise equal to attempt 100 for
+  output and all seven gradients. Its fresh-cache repeat is bitwise exact.
+  Memcheck, racecheck, initcheck, and synccheck all pass with zero errors.
+- Level 1 advances: T=4096 forward+backward improves
+  `12.817712 -> 12.316064 ms` (3.914%), forward-only improves 0.897%, memory is
+  unchanged, and all length/memory guards pass.
+- The saved candidate-first Level-2 pair rejects the candidate. Candidate
+  samples `[31814,33629,33837,33755,33689]` have median 33,689 tok/s; baseline
+  `[33894,33496,33587,33663,33735]` has median 33,663 tok/s. The gain is only
+  0.077%, below the 2% retention gate, with equal 5,508.533 MiB peak. Candidate
+  throughput is 77.127% of the fixed 43,680 tok/s FLA reference.
+- This is development evidence only. No confirmation or LM-quality evaluation
+  ran, and the result is not statistically confirmed.
+
+**Next**
+
+- Retain attempt 100. Do not accept attempt 118, rerun its Level-2 pair, or
+  silently compose its partial prefetch as a baseline.
+- The positive microbenchmark establishes that short-lived prefetch can help,
+  but the single `W H` phase is too small at model level. A follow-up must
+  pipeline the complete recurrence (`W H`, `qgamma H`, `A Z`, and `E^T Z`) or
+  reduce the 80-register footprint with a producer/consumer ownership change;
+  another isolated one-phase prefetch is not sufficient.
