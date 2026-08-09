@@ -1906,3 +1906,98 @@ uv run --no-sync python -m pytest -q tests/test_kda_cuda_development.py
   preserved blueprint.
 - Continue Level 1/2 for development; invoke confirmation only at the agreed
   plateau/time boundary.
+
+## 2026-08-09 [agent] row-parallel and tiled reverse boundaries pass sparse development confirmation
+
+**Context**
+
+- Continued the approved fast funnel from the confirmed 1024-thread scalar
+  development baseline. The sealed naive parent was never executed.
+- This interval crossed two major implementation boundaries, so each was
+  checked with the full protected correctness/profile/runtime checker, all four
+  compute-sanitizer tools, and nine alternating exact Level-2 pairs. Neither
+  confirmation evaluated language-model quality or changed official retention.
+
+**Artifacts**
+
+- Attempt artifacts: `runs/kda-cuda-development/attempts/attempt-00014-level1`
+  through `attempt-00022-level1`, including raw profiles and Level-2 logs only
+  where the frozen funnel allowed them.
+- First sparse confirmation:
+  `runs/kda-cuda-development/confirmations/confirmation-00001-row-parallel-boundary`;
+  final manifest SHA-256
+  `a8f1e497ea01d9d9d5f1104cd32e0134217a8ea1c4c611d7120b5277f955c202`.
+- Second sparse confirmation:
+  `runs/kda-cuda-development/confirmations/confirmation-00002-tiled-reverse-boundary`;
+  final manifest SHA-256
+  `4d95ee0e0d64684904151b4a5bc80116e2f79afd1728fce032cd621fd2dde0db`.
+- Current confirmed development baseline manifest:
+  `runs/kda-cuda-development/baseline/6c8475157-confirmed.json`, SHA-256
+  `c7a1980d7765fef1587d08094c233469708b4dc1095556313630e6038c297971`.
+- Append-only attempt index after attempt 22/confirmation 2: SHA-256
+  `5c06a2d665ce7ddd5ff1571fe9e5d5ae99dc0ba23488f70f4d0eb399fde0b4a9`.
+
+**Result**
+
+- Attempt 14 (`2485f177...`) split backward history replay into a 768-CTA
+  value-row kernel plus reverse-only recurrence. Level 1 improved T=4096
+  forward+backward `680.720 -> 577.269 ms` (15.20%); Level 2 observed
+  `1721 -> 1978 tok/s` (14.93%) at identical `5511.408 MiB`. Nsight measured
+  history at only `11.390 ms`, leaving reverse at `332.353 ms`.
+- Attempt 15 (`886712ad...`) applied the same value-row decomposition to
+  forward without a global workspace. T=4096 forward fell
+  `231.429 -> 19.754 ms` (91.46%) and forward+backward fell 36.37%. Level 2
+  observed `1979 -> 2866 tok/s` (44.82%), unchanged full-model peak.
+- The first protected confirmation preflight honestly preserved three invalid
+  infrastructure invocations: wrong checker cwd, a clean worktree where a
+  staged candidate was required, and then a valid correctness/runtime pass
+  whose profile could not see the frozen canonical kernel names. Candidate
+  attempt 16 (`5ce9e192...`) renamed the actual fast production kernels to the
+  audited canonical symbols. This symbol-only fix changed T=4096 by 0.041%,
+  within every regression/resource guard.
+- Confirmation 1 then passed all protected runtime/correctness/profile checks,
+  memcheck, racecheck, synccheck, and initcheck. All nine alternating pairs were
+  valid and faster: baseline medians `1973-1986 tok/s`, candidate medians
+  `2851-2866 tok/s`, median improvement 44.742%, exact two-sided sign-test
+  `p=0.00390625`, and every full-model peak exactly `5511.408 MiB`.
+- Attempt 17 (`a460dfd...`) introduced deterministic C=64/G=8 value-tiled
+  reverse and cut T=4096 kernel time 73.39%, but its fixed 4.512 MiB workspace
+  made the T=256 memory row 4.414% larger. The candidate was rejected without
+  Level 2; no favorable latency overrode the frozen memory gate.
+- Attempt 18 (`83e99411...`) reduced chunk capacity to 32, preserving the
+  algorithm while bounding workspace. Every memory row passed (T=256 ratio
+  `1.021476`); T=4096 forward+backward fell `367.119 -> 97.911 ms` (73.33%).
+  Its Level-2 pair observed `2863 -> 6689 tok/s` (133.64%), identical full-model
+  peak. Profiling isolated `18.656 ms` in a serial parameter finalizer.
+- Attempt 19 (`6c847515...`) parallelized deterministic parameter reductions,
+  reusing dead q-norm workspace and adding no allocation. T=4096 fell another
+  `97.169 -> 79.449 ms` (18.24%); Level 2 observed `6684 -> 7394 tok/s`
+  (10.62%), identical full-model peak. Nsight reduced parameter work to under
+  `0.36 ms`; the value-tiled reverse is now `42.43 ms`, forward `19.84 ms`,
+  history `11.85 ms`, and preprocess `2.61 ms`.
+- Confirmation 2 on exact commit `6c847515733078fc6485e10713f981dfa20a5ffd`
+  again passed the full protected checker and all four sanitizers. All nine
+  alternating pairs were valid and faster: baseline `2855-2863 tok/s`,
+  candidate `7325-7394 tok/s`, median improvement 156.708%, exact sign-test
+  `p=0.00390625`, and every full-model peak exactly `5511.408 MiB`.
+- Attempts 20 (`547ce9c...`) and 21 (`9eb2ada...`) tested sixteen value tiles
+  with constant or BF16-compressed workspace. They regressed T=4096 by 50.59%
+  and 46.14%, respectively, and were rejected without Level 2. Attempt 22
+  (`acffe2f...`) cached the owned adjoint tile in 8.14 KiB shared memory; it
+  regressed 8.96% and was likewise rejected. All sources/artifacts remain.
+- Exact `6c847515...` is therefore the current statistically confirmed
+  **development** baseline. Its source SHA-256 is
+  `c50becb95a700bd981e2e294d4a41dd51bacadf7312019ede9408410f15f58e5`.
+  It remains unmerged, non-default, and is not an LM-quality or official
+  retention claim. Official protected retention remains exact naive
+  `4d1a3b231da2c99882324efbda5306a1815e21c7`.
+
+**Next**
+
+- Treat the C32/G8 tiled reverse as the scalar/value-decomposition plateau.
+  Further major gains require the staged FP32 C=64 WY/UT algorithmic path (or
+  another dependency-breaking reverse formulation), not more tile-count or
+  shared-cache launch tuning.
+- Keep `6c847515...` as the confirmed comparison anchor, preserve every future
+  attempt, and defer another nine-pair confirmation until the next major
+  strategy boundary, four-hour checkpoint, plateau, or final candidate.
