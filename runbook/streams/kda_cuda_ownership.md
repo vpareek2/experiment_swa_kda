@@ -8045,3 +8045,88 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_116 \
   pipelined persistent forward recurrence with register-resident fragment
   handoffs, or a lower-residency backward schedule that changes ownership
   rather than serializing more products into the chunk CTA.
+
+## 2026-08-09 [Codex] Attempt 117 whole-phase state-fragment handoff rejected
+
+**Context**
+
+- Static cubin inspection of accepted attempt 100 measured the persistent
+  forward WMMA kernel at 59 registers, 50,176 bytes shared, no stack/local
+  spill, 256 threads, and 24 CTAs on the 48-SM GB10. The device exposes
+  102,400 shared bytes and 65,536 registers per SM.
+- Attempt 117 starts directly from attempt 100 and retains the eight BF16 state
+  fragments loaded for `W H` in registers across the residual/output boundary,
+  reusing them for `qgamma H`. This removes the second FP32-state cast, shared
+  store, warp barrier, and WMMA fragment load while preserving C64 geometry,
+  FP32 recurrent state, equations, output order, and the complete accepted
+  backward VJP.
+
+**Commands**
+
+```bash
+# One bounded accepted-kernel Nsight Compute design pass; stopped invalid by
+# ERR_NVGPUCTRPERM before counters were collected.
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_117 \
+  --lane optimization <isolated artifact/cache arguments>
+# Seed-4101 production comparison and independent fresh-cache repeat.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_100 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_117 \
+  runs/kda-cuda-development/attempt-00117-forward-state-fragments-level1 \
+  --level2-order baseline-first
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_117 \
+  push -u origin kda-cuda/wy-forward-state-fragments-117
+```
+
+**Artifacts**
+
+- Pushed commit `2e0366c17bda7feb0e6d2c6ee71d11f3ff4c4875`;
+  forward source SHA-256
+  `31d93c4f5c7703cd2fb9bf002463eb3c943a7c083ac71ec4b0ed48fd63b00bed`.
+- Protected checker:
+  `runs/kda-cuda-development/diagnostics/attempt-00117-forward-state-fragments-protected-checker`,
+  manifest `702227ee7b41aa128032c4788c9b926d80e19e03424729c75bd57b7522e4a40f`.
+- Production comparison/repeat:
+  `runs/kda-cuda-development/diagnostics/attempt-00117-forward-state-fragments-gradient`,
+  manifest `2806dcd3ee933a4740b7b75adf3f828679c1d0da4477ab5faf96f7e2a61ac437`.
+- Level 1:
+  `runs/kda-cuda-development/attempt-00117-forward-state-fragments-level1`,
+  manifest `e3f51cc70ba01e644819d18679977d6cf90ab4311479f35edd6b578c99058c56`.
+- Design profile/resource record:
+  `runs/kda-cuda-development/diagnostics/attempt-00117-forward-wmma-ncu-design`,
+  manifest `6702ae393e8478e1faba7ac698732c9c85b252e867bbdd490c366996de97fbdf`.
+  Nsight Compute connected but stopped with `ERR_NVGPUCTRPERM`; no report was
+  collected, no permission workaround was attempted, and static `cuobjdump`
+  evidence records 84 registers, unchanged 50,176-byte shared use, and no
+  stack/local spill for the candidate.
+- Append-only attempt/reference index SHA-256:
+  `017f3489b9b3a093420039adff360035690296283f61c680bf4722cc4261340f`.
+- The first CPU comparison postprocessing command used coordinator-relative
+  paths from the candidate cwd and failed before either comparison process
+  launched. The commit in that shell succeeded; no GPU work reran. The exact
+  incident is preserved and comparisons were generated with absolute paths.
+
+**Result**
+
+- The committed candidate passes ownership 1.0, protected runtime/profile
+  audit, runtime FLA freedom, finite-gradient checks, and is bitwise equal to
+  attempt 100 for output and all seven gradients. The independent fresh-cache
+  repeat is also bitwise exact for all eight tensors.
+- Level 1 rejects the mechanism. T=4096 forward-only improves
+  `19.401104 -> 19.252481 ms` (0.766%), but forward+backward regresses
+  `12.191408 -> 12.716432 ms` (4.307%). T=256 and T=1024 forward+backward
+  improve 5.343% and 4.430%; allocation is unchanged and formal guards pass.
+- Holding eight fragments across the complete residual/output phase raises
+  registers from 59 to 84. The removed state reload does not offset that live
+  range at the production target. No sanitizer, Level 2, confirmation, or
+  LM-quality evaluation ran; this is not statistically confirmed evidence.
+
+**Next**
+
+- Retain attempt 100 and close whole-phase state-fragment retention. Do not run
+  attempt 117's saved Level-2 plan or retest its mixed length behavior.
+- A viable forward pipeline must keep fragment lifetimes short—software
+  prefetch one K tile while the current MMA executes, or redesign ownership so
+  producer fragments feed their immediate consumer—rather than retaining all
+  eight state fragments across the intervening `A Z` work.
