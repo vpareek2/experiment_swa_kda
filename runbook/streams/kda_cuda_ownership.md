@@ -4410,3 +4410,54 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_060 \
 - Preserve separate output-decay and state-add kernels. Return to exact attempt
   53 and choose a new whole-forward structural axis rather than further
   launch-only fusion.
+
+## 2026-08-09 [agent] reject configured TF32 for WY BMMs
+
+**Context**
+
+- Attempt 61 removes the explicit `at::NoTF32Guard` from the attempt-53 WY
+  forward and backward operators. This allows their homogeneous ATen FP32 BMMs
+  to follow the repository-wide `torch.set_float32_matmul_precision("high")`
+  setting while leaving all project CUDA kernels and configurations unchanged.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_061 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact seeded B=2/H=3/T=4096 saved-gradient comparison plus repeat.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_053 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_061 \
+  runs/kda-cuda-development/attempt-00061-tf32-level1
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_061 \
+  push -u origin kda-cuda/wy-tf32-bmm-061
+```
+
+**Artifacts**
+
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00061-protected-checker`, manifest `0297748fece66352890f0da00d0c8362ef459eb3d2d913f42d6463d553154728`.
+- Production comparison/repeat: `runs/kda-cuda-development/diagnostics/attempt-00061-tf32-gradient`, manifest `aeb50a654783ca5f6ec83b224516d21a46cc5243b6e9ff0a678b8f84b5537ff1`.
+- Level 1: `runs/kda-cuda-development/attempt-00061-tf32-level1`, manifest `df5df339964b2f46436b8fdbb075ae88d82b67978446a1e7e13afd51a59ac238`.
+- Append-only attempt/reference index SHA-256: `558879e87e98726cec239840c4c3bf09f7f9faff32d36e74706b28c265aa8d16`.
+
+**Result**
+
+- Pushed commit `6e1a5faae045058029280534ffb1662d660719b5`
+  passed the protected ownership and runtime audits. Output, all seven
+  production-shape gradients, and the independent repeat are bitwise identical
+  to attempt 53.
+- Level 1 rejected the intervention: T=4096 forward+backward changed
+  `21.427 -> 21.692 ms` (-1.24%), forward-only regressed 0.40%, and peak
+  allocation was unchanged. Removing the guard did not expose a useful faster
+  path under the configured `high` matmul precision on this workload.
+- No sanitizers, Level 2, profile, confirmation, or retest ran. Attempt 53
+  remains the accepted development baseline; this is not quality or
+  statistically confirmed evidence.
+
+**Next**
+
+- Preserve attempt 61 unchanged. Return to attempt 53 and target a structural
+  reduction in the dominant generic BMM or backward pair-pack/accumulate work;
+  do not pursue global TF32 permission further without new kernel evidence.
