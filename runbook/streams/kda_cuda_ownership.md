@@ -5130,3 +5130,55 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_072 \
   WMMA scan (`2.174 ms/iteration`), followed by pair pack/transforms and the
   remaining generic FP32 BMM groups. Preserve 16-column group tiling and the
   no-full-history reverse-recomputation design.
+
+## 2026-08-09 [agent] reject 16-column forward WMMA tiling
+
+**Context**
+
+- Attempt 73 starts from accepted attempt 72 and applies 16-value-column CTA
+  tiling to the persistent forward WMMA scan. It removes value-half
+  serialization from `Hnext`, while doubling CTA count and using four of eight
+  warps during the Z and output phases. Equations, casts, accumulators, and
+  allocation are unchanged.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_073 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact production comparison/repeat.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_072 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_073 \
+  runs/kda-cuda-development/attempt-00073-forward-tile16-level1
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_073 \
+  push -u origin kda-cuda/wy-forward-value-tile16-073
+```
+
+**Artifacts**
+
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00073-forward-tile16-protected-checker`, manifest `a879902b025789e8ecbd40625f8725103531b8a42098e996641994149cd7c6ef`.
+- Production comparison/repeat: `runs/kda-cuda-development/diagnostics/attempt-00073-forward-tile16-gradient`, manifest `69001bd3be68599c1d38f26e4fc1d15c867a63e77b48ce03dac9147d6702bcf2`.
+- Level 1: `runs/kda-cuda-development/attempt-00073-forward-tile16-level1`, manifest `f12f728187900645c192a3b72d56a9b0d0422656287d11f232995b9215351843`.
+- Invalid no-staged-source checker invocation: `runs/kda-cuda-development/diagnostics/attempt-00073-check-invalid-001`, manifest `62d5331b5e807ff77f66317f033c5639e5f058ded8ad1b4fcb22788753980dc1`.
+- Invalid missing-destination gradient invocation: `runs/kda-cuda-development/diagnostics/attempt-00073-gradient-invalid-001`, manifest `c0c16f61d607c505bc0059c711481ca83b54fbf47f0d6227da91a33665e179d7`. Computation completed, but no tensors or raw log could be saved; it is excluded.
+- Append-only attempt/reference index SHA-256: `202034652979f44d42a0284de1309512cb46b9402c96652d5ded556e1b670569`.
+
+**Result**
+
+- Pushed commit `1d2c66a7339c3855d795f2673839cb9ce45628be`
+  passed ownership 1.0, runtime/profile audit, runtime FLA freedom, and bitwise
+  output/all-gradient correctness plus a bitwise repeat.
+- Level 1 rejected the geometry: T=4096 forward-only improved 1.37%, but
+  forward+backward regressed `18.313 -> 19.305 ms` (5.42%), exceeding the
+  frozen 5% guard. Peak allocation is unchanged.
+- No sanitizers, Level 2, profile, confirmation, or retest ran. Attempt 72
+  remains accepted; this is neither quality nor statistically confirmed
+  evidence.
+
+**Next**
+
+- Preserve attempt 73 unchanged. Continue from attempt 72 and target pair
+  pack/transforms or generic FP32 BMM groups rather than doubling forward CTA
+  count.
