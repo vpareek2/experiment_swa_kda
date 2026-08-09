@@ -7746,3 +7746,77 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_112 \
   fusion. The more direct training route remains a lower-shared-memory C64
   backward VJP that removes generic GEMM/global handoffs without serializing
   work into one chunk-owned CTA.
+
+## 2026-08-09 [Codex] Attempt 113 aliased-scratch vector consumer rejected at Level 1
+
+**Context**
+
+- Attempt 113 starts directly from accepted attempt 100 and reconstructs the
+  correct attempt-105 16-column C64 backward vector-consumer VJP without
+  inheriting its rejected branch. It aliases the mutually exclusive BF16
+  right-input and FP32 result regions behind explicit CTA-wide lifetime
+  barriers, reducing shared memory per CTA from 24 KiB to 20 KiB while keeping
+  four concurrent WMMA row warps.
+- The hypothesis was that the lower shared-memory footprint would increase CTA
+  residency enough to move the previously subthreshold vector-consumer design
+  through the 3% Level-1 gate without restoring full token history.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_113 \
+  --lane optimization <isolated artifact/cache arguments>
+# Seed-4101 production comparison and independent fresh-cache repeat.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_100 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_113 \
+  runs/kda-cuda-development/attempt-00113-vector-consumer-alias-level1 \
+  --level2-order baseline-first
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_113 \
+  push -u origin kda-cuda/wy-vector-consumer-alias-113
+```
+
+**Artifacts**
+
+- Pushed commit `dbcea64a878a4f2d58c17b0c40a8206caf0bbf9e`;
+  backward source SHA-256
+  `14ec754b551a8cb349975dc22d1b42a1d02ed09f386af3247a1c6e818d8b4f07`.
+- Protected checker:
+  `runs/kda-cuda-development/diagnostics/attempt-00113-vector-consumer-alias-protected-checker`,
+  manifest `3b5b037a715980cf639d4a694da47515af75992912fc0bf2b4bd6e8f98276a51`.
+- Production comparison/repeat:
+  `runs/kda-cuda-development/diagnostics/attempt-00113-vector-consumer-alias-gradient`,
+  manifest `6a02a757bc9aca8646dae42688809b4855a0e5ae3ba6e91fe244a7709921a873`.
+- Level 1:
+  `runs/kda-cuda-development/attempt-00113-vector-consumer-alias-level1`,
+  manifest `453f3322a65fb3583dc35f50525a56431fe15681c3815d30bbf84b7aae0073ce`.
+- Append-only attempt/reference index SHA-256:
+  `e8f6fcf5eb69f4baed4b4697b8c812b43603890edd86395a9a418804d7bb7682`.
+
+**Result**
+
+- The committed candidate passes ownership 1.0, protected runtime/profile
+  audit, runtime FLA freedom, frozen numerical tolerance, and finite-gradient
+  checks. Output is bitwise equal to attempt 100; maximum gradient delta is
+  `5.820766091346741e-11`, and the independent fresh-cache repeat is bitwise
+  exact for all eight tensors.
+- Level 1 rejects the occupancy hypothesis. T=4096 forward+backward improves
+  `12.219856 -> 12.070128 ms` (1.225%), below the 3% gate, while peak allocation
+  falls 3.313%, from 202,770,944 to 196,053,504 bytes. T=256 and T=1024
+  forward+backward improve 1.709% and 1.275%; all regression and memory guards
+  pass.
+- The aliased 20-KiB design is weaker than the original 24-KiB attempt 105's
+  saved 2.244% Level-1 result. The added lifetime barriers outweigh any
+  residency benefit at this shape. No sanitizer, Level 2, profile beyond the
+  protected audit, confirmation, or LM-quality evaluation ran.
+
+**Next**
+
+- Retain attempt 100. Close shared-scratch aliasing and value-column occupancy
+  tuning; attempts 105, 106, and 113 now bound this family below the gate.
+- The remaining gap requires a larger boundary that removes repeated backward
+  staging or launch/global-memory handoffs without additional CTA barriers.
+  Audit the current reverse-group schedule for a deterministic batched
+  post-reverse VJP, or design a coupled forward persistent recurrence with
+  pipelined global loads and register-resident producer handoff.
