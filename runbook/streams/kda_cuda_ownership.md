@@ -7449,3 +7449,65 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_108 \
   In particular, evaluate whether adjacent completed reverse groups can share
   batched post-reverse VJP launches without restoring full token history or
   exceeding the frozen 3% allocation guard.
+
+## 2026-08-09 [Codex] Attempt 109 whole-path group-major storage rejected
+
+**Context**
+
+- Attempt 109 stores `P/Q/A/T` in eight-chunk group-major order from their
+  construction in both forward and backward. Backward group slices become
+  zero-copy views, eliminating 56 explicit `.contiguous()` packing operations
+  while preserving the bounded eight-chunk reverse schedule and equations.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_109 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact production comparison/repeat, then Level 1 against attempt 100.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_100 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_109 \
+  runs/kda-cuda-development/attempt-00109-group-major-storage-level1 \
+  --level2-order baseline-first
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_109 \
+  push -u origin kda-cuda/wy-group-major-storage-109
+```
+
+**Artifacts**
+
+- Pushed commit `6216f4301edea1c15782c20ff706354125b524df`;
+  forward/backward source SHA-256 values `b4d8bc5da8ae40960f9379cbb4f62f03506828f750247743e7b25caea4a985cc`
+  and `9da01e60aa41b0519e9fb2d4d6941f039ec1fc19ca04cc8969fc3100f379fa85`.
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00109-group-major-storage-protected-checker`,
+  manifest `579af1d5fc95904efc83d29c44ceeb8a79694106fc5a00f2895523459692ee08`.
+- Production comparison/repeat: `runs/kda-cuda-development/diagnostics/attempt-00109-group-major-storage-gradient`,
+  manifest `55cbdac8ac9bacac1d3c069f5b884278bd40c18bd442c162ac3b04fa6f7ca5a6`.
+- Level 1: `runs/kda-cuda-development/attempt-00109-group-major-storage-level1`,
+  manifest `fc03ff28a4f2f46ce4888b619dfc7483b3f4c84e417f065ba63c7b25eae4f917`.
+- Append-only attempt/reference index SHA-256:
+  `4a43589714860c36ca2a1197c3e9a4f47176ad950c201121b08b7bb4162f9ff2`.
+
+**Result**
+
+- The candidate passes ownership 1.0, protected runtime/profile audit,
+  runtime FLA freedom, frozen tolerance, finite gradients, and a bitwise exact
+  fresh-cache repeat. Output and `dq` are bitwise equal to attempt 100; maximum
+  gradient delta is `2.459273673593998e-09`.
+- Level 1 rejects the whole-path layout. Peak allocation falls 2.327%, from
+  202,770,944 to 198,052,352 bytes, but T=4096 forward+backward regresses
+  `12.387984 -> 12.480624 ms` (0.748%). Forward-only regresses 3.771%, while
+  T=256 and T=1024 forward+backward improve 3.106% and 1.750%.
+- No sanitizer, Level-2, profile, confirmation, or LM-quality evaluation ran.
+  This is development evidence only and is not statistically confirmed.
+
+**Next**
+
+- Retain attempt 100. The forward persistent scan requires recurrence-major
+  locality and must not consume group-major `U/W/A`.
+- Forward and backward are independent operators, and backward reconstructs
+  `P/Q/A/T` from the original inputs. Attempt 110 should therefore retain the
+  exact attempt-100 forward file and apply group-major zero-copy storage only
+  in backward, preserving the observed allocation benefit without the measured
+  forward locality penalty.
