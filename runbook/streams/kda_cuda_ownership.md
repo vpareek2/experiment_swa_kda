@@ -5025,3 +5025,42 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_070 \
   traffic inside the persistent group scan, then the remaining forward WMMA
   scan, pair transforms/pack-accumulate, and generic FP32 BMM groups. Preserve
   the no-full-history boundary-recomputation design and all frozen gates.
+
+## 2026-08-09 [agent] preserve sixteen-warp group state compile failure
+
+**Context**
+
+- Attempt 71 starts from accepted attempt 70 and assigns each of the 16
+  `(16-key, 16-value)` `E^T Z` products in the persistent group scan to its own
+  warp. It raises the CTA from 256 to 512 threads and enlarges only the
+  per-warp BF16 operand staging; equations and persistent state are unchanged.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --config configs/research/kda_cuda_ownership.toml \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_071 \
+  --lane optimization <isolated artifact/cache arguments>
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_071 \
+  push -u origin kda-cuda/wy-sixteen-warp-group-state-071
+```
+
+**Artifacts**
+
+- Invalid protected checker: `runs/kda-cuda-development/diagnostics/attempt-00071-sixteen-warp-group-check-invalid`, manifest `bf8e262f4ba201c77f7711dac4e479c95cd0c5356b9f6f1395a073c7de7d9b18`.
+- Append-only attempt/reference index SHA-256: `85aa6505c5abd7275694d19ea0f82dcab7219a76e887b1311980445c7fdc7935`.
+
+**Result**
+
+- Pushed commit `4cd6f3aad2f72e4df25309c871cefc110fdc77cd`
+  is invalid: `ptxas` reports that the persistent group kernel uses `0xe000`
+  bytes of static shared memory, exceeding the `0xc000` limit. Runtime audit
+  failed at build, profile audit was skipped, and no GPU measurement ran.
+- Attempt 70 remains accepted. No correctness, sanitizer, Level-1, Level-2,
+  confirmation, or quality claim is attached to attempt 71.
+
+**Next**
+
+- Preserve attempt 71 unchanged. Test any alternative value-tile geometry in a
+  new child of attempt 70; do not exceed the static shared-memory ceiling.
