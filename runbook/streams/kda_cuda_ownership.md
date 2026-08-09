@@ -4615,3 +4615,86 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_064 \
   WMMA scan improved 2.60%, while attempt 64's backward boundary scan improves
   2.70%. Test both validated substitutions together from exact attempt 53 as a
   unified scan-backend boundary; do not add unrelated changes.
+
+## 2026-08-09 [agent] accept unified forward and backward WMMA scans
+
+**Context**
+
+- Attempt 65 combines the independently validated attempt-56 forward scan and
+  attempt-64 backward group-boundary scan. Both persistent kernels retain FP32
+  recurrent state and accumulators while explicitly casting WMMA operands to
+  BF16. The complete reverse WY/UT VJP and attempt-53 chunk-partial
+  finalization remain unchanged.
+- The candidate parent is attempt 64, but every matched performance and
+  correctness comparison uses accepted attempt 53. Only
+  `nanochat/mixers/cuda_kda/chunk_wy_forward.cu` and
+  `nanochat/mixers/cuda_kda/chunk_wy_backward.cu` differ from that baseline.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_065 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact seeded B=2/H=3/T=4096 saved-gradient comparison plus repeat.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_053 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_065 \
+  runs/kda-cuda-development/attempt-00065-unified-wmma-level1
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_validation_065 \
+  --lane optimization <isolated artifact/cache arguments> --sanitizers
+# Executed the saved baseline-first Level-2 plan exactly once.
+PYTHONPATH=/home/veer/Master/projects/experiment_swa_kda_cuda_attempt_065 \
+TORCH_EXTENSIONS_DIR=/tmp/kda065-unified-wmma-profile-ext-002 \
+nsys profile --trace=cuda,nvtx,osrt --sample=none --cpuctxsw=none \
+  --force-overwrite=true --output=<artifact>/trace \
+  /home/veer/Master/projects/experiment_swa_kda/.venv/bin/python \
+  /tmp/kda033_nsys.py
+nsys stats --report cuda_gpu_kern_sum --format csv \
+  --output <artifact>/kern <artifact>/trace.nsys-rep
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_065 \
+  push -u origin kda-cuda/wy-unified-wmma-scan-065
+```
+
+**Artifacts**
+
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00065-protected-checker`, manifest `267663b051697e30fe6b21c14b43ab69a302c6ee57b95a6b23425f01244870b7`.
+- Production comparison/repeat: `runs/kda-cuda-development/diagnostics/attempt-00065-unified-wmma-gradient`, manifest `e06e7092bea3da9c66b1d3fb38db510b5ef8ffa4b42bc8cf80998fa9efa66b09`.
+- Full sanitizer validation: `runs/kda-cuda-development/validations/validation-00013-unified-wmma-scan`, manifest `84865ec0ad9455649d1022f9a3a61c353765874685d84925ed2c0361781e28d4`.
+- Level 1: `runs/kda-cuda-development/attempt-00065-unified-wmma-level1`, manifest `745d3fae0c4cf32f5a74a95b0b0402522a65f713e98320e404c6c7faa7918d50`.
+- Level 2: `runs/kda-cuda-development/attempt-00065-unified-wmma-level2`, manifest `262b79b79eadb742789c099322895aa3a343ad512d0c9367b1cde1e997c9b5cd`.
+- Production profile: `runs/kda-cuda-development/diagnostics/attempt-00065-production-profile`, manifest `5f390377ce61e65ba8a4d8c5c16e00201d861fbbe10854f18f7af364a34b1ac0`.
+- Invalid coordinator-CWD profile invocation: `runs/kda-cuda-development/diagnostics/attempt-00065-production-profile-invalid-001`, manifest `8cd5abcdcb7ce0232b27ab61284edd3e0f1a05b8c164fb7c0e90f0455fc8756c`. The empty trace was overwritten before a failed relative-path move was noticed; exact captured stderr and that preservation limitation are recorded.
+- Baseline manifest: `runs/kda-cuda-development/baseline/dbfe809a82.json`, SHA-256 `1fad6301b3a002eab582f244ea0a6bac59bb464ca2579b95b14bef07c33f503a`.
+- Append-only attempt/reference index SHA-256: `748b145b198f427af39e7362e0bf3284c2cd01606344afffc172a11d3644c3b6`.
+
+**Result**
+
+- Pushed commit `dbfe809a822084c849b344a6d479c90f48e1474d`
+  passed ownership 1.0, protected runtime/profile audit, runtime FLA freedom,
+  frozen production correctness, a bitwise deterministic repeat, and all four
+  sanitizers. Maximum output difference versus attempt 53 was
+  `4.8828125e-4`; the largest gradient difference was `5.821e-11`.
+- Level 1 advanced: T=4096 forward+backward improved
+  `21.596 -> 20.249 ms` (6.23%) with memory ratio 1.0. Every important
+  regression guard passed.
+- The single baseline-first Level-2 pair measured baseline
+  `[27575,27546,27684,27462,27654]`, median `27575 tok/s`, and candidate
+  `[28344,28307,28325,27996,28358]`, median `28325 tok/s`: +2.72%, identical
+  `5508.533 MiB`, and 64.85% of the fixed 43,680 tok/s reference.
+- The production profile identifies the forward WMMA scan as the largest named
+  owned kernel at `2.725 ms` per iteration. Backward pair packing plus
+  accumulation totals `1.786 ms`; the backward group-boundary WMMA scan is
+  `0.834 ms`.
+- Attempt 65 is the accepted development baseline. It is not statistically
+  confirmed, official retention, a merge/default change, or LM-quality
+  evidence.
+
+**Next**
+
+- Continue from exact attempt 65. First target the persistent forward WMMA
+  scan's intra-kernel work or state/output staging, while preserving explicit
+  BF16 operand rounding and FP32 accumulation. Treat pair-pack/accumulate as
+  the next backward target; do not replay rejected pair-width or global
+  transform-reuse variants.
