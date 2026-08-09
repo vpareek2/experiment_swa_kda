@@ -4218,3 +4218,53 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_056 \
 - Return to exact FP32 attempt 53. Stack the same-right tiled A/M construction
   products into one FP32 batched call without changing scan precision or
   allocation; do not tune WMMA tile geometry.
+
+## 2026-08-09 [agent] reject stacked A/M construction lifetime
+
+**Context**
+
+- Attempt 57 stacks each tile's FP32 A and M products into one batched BMM in
+  both forward and backward reconstruction. The duplicated right operand uses
+  the previously unused quarter of P scratch, and combined A/M storage has the
+  same nominal bytes as the two parent allocations.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_057 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact seeded B=2/H=3/T=4096 saved-gradient comparison plus repeat.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_053 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_057 \
+  runs/kda-cuda-development/attempt-00057-stacked-am-level1
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_057 \
+  push -u origin kda-cuda/wy-stacked-am-build-057
+```
+
+**Artifacts**
+
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00057-protected-checker`, manifest `3a3f49921bd3b7fc276a174c350930ba9a2a5d2d9d410cb9692a0a959b426b95`.
+- Production comparison/repeat: `runs/kda-cuda-development/diagnostics/attempt-00057-stacked-am-gradient`, manifest `72bc41a473d9a37c2ed0da9394ece018b9fef2c1727cae8aa6739e74c08481cb`.
+- Level 1: `runs/kda-cuda-development/attempt-00057-stacked-am-level1`, manifest `0d52381d0a080e1f63c2efddd5521690ca515dad19f02f2a973d37ed9abaaaf2`.
+- Append-only attempt/reference index SHA-256: `7a0b935189defcfa445f035b58927aed0ef9d0821bd9b62d60e30ac60593b78e`.
+
+**Result**
+
+- Pushed commit `9b05e8e83f197f68b2fe968b460a7f1cddfa44da`
+  passed ownership/runtime gates. Output, every gradient, and the repeat are
+  bitwise identical to attempt 53.
+- Level 1 rejected the committed form: T=4096 forward-only improved
+  `19.677 -> 18.998 ms` (3.45%), but forward+backward regressed
+  `21.786 -> 22.320 ms` (-2.45%). Peak allocation rose to 210,307,584 bytes,
+  ratio 1.02820, because A's view retains the combined allocation after M is
+  dead. No sanitizer, Level 2, profile, or retest ran.
+- Attempt 53 remains accepted. This is neither confirmation nor quality
+  evidence.
+
+**Next**
+
+- Preserve attempt 57 unchanged. In a separate child, write T in-place over M
+  after the lower solve, eliminating the separate T allocation and the dead-M
+  lifetime penalty while retaining stacked FP32 construction.
