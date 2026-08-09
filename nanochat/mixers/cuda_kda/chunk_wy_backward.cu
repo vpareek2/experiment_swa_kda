@@ -39,6 +39,27 @@ __device__ __forceinline__ void causal_tile_pair(
   source_tile = pair;
 }
 
+// Four conflict-free rounds cover the diagonal loops and the three perfect
+// matchings of the off-diagonal K4 tile graph. Pair CTAs in one round touch
+// disjoint target/source tiles, so they can update vector gradients directly
+// without atomics or a cross-CTA reduction.
+__device__ __forceinline__ int colored_causal_pair(int color, int slot) {
+  if (color == 0) {
+    constexpr int diagonal[4] = {0, 2, 5, 9};
+    return diagonal[slot];
+  }
+  if (color == 1) {
+    constexpr int matching[2] = {1, 8};
+    return matching[slot];
+  }
+  if (color == 2) {
+    constexpr int matching[2] = {3, 7};
+    return matching[slot];
+  }
+  constexpr int matching[2] = {6, 4};
+  return matching[slot];
+}
+
 __device__ __forceinline__ float wy_sigmoid(float x) {
   if (x >= 0.0f) {
     const float z = expf(-x);
@@ -1041,30 +1062,30 @@ __global__ void nanochat_kda_wy_backward_group_dD_c64_kernel(
   }
 }
 
-// Pack one stable causal A/M tile pair and evaluate its three VJP products
-// with BF16 WMMA operands and FP32 accumulators. A per-channel tile center
-// bounds both exponentials; FP32 copies remain available to the ordered
-// accumulation kernel.
-__global__ void nanochat_kda_wy_backward_pair_wmma_c64_kernel(
+// Evaluate one conflict-free stable A/M tile pair and apply its complete
+// vector VJP in the producer CTA. The color launch is the deterministic
+// ordering boundary; shared FP32 WMMA results never round-trip through global
+// pair workspaces.
+__global__ void nanochat_kda_wy_backward_colored_pair_wmma_c64_kernel(
     const float* qbar,
     const float* khat,
     const float* prefix_g,
     const float* beta,
     const float* dA,
     const float* dM,
-    float* right,
-    float* forward_left,
-    float* target_gradient,
-    float* source_gradient,
-    float* pre_m,
+    float* dqbar,
+    float* dkhat,
+    float* dbeta,
+    float* dprefix,
     int chunk_start,
     int group_chunks,
-    int pair_start,
-    int pair_count) {
+    int color) {
   namespace wmma = nvcuda::wmma;
   const int pair_n = blockIdx.x;
+  const int pair_count = color == 0 ? 4 : 2;
   const int local_n = pair_n / pair_count;
-  const int pair = pair_start + pair_n - local_n * pair_count;
+  const int pair_slot = pair_n - local_n * pair_count;
+  const int pair = colored_causal_pair(color, pair_slot);
   if (local_n >= kRecurrences * group_chunks) {
     return;
   }
@@ -1078,21 +1099,15 @@ __global__ void nanochat_kda_wy_backward_pair_wmma_c64_kernel(
   const int source_start = source_tile * kMatrixTile;
   const int center_row = target_tile == source_tile
       ? target_start : target_start - 1;
-  const int64_t vector_base = static_cast<int64_t>(pair_n) *
-      kMatrixTile * kDim;
-  const int64_t left_base = static_cast<int64_t>(pair_n) *
-      (2 * kMatrixTile) * kDim;
-  const int64_t target_base = static_cast<int64_t>(pair_n) *
-      (2 * kMatrixTile) * kDim;
-  const int64_t source_base = static_cast<int64_t>(pair_n) *
-      kMatrixTile * kDim;
-  const int64_t pre_m_base = static_cast<int64_t>(pair_n) *
-      kMatrixTile * kMatrixTile;
 
   __shared__ __nv_bfloat16 shared_upstream[
       2 * kMatrixTile * kMatrixTile];
   __shared__ __nv_bfloat16 shared_right[kMatrixTile * kDim];
   __shared__ __nv_bfloat16 shared_left[2 * kMatrixTile * kDim];
+  __shared__ float shared_target_gradient[
+      2 * kMatrixTile * kDim];
+  __shared__ float shared_source_gradient[kMatrixTile * kDim];
+  __shared__ float shared_pre_m[kMatrixTile * kMatrixTile];
 
   for (int index = threadIdx.x; index < kMatrixTile * kDim;
        index += blockDim.x) {
@@ -1108,9 +1123,6 @@ __global__ void nanochat_kda_wy_backward_pair_wmma_c64_kernel(
     const float key_left = khat[target] * target_factor;
     const float right_value =
         khat[source] * expf(center - prefix_g[source]);
-    forward_left[left_base + index] = query_left;
-    forward_left[left_base + kMatrixTile * kDim + index] = key_left;
-    right[vector_base + index] = right_value;
     shared_left[index] = __float2bfloat16_rn(query_left);
     shared_left[kMatrixTile * kDim + index] =
         __float2bfloat16_rn(key_left);
@@ -1166,7 +1178,7 @@ __global__ void nanochat_kda_wy_backward_pair_wmma_c64_kernel(
         b, shared_right + value_tile * kMatrixTile, kDim);
     wmma::mma_sync(accumulator, a, b, accumulator);
     wmma::store_matrix_sync(
-        target_gradient + target_base +
+        shared_target_gradient +
             row_tile * kMatrixTile * kDim + value_tile * kMatrixTile,
         accumulator, kDim, wmma::mem_row_major);
   }
@@ -1187,7 +1199,7 @@ __global__ void nanochat_kda_wy_backward_pair_wmma_c64_kernel(
       wmma::mma_sync(accumulator, a, b, accumulator);
     }
     wmma::store_matrix_sync(
-        source_gradient + source_base + warp * kMatrixTile,
+        shared_source_gradient + warp * kMatrixTile,
         accumulator, kDim, wmma::mem_row_major);
   }
 
@@ -1205,8 +1217,59 @@ __global__ void nanochat_kda_wy_backward_pair_wmma_c64_kernel(
       wmma::mma_sync(accumulator, a, b, accumulator);
     }
     wmma::store_matrix_sync(
-        pre_m + pre_m_base, accumulator, kMatrixTile,
+        shared_pre_m, accumulator, kMatrixTile,
         wmma::mem_row_major);
+  }
+
+  __syncthreads();
+
+  // Each color owns disjoint tiles. Threads apply target and source terms in a
+  // fixed order, including the diagonal case where both refer to one tile.
+  for (int index = threadIdx.x; index < kMatrixTile * kDim;
+       index += blockDim.x) {
+    const int local_row = index / kDim;
+    const int d = index - local_row * kDim;
+    const int target_row = target_start + local_row;
+    const int source_row = source_start + local_row;
+    const int64_t target = chunk_vector_index(n, target_row, d);
+    const int64_t source = chunk_vector_index(n, source_row, d);
+    const float center = prefix_g[chunk_vector_index(n, center_row, d)];
+    const float target_factor = expf(prefix_g[target] - center);
+    const float query_left = qbar[target] * target_factor;
+    const float key_left = khat[target] * target_factor;
+    const float query_gradient = shared_target_gradient[index];
+    const float target_key_gradient =
+        shared_target_gradient[kMatrixTile * kDim + index];
+    const int64_t target_local =
+        chunk_vector_index(local_n, target_row, d);
+    dqbar[target_local] += query_gradient * target_factor;
+    dkhat[target_local] += target_key_gradient * target_factor;
+    dprefix[target_local] +=
+        query_gradient * query_left + target_key_gradient * key_left;
+
+    const float source_factor = expf(center - prefix_g[source]);
+    const float right_value = khat[source] * source_factor;
+    const float source_key_gradient = shared_source_gradient[index];
+    const int64_t source_local =
+        chunk_vector_index(local_n, source_row, d);
+    dkhat[source_local] += source_key_gradient * source_factor;
+    dprefix[source_local] -= source_key_gradient * right_value;
+  }
+
+  if (threadIdx.x < kMatrixTile) {
+    const int target_local_row = threadIdx.x;
+    const int target_row = target_start + target_local_row;
+    float beta_gradient = 0.0f;
+    for (int source_local = 0; source_local < kMatrixTile; ++source_local) {
+      const int source_row = source_start + source_local;
+      if (source_row < target_row) {
+        beta_gradient +=
+            dM[chunk_matrix_index(local_n, target_row, source_row)] *
+            shared_pre_m[target_local_row * kMatrixTile + source_local];
+      }
+    }
+    dbeta[static_cast<int64_t>(local_n) * kChunk + target_row] +=
+        beta_gradient;
   }
 }
 
@@ -1606,8 +1669,6 @@ nanochat_kda_chunk_wy_backward_c64(
   constexpr int kGroupChunks = 8;
   constexpr int kGroups = kChunks / kGroupChunks;
   constexpr int kGroupRows = kRecurrences * kGroupChunks;
-  constexpr int kPairBatch = 4;
-  constexpr int kPairRows = kGroupRows * kPairBatch;
   constexpr int kVectorElements = kRecurrences * kChunk * kDim;
   constexpr int kGroupVectorElements = kGroupRows * kChunk * kDim;
   constexpr int kStateElements = kRecurrences * kDim * kDim;
@@ -1811,30 +1872,6 @@ nanochat_kda_chunk_wy_backward_c64(
     at::Tensor parameter_chunk_partials = at::empty(
         {kGroupRows, 2, kDim}, fp32);
 
-    // Reuse dead group buffers for the complete stable A/M pair VJP. The
-    // fused pair kernel writes the three WMMA products directly into these
-    // outputs without materializing the stacked upstream operand.
-    constexpr int64_t kPairVectorElements =
-        static_cast<int64_t>(kPairRows) * kMatrixTile * kDim;
-    constexpr int64_t kPairLeftElements = 2 * kPairVectorElements;
-    constexpr int64_t kPairMatrixElements =
-        static_cast<int64_t>(kPairRows) * kMatrixTile * kMatrixTile;
-    at::Tensor pair_right = Q_group.view({-1}).narrow(
-        0, 0, kPairVectorElements).view(
-            {kPairRows, kMatrixTile, kDim});
-    at::Tensor pair_forward_left = H_group_flat.view({-1}).narrow(
-        0, 0, kPairLeftElements).view(
-            {kPairRows, 2 * kMatrixTile, kDim});
-    at::Tensor pair_target_gradient = dstate_base.view({-1}).narrow(
-        0, 0, kPairLeftElements).view(
-            {kPairRows, 2 * kMatrixTile, kDim});
-    at::Tensor W_flat = W_group.view({-1});
-    at::Tensor pair_source_gradient = W_flat.narrow(
-        0, 0, kPairVectorElements).view(
-            {kPairRows, kMatrixTile, kDim});
-    at::Tensor pair_pre_m = R_group.view({-1}).narrow(
-        0, 0, kPairMatrixElements).view(
-            {kPairRows, kMatrixTile, kMatrixTile});
     nanochat_kda_chunk_backward_kernel<<<
         kGroupRows * kChunk, kDim, 0, stream>>>(
         reinterpret_cast<const __nv_bfloat16*>(v.data_ptr<at::BFloat16>()),
@@ -1850,41 +1887,16 @@ nanochat_kda_chunk_wy_backward_c64(
         dbeta_group.data_ptr<float>(), dprefix_group.data_ptr<float>(),
         chunk_start, kGroupChunks);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
-    for (int pair_start = 0; pair_start < kTilePairs;
-         pair_start += kPairBatch) {
-      const int pair_count =
-          pair_start + kPairBatch <= kTilePairs
-          ? kPairBatch : kTilePairs - pair_start;
-      const int pair_rows = kGroupRows * pair_count;
-      const at::Tensor right_batch = pair_right.narrow(0, 0, pair_rows);
-      const at::Tensor forward_left_batch = pair_forward_left.narrow(
-          0, 0, pair_rows);
-      at::Tensor target_gradient_batch = pair_target_gradient.narrow(
-          0, 0, pair_rows);
-      at::Tensor source_gradient_batch = pair_source_gradient.narrow(
-          0, 0, pair_rows);
-      at::Tensor pre_m_batch = pair_pre_m.narrow(0, 0, pair_rows);
-      nanochat_kda_wy_backward_pair_wmma_c64_kernel<<<
-          pair_rows, 256, 0, stream>>>(
+    for (int color = 0; color < 4; ++color) {
+      const int pair_count = color == 0 ? 4 : 2;
+      nanochat_kda_wy_backward_colored_pair_wmma_c64_kernel<<<
+          kGroupRows * pair_count, 256, 0, stream>>>(
           qbar.data_ptr<float>(), khat.data_ptr<float>(),
           prefix_g.data_ptr<float>(), beta.data_ptr<float>(),
           dA_group.data_ptr<float>(), dT_group.data_ptr<float>(),
-          right_batch.data_ptr<float>(), forward_left_batch.data_ptr<float>(),
-          target_gradient_batch.data_ptr<float>(),
-          source_gradient_batch.data_ptr<float>(),
-          pre_m_batch.data_ptr<float>(), chunk_start, kGroupChunks, pair_start,
-          pair_count);
-      C10_CUDA_KERNEL_LAUNCH_CHECK();
-      nanochat_kda_wy_backward_accumulate_pair_tiles_c64_kernel<<<
-          kGroupRows * kChunk, kDim, 0, stream>>>(
-          prefix_g.data_ptr<float>(), forward_left_batch.data_ptr<float>(),
-          right_batch.data_ptr<float>(),
-          target_gradient_batch.data_ptr<float>(),
-          source_gradient_batch.data_ptr<float>(),
-          pre_m_batch.data_ptr<float>(), dT_group.data_ptr<float>(),
           dqbar_group.data_ptr<float>(), dkhat_group.data_ptr<float>(),
           dbeta_group.data_ptr<float>(), dprefix_group.data_ptr<float>(),
-          chunk_start, kGroupChunks, pair_start, pair_count);
+          chunk_start, kGroupChunks, color);
       C10_CUDA_KERNEL_LAUNCH_CHECK();
     }
 
