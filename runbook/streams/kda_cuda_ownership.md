@@ -4816,3 +4816,70 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_067 \
   structural reduction in backward pair transforms/BMMs or forward persistent
   scan work; thread-count scheduling alone does not materially move trainer
   throughput.
+
+## 2026-08-09 [agent] accept eight-warp forward WMMA scheduling
+
+**Context**
+
+- Attempt 68 starts from accepted attempt 65 and activates all eight resident
+  warps for the eight `(16-row tile, 16-value half)` products in the forward Z
+  and output phases. It does not change the 32-value CTA geometry, the
+  eight-warp state update, equations, allocation, FP32 accumulators, or explicit
+  BF16 operand casts.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --config configs/research/kda_cuda_ownership.toml \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_068 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact seeded B=2/H=3/T=4096 saved-gradient comparison plus repeat.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_065 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_068 \
+  runs/kda-cuda-development/attempt-00068-eight-warp-level1
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_validation_068 \
+  --lane optimization <isolated artifact/cache arguments> --sanitizers
+# Executed the saved baseline-first Level-2 plan exactly once, then one
+# production-shape Nsight Systems profile.
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_068 \
+  push -u origin kda-cuda/wy-eight-warp-forward-068
+```
+
+**Artifacts**
+
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00068-protected-checker`, manifest `63fc0d948e5bacaa5a8f4636e3a7b2f0a12c99777c72c8c44a59f1cda0c5120b`.
+- Production comparison/repeat: `runs/kda-cuda-development/diagnostics/attempt-00068-eight-warp-gradient`, manifest `c56ac0fab5497eaa56716b57720a5cc875760695fc1b727ce7b45d8d04adc57e`.
+- Full sanitizer validation: `runs/kda-cuda-development/validations/validation-00015-eight-warp-forward`, manifest `e8a409d0bb6c679272c84e221eb85307947d68292c19b3a6341da35628441d8c`.
+- Level 1: `runs/kda-cuda-development/attempt-00068-eight-warp-level1`, manifest `1e98cf7e15152c8e0a2d14d1b431a40b30c1b71121fe40ed37bed76ce77e35fa`.
+- Level 2: `runs/kda-cuda-development/attempt-00068-eight-warp-level2`, manifest `a7d68f59592a7754c331b4fbd6de293239730051569a99954b0c02e43249ed49`.
+- Production profile: `runs/kda-cuda-development/diagnostics/attempt-00068-production-profile`, manifest `47055719564743de998ccf11fc1cca338bd6c43e63c4b3b8817817723f41c223`.
+- Baseline manifest: `runs/kda-cuda-development/baseline/705c607440.json`, SHA-256 `049a65ae602f18e5298e08f7f0ca3f8382bba632fa867c0ebf04ad7c47ddddb2`.
+- Append-only attempt/reference index SHA-256: `203b3ed1321bc5c2d34043772b637a7920bd1e2268a702fd00dcbfd71b39e409`.
+
+**Result**
+
+- Pushed commit `705c60744015ae054cf116f64e8bd7a1c4fd844b`
+  passed ownership 1.0, protected runtime/profile audit, runtime FLA freedom,
+  bitwise production correctness and repeat, and all four sanitizers. Peak
+  allocation is unchanged.
+- Level 1 advanced: T=4096 forward improved 2.47% and forward+backward improved
+  `20.421 -> 19.666 ms` (3.70%). Every important regression guard passed.
+- The single baseline-first Level-2 pair measured baseline
+  `[28373,28494,28376,28157,28299]`, median `28373 tok/s`, and candidate
+  `[28784,28788,28772,28481,28839]`, median `28784 tok/s`: +1.45%, identical
+  `5508.533 MiB`, and 65.90% of the fixed 43,680 tok/s reference.
+- Profiling confirms the targeted forward WMMA kernel fell from `2.725 ms` in
+  attempt 65 to `2.167 ms` per iteration, a 20.46% reduction. Backward pair
+  pack plus accumulation now totals `1.654 ms` per iteration.
+- Attempt 68 is the accepted development baseline. It is not statistically
+  confirmed, official retention, a merge/default change, or LM-quality
+  evidence.
+
+**Next**
+
+- Continue from exact attempt 68. The next large owned paths are the remaining
+  forward WMMA scan, backward pair pack/accumulate, and generic FP32 BMM groups.
+  Prefer an algebraic or fusion change over further thread-count tuning.
