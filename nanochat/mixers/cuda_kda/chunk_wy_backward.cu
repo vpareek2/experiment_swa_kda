@@ -409,6 +409,7 @@ __global__ void nanochat_kda_chunk_backward_kernel(
   const int local_n = blockIdx.x / kChunk;
   const int row = blockIdx.x - local_n * kChunk;
   const int d = threadIdx.x;
+  __shared__ float dbeta_terms[kChunk * kDim];
   if (local_n >= kRecurrences * group_chunks || d >= kDim) {
     return;
   }
@@ -497,30 +498,42 @@ __global__ void nanochat_kda_chunk_backward_kernel(
     const int64_t input = input_vector_index(b, token, h, d);
     dv[input] = __float2bfloat16_rn(beta_row * dP[local]);
 
+  float beta_gradient = 0.0f;
+  dbeta_terms[d] = dP[local] * __bfloat162float(v[input]);
+  __syncthreads();
   if (d == 0) {
-    const float beta_row = beta[static_cast<int64_t>(n) * kChunk + row];
-    float gradient = 0.0f;
     for (int value = 0; value < kDim; ++value) {
-      const int token = token_start + row;
-      gradient += dP[(static_cast<int64_t>(local_n) * kChunk + row) * kDim + value] *
-          __bfloat162float(v[input_vector_index(b, token, h, value)]);
+      beta_gradient += dbeta_terms[value];
     }
+  }
+  __syncthreads();
+
+  dbeta_terms[d] = dQ[local] * expf(prefix_g[offset]) * khat[offset];
+  __syncthreads();
+  if (d == 0) {
     for (int key = 0; key < kDim; ++key) {
-      const int64_t offset = chunk_vector_index(n, row, key);
-      gradient += dQ[(static_cast<int64_t>(local_n) * kChunk + row) * kDim + key] *
-          expf(prefix_g[offset]) * khat[offset];
+      beta_gradient += dbeta_terms[key];
     }
+  }
+  __syncthreads();
+
+  for (int source = 0; source < row; ++source) {
+    const int64_t source_offset = chunk_vector_index(n, source, d);
+    dbeta_terms[source * kDim + d] =
+        khat[offset] * khat[source_offset] *
+        expf(prefix_g[offset] - prefix_g[source_offset]);
+  }
+  __syncthreads();
+  if (d == 0) {
     for (int source = 0; source < row; ++source) {
       float dot = 0.0f;
       for (int key = 0; key < kDim; ++key) {
-        const int64_t row_offset = chunk_vector_index(n, row, key);
-        const int64_t source_offset = chunk_vector_index(n, source, key);
-        dot += khat[row_offset] * khat[source_offset] *
-            expf(prefix_g[row_offset] - prefix_g[source_offset]);
+        dot += dbeta_terms[source * kDim + key];
       }
-      gradient += dM[chunk_matrix_index(local_n, row, source)] * dot;
+      beta_gradient +=
+          dM[chunk_matrix_index(local_n, row, source)] * dot;
     }
-    dbeta[static_cast<int64_t>(local_n) * kChunk + row] = gradient;
+    dbeta[static_cast<int64_t>(local_n) * kChunk + row] = beta_gradient;
   }
 }
 
