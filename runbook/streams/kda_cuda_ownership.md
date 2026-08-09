@@ -3811,3 +3811,56 @@ uv run --no-sync python scripts/kda_cuda_development.py \
 - Retain the fused row-per-block pair kernel. Reassess whole-operator launch
   and BMM structure from the accepted attempt-46 profile before another major
   strategy boundary; do not continue pair scheduling/cache variants.
+
+## 2026-08-09 [agent] reject stacked shared-right forward scan
+
+**Context**
+
+- Attempt 50 stacks the two chunk-scan products that share recurrent state and
+  the two products that share `z`. It reduces the forward scan from four to two
+  BMM dispatches per chunk while aliasing scratch storage so peak allocation is
+  unchanged. This is a forward launch-structure test on accepted attempt 46.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_050 \
+  --lane optimization <isolated artifact/cache arguments>
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_046 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_050 \
+  runs/kda-cuda-development/attempt-00050-stacked-scan-level1
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_050 \
+  push -u origin kda-cuda/wy-scan-stacked-bmm-050
+```
+
+**Artifacts**
+
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00050-protected-checker`, manifest `8f12182e4a79f98c36026cf6ca90d97be2e060bf8cc1f093f2f701f02ed55afe`.
+- Production comparison/repeat: `runs/kda-cuda-development/diagnostics/attempt-00050-stacked-scan-gradient`, manifest `8cfe4d7009c3b4d772901f3818614465376d61e8c95a9f0c2a72736a07e5deae`.
+- Preserved invalid invocation 1: `runs/kda-cuda-development/diagnostics/attempt-00050-gradient-invalid-invocation-001`, manifest `756fed2271267954e8610574baa2ea53914543fc4d308e71ef836e94e2ccc0f0`.
+- Preserved invalid invocation 2: `runs/kda-cuda-development/diagnostics/attempt-00050-gradient-invalid-invocation-002`, manifest `61a0b22a8891f8ed4de9e7d22b484b1361663f591af6d1bc70a9e60dfe58cd51`.
+- Level 1: `runs/kda-cuda-development/attempt-00050-stacked-scan-level1`, manifest `6650200f66233ee6c1c73d9293bdd019798a3c0a8f05340e43ef01dcba7f7b4a`.
+- Append-only attempt/reference index SHA-256: `1289e0d5ad20c7b0ffc76873eeff0955b86cc3ed450e6a4f8b88e073c82301ae`.
+
+**Result**
+
+- Pushed commit `b05de084634f49b481c9e92df6508e4a2da87392`
+  passed ownership 1.0, runtime/profile audit, and runtime FLA freedom. Output
+  and all seven gradients were bitwise equal to attempt 46 and to the
+  deterministic repeat.
+- Level 1 rejected the intervention: T=4096 forward+backward improved
+  `24.209 -> 23.630 ms` (2.39%), below the frozen 3% gate, with memory ratio
+  1.0. T=4096 forward alone improved only 0.17%. No sanitizers, Level 2, or
+  retest ran.
+- Two setup failures were invalid invocations before model execution and are
+  preserved separately. Attempt 46 remains the accepted baseline. This result
+  is neither confirmation nor quality evidence.
+
+**Next**
+
+- Stop forward BMM dispatch stacking. Return to the requested C64 backward
+  transition: replace full token history with chunk-boundary recomputation and
+  reverse scan, then implement the complete WY/UT VJP without replaying the
+  pathological naive parent.
