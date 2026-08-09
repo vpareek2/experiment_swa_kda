@@ -6696,3 +6696,63 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_095 \
   output tiles. This targets the measured 0.755-ms serialization while keeping
   the 80-GEMM elimination. Pair accumulation and the forward scan remain the
   next independent structural boundaries.
+
+## 2026-08-09 [Codex] Attempt 96 row-tiled post-reverse VJP rejected at Level 1
+
+**Context**
+
+- Attempt 96 starts independently from accepted attempt 91 and preserves the
+  post-reverse WY/VJP algebra tested in attempt 95, but changes ownership from
+  one 48-KiB CTA per chunk to one CTA per 16-row output tile with roughly
+  4.5 KiB shared memory. The goal was to exchange operand rereads for much
+  greater CTA concurrency while retaining deterministic single-writer tiles.
+- The candidate uses four ordered kernel stages per backward group for
+  `dR/dA/dE/dW`, `dT/dP/dQ`, and the two inverse-VJP products. The accepted
+  persistent reverse scan and its pre-scan products are unchanged.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --config configs/research/kda_cuda_ownership.toml \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_096 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact seed-4101 B=2/H=3/T=4096 production gradient comparison and a
+# fresh-extension-cache deterministic repeat against attempt 91.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_091 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_096 \
+  runs/kda-cuda-development/attempt-00096-rowtile-postreverse-level1 \
+  --level2-order candidate-first
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_096 \
+  push -u origin kda-cuda/wy-rowtile-postreverse-vjp-096
+```
+
+**Artifacts**
+
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00096-rowtile-postreverse-protected-checker`, summary SHA-256 `89831539dab8c0d81be9ddbdb1374bc2157227c7b8a3c222cbbb0fd5f4d5d829`.
+- Production comparison/repeat: `runs/kda-cuda-development/diagnostics/attempt-00096-rowtile-postreverse-gradient`, manifest `3d1d21693ca524764c7f5096f8e99ba4a62aa8394ea4dfb48348bbb402fa512a`.
+- Invalid pre-import capture with an empty worktree-local environment: `runs/kda-cuda-development/diagnostics/attempt-00096-rowtile-postreverse-gradient-invalid-env-001`.
+- Level 1: `runs/kda-cuda-development/attempt-00096-rowtile-postreverse-level1`, manifest `0e1856323f6ae04964775d41f32662c3f27862aafba72f538fd7a7be3e9fd938`.
+
+**Result**
+
+- Pushed commit `94a3a1d11baf93809fe775a4498a4c9f3becff64` passes ownership 1.0,
+  the protected runtime/profile audit, and runtime FLA freedom. Production
+  output is bitwise equal to attempt 91, maximum gradient delta is
+  `5.821e-11`, all tensors are finite, and the fresh-cache repeat is bitwise
+  exact.
+- Level 1 rejects the candidate. T=4096 forward+backward regressed
+  `13.3414 -> 13.6588 ms` (2.38%) with identical 202,770,944-byte peak
+  allocation. Level 2 and sanitizers were not run.
+- Fine-grained CTA concurrency does not repay the added operand rereads and
+  launch sequence. This is a correctness-valid performance rejection, not a
+  statistical confirmation or LM-quality result.
+
+**Next**
+
+- Retain attempt 91. Preserve the proven post-reverse algebra, but pursue
+  intermediate ownership (one CTA owns multiple row tiles) or integrate the
+  post-reverse products into the persistent reverse kernel so operands remain
+  resident and launch count falls. FlashKDA remains an offline dataflow and
+  equation reference only.
