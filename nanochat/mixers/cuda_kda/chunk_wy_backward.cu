@@ -403,7 +403,7 @@ __global__ void nanochat_kda_wy_backward_add_c64_kernel(
   }
 }
 
-// One persistent CTA owns 32 adjacent value columns for one recurrence while
+// One persistent CTA owns 16 adjacent value columns for one recurrence while
 // reconstructing an eight-chunk group boundary. FP32 state and accumulators
 // remain CTA-local; only WMMA operands are explicitly rounded to BF16.
 __global__ void nanochat_kda_wy_backward_group_boundary_wmma_c64_kernel(
@@ -417,7 +417,7 @@ __global__ void nanochat_kda_wy_backward_group_boundary_wmma_c64_kernel(
     int chunk_start,
     int group_chunks) {
   namespace wmma = nvcuda::wmma;
-  constexpr int kValueTile = 32;
+  constexpr int kValueTile = 16;
   constexpr int kMatrix = 16;
   constexpr int kWarps = 8;
   constexpr int kTileElements = kMatrix * kMatrix;
@@ -474,13 +474,11 @@ __global__ void nanochat_kda_wy_backward_group_boundary_wmma_c64_kernel(
     }
     __syncthreads();
 
-    // Z = U - W H. All eight resident warps own one
-    // (16-row, 16-value) product so both value halves run concurrently.
-    if (warp < kWarps) {
+    // Z = U - W H. Four warps own the four 16-row token tiles.
+    if (warp < kChunk / kMatrix) {
       Accumulator accumulator;
       wmma::fill_fragment(accumulator, 0.0f);
-      const int row_start = (warp / 2) * kMatrix;
-      const int value_half = warp % 2;
+      const int row_start = warp * kMatrix;
       for (int key_start = 0; key_start < kDim; key_start += kMatrix) {
         for (int element = lane; element < kTileElements;
              element += warpSize) {
@@ -503,7 +501,7 @@ __global__ void nanochat_kda_wy_backward_group_boundary_wmma_c64_kernel(
           operand_b[warp * kTileElements + element] =
               __float2bfloat16_rn(local_state[
                   (key_start + row) * kValueTile +
-                  value_half * kMatrix + column]);
+                  column]);
         }
         __syncwarp();
         MatrixB b_fragment;
@@ -513,7 +511,7 @@ __global__ void nanochat_kda_wy_backward_group_boundary_wmma_c64_kernel(
             accumulator, a_fragment, b_fragment, accumulator);
       }
       wmma::store_matrix_sync(
-          z + row_start * kValueTile + value_half * kMatrix,
+          z + row_start * kValueTile,
           accumulator, kValueTile, wmma::mem_row_major);
     }
     __syncthreads();
@@ -531,11 +529,11 @@ __global__ void nanochat_kda_wy_backward_group_boundary_wmma_c64_kernel(
     }
     __syncthreads();
 
-    // next_state = E^T Z. Eight warps own the eight 16-row key tiles.
+    // next_state = E^T Z. Eight warps own the eight 16-row key tiles;
+    // the 16-value CTA tile removes value-half serialization.
     if (warp < kDim / kMatrix) {
-      Accumulator accumulators[2];
-      wmma::fill_fragment(accumulators[0], 0.0f);
-      wmma::fill_fragment(accumulators[1], 0.0f);
+      Accumulator accumulator;
+      wmma::fill_fragment(accumulator, 0.0f);
       const int key_start = warp * kMatrix;
       for (int source_start = 0; source_start < kChunk;
            source_start += kMatrix) {
@@ -553,31 +551,24 @@ __global__ void nanochat_kda_wy_backward_group_boundary_wmma_c64_kernel(
         MatrixA a_fragment;
         wmma::load_matrix_sync(
             a_fragment, operand_a + warp * kTileElements, kMatrix);
-        for (int value_half = 0; value_half < 2; ++value_half) {
-          for (int element = lane; element < kTileElements;
-               element += warpSize) {
-            const int row = element / kMatrix;
-            const int column = element - row * kMatrix;
-            operand_b[warp * kTileElements + element] =
-                __float2bfloat16_rn(z[
-                    (source_start + row) * kValueTile +
-                    value_half * kMatrix + column]);
-          }
-          __syncwarp();
-          MatrixB b_fragment;
-          wmma::load_matrix_sync(
-              b_fragment, operand_b + warp * kTileElements, kMatrix);
-          wmma::mma_sync(
-              accumulators[value_half], a_fragment, b_fragment,
-              accumulators[value_half]);
+        for (int element = lane; element < kTileElements;
+             element += warpSize) {
+          const int row = element / kMatrix;
+          const int column = element - row * kMatrix;
+          operand_b[warp * kTileElements + element] =
+              __float2bfloat16_rn(z[
+                  (source_start + row) * kValueTile + column]);
         }
+        __syncwarp();
+        MatrixB b_fragment;
+        wmma::load_matrix_sync(
+            b_fragment, operand_b + warp * kTileElements, kMatrix);
+        wmma::mma_sync(
+            accumulator, a_fragment, b_fragment, accumulator);
       }
       wmma::store_matrix_sync(
           next_state + key_start * kValueTile,
-          accumulators[0], kValueTile, wmma::mem_row_major);
-      wmma::store_matrix_sync(
-          next_state + key_start * kValueTile + kMatrix,
-          accumulators[1], kValueTile, wmma::mem_row_major);
+          accumulator, kValueTile, wmma::mem_row_major);
     }
     __syncthreads();
     for (int index = threadIdx.x; index < kDim * kValueTile;
@@ -1274,7 +1265,7 @@ nanochat_kda_chunk_wy_backward_c64(
         E_group.data_ptr<float>(), chunk_start, kGroupChunks);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     nanochat_kda_wy_backward_group_boundary_wmma_c64_kernel<<<
-        kRecurrences * (kDim / 32), 256, 0, stream>>>(
+        kRecurrences * (kDim / 16), 256, 0, stream>>>(
         prefix_g.data_ptr<float>(), U_group.data_ptr<float>(),
         W_group.data_ptr<float>(), E_group.data_ptr<float>(),
         state.data_ptr<float>(), nullptr, nullptr,
@@ -1330,7 +1321,7 @@ nanochat_kda_chunk_wy_backward_c64(
         {kRecurrences, kGroupChunks, kDim, kDim});
     at::Tensor z_group_flat = at::empty({kGroupRows, kChunk, kDim}, fp32);
     nanochat_kda_wy_backward_group_boundary_wmma_c64_kernel<<<
-        kRecurrences * (kDim / 32), 256, 0, stream>>>(
+        kRecurrences * (kDim / 16), 256, 0, stream>>>(
         prefix_g.data_ptr<float>(), U_group.data_ptr<float>(),
         W_group.data_ptr<float>(), E_group.data_ptr<float>(),
         group_state.data_ptr<float>(), H_group_flat.data_ptr<float>(),
