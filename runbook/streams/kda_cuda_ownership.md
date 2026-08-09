@@ -2050,3 +2050,55 @@ uv run --no-sync python -m pytest -q tests/test_kda_cuda_development.py
 - Do not import or link FLA in a candidate. Pursue the independently implemented
   C=64 FP32 WY/UT path and preserve the current correctness, ownership,
   sanitizer, memory, and confirmation gates.
+
+## 2026-08-09 [agent] attribute the warmed project training step
+
+**Context**
+
+- Before starting the C=64 rewrite, the approved execution plan required a
+  warmed whole-step trace to reconcile the large gap between the isolated KDA
+  operator and the matched full-model result.
+- Profiled exact confirmed development commit `6c847515...` at the frozen
+  six-layer B=2/H=3/T=4096 training shape. This was attribution-only evidence,
+  not a new throughput score or LM-quality evaluation.
+
+**Commands**
+
+```bash
+# Warm an isolated extension cache, then trace all seven exact Level-2 steps.
+nsys profile --trace=cuda,nvtx,osrt --sample=none --cpuctxsw=none   --output runs/kda-cuda-development/profiles/whole-step-attribution-001/whole-step   <exact seven-step project_cuda trainer command>
+nsys stats --report cuda_gpu_kern_sum,cuda_api_sum,osrt_sum <report>
+```
+
+**Artifacts**
+
+- `runs/kda-cuda-development/profiles/whole-step-attribution-001` contains the
+  predeclared plan, exact command/environment, raw trainer log, `.nsys-rep`,
+  exported CSV summaries, structured summary, provenance, and file manifest.
+- Plan SHA-256:
+  `b1cdfd90aec3d13e7ad3d9d043255dc5e387692121e2b8eb62953e3b6d42f978`.
+
+**Result**
+
+- Five post-warmup steps were stable at `4.4509-4.4638 s`; median was
+  `4.46148 s` / `7344 tok/s`, consistent with prior confirmation.
+- GPU kernels account for `4.42486 s/step`, or 99.18% of the warmed median.
+  The trace observed exactly 504 causal-convolution backward launches and 168
+  KDA calls across seven steps: 72 convolution backwards and 24 KDA calls per
+  optimizer step as predicted.
+- Causal-convolution backward alone consumed `1.93032 s/step` (43.62% of all
+  GPU kernel time, `26.81 ms/call`). Project KDA work consumed about
+  `1.859 s/step`; its major components were reverse `1.0267 s`, forward
+  `0.4561 s`, history `0.2829 s`, and preprocess `0.0643 s`.
+- The former unexplained residual is therefore reconciled. The source-level
+  O(T) search around width-four dependencies is the correct first target before
+  WY/UT. Convolution forward was only `5.90 ms/step` and is not a priority.
+
+**Next**
+
+- Evaluate attempt 23, which changes only causal-convolution backward dependency
+  bounds while preserving accumulation order and the generic ABI.
+- Use a convolution-specific microbenchmark plus the exact Level-2 pair; the
+  raw KDA-only Level-1 latency is not applicable to this intervention.
+- Reprofile after the convolution family plateaus, then proceed to the staged
+  project-owned FP32 C=64 WY/UT path toward the overall 45k tok/s aim.
