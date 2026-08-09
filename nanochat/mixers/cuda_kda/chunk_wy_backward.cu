@@ -212,6 +212,83 @@ __global__ void nanochat_kda_wy_backward_transform_pair_c64_kernel(
   right[index] = khat[source] * expf(center - prefix_g[source]);
 }
 
+__global__ void nanochat_kda_wy_backward_build_pair_wmma_c64_kernel(
+    const float* qbar,
+    const float* khat,
+    const float* prefix_g,
+    const float* beta,
+    float* M,
+    float* A,
+    int target_start,
+    int source_start) {
+  namespace wmma = nvcuda::wmma;
+  const int n = blockIdx.x;
+  if (n >= kChunkRows) {
+    return;
+  }
+  constexpr int kTileElements = kMatrixTile * kDim;
+  __shared__ __nv_bfloat16 left[2 * kTileElements];
+  __shared__ __nv_bfloat16 right[kTileElements];
+  __shared__ float product[2 * kMatrixTile * kMatrixTile];
+  for (int index = threadIdx.x; index < kTileElements;
+       index += blockDim.x) {
+    const int local_row = index / kDim;
+    const int d = index - local_row * kDim;
+    const int target_row = target_start + local_row;
+    const int source_row = source_start + local_row;
+    const int center_row = target_start == source_start
+        ? target_start : target_start - 1;
+    const int64_t target = chunk_vector_index(n, target_row, d);
+    const int64_t source = chunk_vector_index(n, source_row, d);
+    const float center = prefix_g[chunk_vector_index(n, center_row, d)];
+    const float target_factor = expf(prefix_g[target] - center);
+    left[index] = __float2bfloat16_rn(qbar[target] * target_factor);
+    left[kTileElements + index] =
+        __float2bfloat16_rn(khat[target] * target_factor);
+    right[index] =
+        __float2bfloat16_rn(khat[source] * expf(center - prefix_g[source]));
+  }
+  __syncthreads();
+  using MatrixA = wmma::fragment<
+      wmma::matrix_a, kMatrixTile, kMatrixTile, kMatrixTile,
+      __nv_bfloat16, wmma::row_major>;
+  using MatrixB = wmma::fragment<
+      wmma::matrix_b, kMatrixTile, kMatrixTile, kMatrixTile,
+      __nv_bfloat16, wmma::col_major>;
+  using Accumulator = wmma::fragment<
+      wmma::accumulator, kMatrixTile, kMatrixTile, kMatrixTile, float>;
+  const int warp = threadIdx.x / warpSize;
+  if (warp < 2) {
+    Accumulator accumulator;
+    wmma::fill_fragment(accumulator, 0.0f);
+    for (int key_start = 0; key_start < kDim; key_start += kMatrixTile) {
+      MatrixA a;
+      MatrixB b;
+      wmma::load_matrix_sync(
+          a, left + warp * kTileElements + key_start, kDim);
+      wmma::load_matrix_sync(b, right + key_start, kDim);
+      wmma::mma_sync(accumulator, a, b, accumulator);
+    }
+    wmma::store_matrix_sync(
+        product + warp * kMatrixTile * kMatrixTile, accumulator,
+        kMatrixTile, wmma::mem_row_major);
+  }
+  __syncthreads();
+  const int index = threadIdx.x;
+  if (index < kMatrixTile * kMatrixTile) {
+    const int local_row = index / kMatrixTile;
+    const int local_source = index - local_row * kMatrixTile;
+    const int row = target_start + local_row;
+    const int source = source_start + local_source;
+    const int64_t destination = chunk_matrix_index(n, row, source);
+    A[destination] = source <= row ? product[index] : 0.0f;
+    M[destination] = source < row
+        ? beta[static_cast<int64_t>(n) * kChunk + row] *
+            product[kMatrixTile * kMatrixTile + index]
+        : 0.0f;
+  }
+}
+
 __global__ void nanochat_kda_wy_backward_transform_left_k_c64_kernel(
     const float* khat,
     const float* prefix_g,
@@ -1343,49 +1420,19 @@ nanochat_kda_chunk_wy_backward_c64(
       prefix_g.data_ptr<float>(), beta.data_ptr<float>(),
       P.data_ptr<float>(), Q.data_ptr<float>(), lower_bound, scale);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
-  constexpr int kTileElements = kChunkRows * kMatrixTile * kDim;
-  at::Tensor P_flat = P.view({-1});
-  at::Tensor tile_q_left = P_flat.narrow(0, 0, kTileElements).view(
-      {kChunkRows, kMatrixTile, kDim});
-  at::Tensor tile_k_left = P_flat.narrow(
-      0, kTileElements, kTileElements).view(
-      {kChunkRows, kMatrixTile, kDim});
-  at::Tensor tile_right = P_flat.narrow(
-      0, 2 * kTileElements, kTileElements).view(
-      {kChunkRows, kMatrixTile, kDim});
   for (int target_start = 0; target_start < kChunk;
        target_start += kMatrixTile) {
     for (int source_start = 0; source_start <= target_start;
          source_start += kMatrixTile) {
-      nanochat_kda_wy_backward_transform_pair_c64_kernel<<<
-          (kTileElements + kThreads - 1) / kThreads,
-          kThreads, 0, stream>>>(
+      nanochat_kda_wy_backward_build_pair_wmma_c64_kernel<<<
+          kChunkRows, kThreads, 0, stream>>>(
           qbar.data_ptr<float>(), khat.data_ptr<float>(),
-          prefix_g.data_ptr<float>(), tile_q_left.data_ptr<float>(),
-          tile_k_left.data_ptr<float>(),
-          tile_right.data_ptr<float>(), target_start, source_start);
+          prefix_g.data_ptr<float>(), beta.data_ptr<float>(),
+          M.data_ptr<float>(), A.data_ptr<float>(), target_start,
+          source_start);
       C10_CUDA_KERNEL_LAUNCH_CHECK();
-      at::Tensor A_tile = A.narrow(1, target_start, kMatrixTile)
-          .narrow(2, source_start, kMatrixTile);
-      at::bmm_out(A_tile, tile_q_left, tile_right.transpose(1, 2));
-      at::Tensor M_tile = M.narrow(1, target_start, kMatrixTile)
-          .narrow(2, source_start, kMatrixTile);
-      at::bmm_out(M_tile, tile_k_left, tile_right.transpose(1, 2));
     }
   }
-  constexpr int kAllMatrixElements = kChunkRows * kChunk * kChunk;
-  nanochat_kda_wy_backward_finish_m_a_c64_kernel<<<
-      (kAllMatrixElements + kThreads - 1) / kThreads,
-      kThreads, 0, stream>>>(
-      beta.data_ptr<float>(), M.data_ptr<float>(), A.data_ptr<float>());
-  C10_CUDA_KERNEL_LAUNCH_CHECK();
-  constexpr int kAllVectorElements = kChunkRows * kChunk * kDim;
-  nanochat_kda_wy_backward_rebuild_p_c64_kernel<<<
-      (kAllVectorElements + kThreads - 1) / kThreads,
-      kThreads, 0, stream>>>(
-      reinterpret_cast<const __nv_bfloat16*>(v.data_ptr<at::BFloat16>()),
-      beta.data_ptr<float>(), P.data_ptr<float>());
-  C10_CUDA_KERNEL_LAUNCH_CHECK();
   nanochat_kda_wy_backward_solve_c64_kernel<<<
       kChunkRows, kChunk, 0, stream>>>(M.data_ptr<float>(), T.data_ptr<float>());
   C10_CUDA_KERNEL_LAUNCH_CHECK();
