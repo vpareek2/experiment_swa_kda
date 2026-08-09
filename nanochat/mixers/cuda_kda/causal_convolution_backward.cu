@@ -94,14 +94,16 @@ __global__ void nanochat_kda_causal_convolution_backward_kernel(
     const int64_t input_index = (index / channels) % length;
     const int64_t b = index / (length * channels);
     float gradient = 0.0f;
-    for (int64_t token_index = 0; token_index < length; ++token_index) {
+    const int64_t remaining_tokens = length - input_index;
+    const int64_t last_token =
+        width < remaining_tokens ? input_index + width : length;
+    for (int64_t token_index = input_index; token_index < last_token;
+         ++token_index) {
       const int64_t tap = input_index - token_index + width - 1;
-      if (tap >= 0 && tap < width) {
-        gradient += preactivation_gradient(
-            x, weight, initial_state, grad_output, b, token_index, c,
-            length, channels, width) *
-            __bfloat162float(weight[c * width + tap]);
-      }
+      gradient += preactivation_gradient(
+          x, weight, initial_state, grad_output, b, token_index, c,
+          length, channels, width) *
+          __bfloat162float(weight[c * width + tap]);
     }
     if (grad_final_state != nullptr) {
       const int64_t final_index = input_index - length + width;
@@ -139,14 +141,13 @@ __global__ void nanochat_kda_causal_convolution_backward_kernel(
     const int64_t c = (state_offset / width) % channels;
     const int64_t b = state_offset / (channels * width);
     float gradient = 0.0f;
-    for (int64_t token_index = 0; token_index < length; ++token_index) {
+    const int64_t last_token = state_index < length ? state_index : length;
+    for (int64_t token_index = 0; token_index < last_token; ++token_index) {
       const int64_t tap = state_index - token_index - 1;
-      if (tap >= 0 && tap < width) {
-        gradient += preactivation_gradient(
-            x, weight, initial_state, grad_output, b, token_index, c,
-            length, channels, width) *
-            __bfloat162float(weight[c * width + tap]);
-      }
+      gradient += preactivation_gradient(
+          x, weight, initial_state, grad_output, b, token_index, c,
+          length, channels, width) *
+          __bfloat162float(weight[c * width + tap]);
     }
     if (grad_final_state != nullptr) {
       const int64_t final_index = state_index - length;
