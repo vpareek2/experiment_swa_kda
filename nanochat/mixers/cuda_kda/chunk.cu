@@ -284,6 +284,124 @@ __global__ void nanochat_kda_chunk_forward_kernel_shared_cache(
   }
 }
 
+__global__ void nanochat_kda_chunk_forward_row_128_kernel(
+    const __nv_bfloat16* q,
+    const __nv_bfloat16* k,
+    const __nv_bfloat16* v,
+    const __nv_bfloat16* raw_gate,
+    const __nv_bfloat16* beta_logits,
+    const float* A_log,
+    const float* dt_bias,
+    const float* initial_state,
+    __nv_bfloat16* output,
+    float* state,
+    int64_t batch,
+    int64_t length,
+    int64_t heads,
+    float lower_bound,
+    float scale) {
+  constexpr int64_t key_dim = 128;
+  constexpr int64_t value_dim = 128;
+  const int64_t block = blockIdx.x;
+  if (block >= batch * heads * value_dim) {
+    return;
+  }
+  const int64_t value = block % value_dim;
+  const int64_t recurrence = block / value_dim;
+  const int64_t h = recurrence % heads;
+  const int64_t b = recurrence / heads;
+  const int64_t key = threadIdx.x;
+  __shared__ float q_square_contribution[128];
+  __shared__ float k_square_contribution[128];
+  __shared__ float reduction[128];
+  __shared__ float q_inverse_norm_shared;
+  __shared__ float k_inverse_norm_shared;
+  __shared__ float beta_shared;
+  __shared__ float residual_shared;
+
+  const int64_t state_offset = state_index(
+      b, h, value, key, heads, value_dim, key_dim);
+  float current_state = initial_state == nullptr
+      ? 0.0f
+      : initial_state[state_offset];
+  const float a = expf(A_log[h]);
+
+  for (int64_t token = 0; token < length; ++token) {
+    const int64_t q_base = q_index(
+        b, token, h, 0, length, heads, key_dim);
+    // One lane owns one key, so all three activation loads are coalesced.
+    const float query_value = __bfloat162float(q[q_base + key]);
+    const float key_value = __bfloat162float(k[q_base + key]);
+    const float gate_input = __bfloat162float(raw_gate[q_base + key]);
+    q_square_contribution[key] = query_value * query_value;
+    k_square_contribution[key] = key_value * key_value;
+    __syncthreads();
+
+    if (key == 0) {
+      float q_square_sum = 0.0f;
+      float k_square_sum = 0.0f;
+      // Preserve the parent's ascending-key FP32 norm reductions exactly.
+      for (int64_t reduction_key = 0;
+           reduction_key < key_dim;
+           ++reduction_key) {
+        q_square_sum += q_square_contribution[reduction_key];
+        k_square_sum += k_square_contribution[reduction_key];
+      }
+      q_inverse_norm_shared = rsqrtf(fmaxf(q_square_sum, 1.0e-24f));
+      k_inverse_norm_shared = rsqrtf(fmaxf(k_square_sum, 1.0e-24f));
+      const int64_t beta_offset = (b * length + token) * heads + h;
+      beta_shared = chunk_sigmoid(__bfloat162float(beta_logits[beta_offset]));
+    }
+    __syncthreads();
+
+    // Parenthesization deliberately matches the production forward recurrence:
+    // normalized_k * (state * decay), not (normalized_k * state) * decay.
+    const float normalized_query =
+        (query_value * q_inverse_norm_shared) * scale;
+    const float normalized_key = key_value * k_inverse_norm_shared;
+    const float decay = lower_bound * chunk_sigmoid(
+        a * (gate_input + dt_bias[h * key_dim + key]));
+    const float decayed_state = current_state * expf(decay);
+    reduction[key] = normalized_key * decayed_state;
+    __syncthreads();
+
+    if (key == 0) {
+      float prediction = 0.0f;
+      for (int64_t reduction_key = 0;
+           reduction_key < key_dim;
+           ++reduction_key) {
+        prediction += reduction[reduction_key];
+      }
+      const int64_t value_offset = v_index(
+          b, token, h, value, length, heads, value_dim);
+      residual_shared = __bfloat162float(v[value_offset]) - prediction;
+    }
+    __syncthreads();
+
+    current_state = decayed_state +
+        (beta_shared * normalized_key) * residual_shared;
+    reduction[key] = normalized_query * current_state;
+    __syncthreads();
+
+    if (key == 0) {
+      float output_value = 0.0f;
+      for (int64_t reduction_key = 0;
+           reduction_key < key_dim;
+           ++reduction_key) {
+        output_value += reduction[reduction_key];
+      }
+      const int64_t value_offset = v_index(
+          b, token, h, value, length, heads, value_dim);
+      output[value_offset] = __float2bfloat16_rn(output_value);
+    }
+    // No lane may reuse a shared contribution slot for the next token early.
+    __syncthreads();
+  }
+
+  // The output state is written only after the complete token recurrence.
+  state[state_offset] = current_state;
+}
+
 __global__ void nanochat_kda_chunk_history_128_kernel(
     const __nv_bfloat16* v,
     const __nv_bfloat16* beta_logits,
@@ -1013,10 +1131,8 @@ std::tuple<at::Tensor, c10::optional<at::Tensor>> chunk_forward_cuda(
     const int threads = 128;
     const cudaStream_t stream = at::cuda::getCurrentCUDAStream(q.get_device());
     if (key_dim == 128 && value_dim == 128) {
-      const int64_t recurrence_count = batch * heads;
-      const size_t shared_bytes = static_cast<size_t>(3 * key_dim) * sizeof(float);
-      nanochat_kda_chunk_forward_kernel_shared_cache<<<
-          static_cast<int>(recurrence_count), threads, shared_bytes, stream>>>(
+      nanochat_kda_chunk_forward_row_128_kernel<<<
+          static_cast<int>(count), threads, 0, stream>>>(
           reinterpret_cast<const __nv_bfloat16*>(contiguous_q.data_ptr<at::BFloat16>()),
           reinterpret_cast<const __nv_bfloat16*>(contiguous_k.data_ptr<at::BFloat16>()),
           reinterpret_cast<const __nv_bfloat16*>(contiguous_v.data_ptr<at::BFloat16>()),
@@ -1027,7 +1143,7 @@ std::tuple<at::Tensor, c10::optional<at::Tensor>> chunk_forward_cuda(
           initial_pointer,
           reinterpret_cast<__nv_bfloat16*>(output.data_ptr<at::BFloat16>()),
           state.data_ptr<float>(),
-          batch, length, heads, key_dim, value_dim,
+          batch, length, heads,
           static_cast<float>(lower_bound), static_cast<float>(scale));
       C10_CUDA_KERNEL_LAUNCH_CHECK();
     } else {
