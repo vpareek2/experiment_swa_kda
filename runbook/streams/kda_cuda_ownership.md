@@ -4268,3 +4268,47 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_057 \
 - Preserve attempt 57 unchanged. In a separate child, write T in-place over M
   after the lower solve, eliminating the separate T allocation and the dead-M
   lifetime penalty while retaining stacked FP32 construction.
+
+## 2026-08-09 [agent] invalidate unsynchronized in-place T solve
+
+**Context**
+
+- Attempt 58 aliases T over M in attempt 57's forward and backward lower
+  solves, intending to remove the separate T allocation. The first production
+  comparison exposed that the existing end-of-row barrier is insufficient for
+  aliasing: short column sums can write T into an M row while longer column
+  sums are still reading that row.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_058 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact seeded B=2/H=3/T=4096 saved-gradient comparison plus repeat only.
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_058 \
+  push -u origin kda-cuda/wy-stacked-am-inplace-t-058
+```
+
+**Artifacts**
+
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00058-protected-checker`, manifest `7d1b05ba52d527cd8ad5899acd3655d9dd3bc6cae9b8a81c1fd1f987ae829d02`.
+- Production comparison/repeat: `runs/kda-cuda-development/diagnostics/attempt-00058-inplace-t-gradient`, manifest `8c0764657e6aea8da620a80ddcffd0ffd0c488c5e95dff9c4127e973a2d8905c`.
+- Append-only attempt/reference index SHA-256: `9649c6b38ee7fca651c40c8b846f5a85946e5eae760f56fafa880659a3e5d782`.
+
+**Result**
+
+- Pushed commit `1c12e671d82b44035a5760d44d85f622ea130851`
+  passed the bounded protected checker and was deterministic, but it is not a
+  race-free production candidate. Maximum output delta was `1.221e-4` and the
+  largest gradient delta was `7.276e-12`; tolerance does not excuse the
+  unsynchronized read/write dependency.
+- No Level 1, sanitizer-valid claim, Level 2, profile, or retest exists. The
+  exact branch and tensors are preserved as an invalid dependency experiment.
+  Attempt 53 remains accepted.
+
+**Next**
+
+- Add a block barrier after every row's triangular reads and before its T
+  writes in a separate child. Require bitwise production restoration and the
+  normal ownership, sanitizer, determinism, and performance gates.
