@@ -4114,3 +4114,53 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_054 \
 
 - Stop pair exponential intrinsic substitution. Select a distinct structural
   backward axis from exact attempt 53; do not resume pair-batch-width tuning.
+
+## 2026-08-09 [agent] reject fused row-owned beta dot
+
+**Context**
+
+- Attempt 55 removes the third pair BMM used only for the unscaled M dot in
+  `dbeta`. The existing row-owned accumulation block instead assigns four
+  source rows to four warps, reduces the 128-channel stable packed dot in a
+  fixed order, and combines it without atomics or persistent M history.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_055 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact seeded B=2/H=3/T=4096 saved-gradient comparison plus repeat.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_053 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_055 \
+  runs/kda-cuda-development/attempt-00055-beta-dot-fused-level1
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_055 \
+  push -u origin kda-cuda/wy-beta-dot-fused-055
+```
+
+**Artifacts**
+
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00055-protected-checker`, manifest `3f79c96193355e9a61f0649d389d5b864ee5a4d8e7b8f04fc3a30ca943726cdd`.
+- Production comparison/repeat: `runs/kda-cuda-development/diagnostics/attempt-00055-beta-dot-fused-gradient`, manifest `5eb4c91a943e71ed7b8bbf571e1a060019b41eae8779062c98d23f09dbcaacbb`.
+- Level 1: `runs/kda-cuda-development/attempt-00055-beta-dot-fused-level1`, manifest `ed49b05fe7801c5c7682de4f7c39c12cd00a140c7056771d09d38cbd79bf2ddb`.
+- Append-only attempt/reference index SHA-256: `510b5b29d7d4c46c271761ed2f2810224357bb86ed4ddfde9ffeff0a97e316c2`.
+
+**Result**
+
+- Pushed commit `1c9381d663d3bdc26f0c6325aa07c52d291e6092`
+  passed ownership 1.0, runtime/profile audit, and runtime FLA freedom. Output,
+  all seven gradients, and the deterministic repeat are bitwise identical to
+  attempt 53.
+- Level 1 did not advance: T=4096 forward+backward changed
+  `21.580 -> 21.605 ms` (-0.12%) with memory ratio 1.0. The fixed-order fused
+  warp reductions cost at least as much as the removed small BMM. No sanitizer,
+  Level 2, profile, or retest ran.
+- Attempt 53 remains the accepted development baseline. This result is neither
+  confirmation nor quality evidence.
+
+**Next**
+
+- Keep the efficient third pair BMM. Choose a different structural backward
+  path from exact attempt 53; do not continue pair-batch, exponential, or beta
+  reduction variants.
