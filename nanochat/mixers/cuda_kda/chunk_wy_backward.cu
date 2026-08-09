@@ -14,6 +14,7 @@
 
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
+#include <mma.h>
 
 namespace {
 
@@ -399,6 +400,190 @@ __global__ void nanochat_kda_wy_backward_add_c64_kernel(
   const int index = blockIdx.x * blockDim.x + threadIdx.x;
   if (index < elements) {
     destination[index] += source[index];
+  }
+}
+
+// One persistent CTA owns 32 adjacent value columns for one recurrence while
+// reconstructing an eight-chunk group boundary. FP32 state and accumulators
+// remain CTA-local; only WMMA operands are explicitly rounded to BF16.
+__global__ void nanochat_kda_wy_backward_group_boundary_wmma_c64_kernel(
+    const float* prefix_g,
+    const float* U,
+    const float* W,
+    const float* E,
+    float* state,
+    int chunk_start,
+    int group_chunks) {
+  namespace wmma = nvcuda::wmma;
+  constexpr int kValueTile = 32;
+  constexpr int kMatrix = 16;
+  constexpr int kWarps = 8;
+  constexpr int kTileElements = kMatrix * kMatrix;
+
+  const int owner = blockIdx.x;
+  if (owner >= kRecurrences * (kDim / kValueTile)) {
+    return;
+  }
+  const int value_tile = owner % (kDim / kValueTile);
+  const int recurrence = owner / (kDim / kValueTile);
+  const int value_start = value_tile * kValueTile;
+  const int warp = threadIdx.x / warpSize;
+  const int lane = threadIdx.x % warpSize;
+
+  __shared__ float local_state[kDim * kValueTile];
+  __shared__ float z[kChunk * kValueTile];
+  __shared__ float next_state[kDim * kValueTile];
+  __shared__ __nv_bfloat16 operand_a[kWarps * kTileElements];
+  __shared__ __nv_bfloat16 operand_b[kWarps * kTileElements];
+
+  for (int index = threadIdx.x; index < kDim * kValueTile;
+       index += blockDim.x) {
+    const int key = index / kValueTile;
+    const int value = index - key * kValueTile;
+    local_state[index] = state[
+        (static_cast<int64_t>(recurrence) * kDim + key) * kDim +
+        value_start + value];
+  }
+  __syncthreads();
+
+  using MatrixA = wmma::fragment<
+      wmma::matrix_a, kMatrix, kMatrix, kMatrix,
+      __nv_bfloat16, wmma::row_major>;
+  using MatrixB = wmma::fragment<
+      wmma::matrix_b, kMatrix, kMatrix, kMatrix,
+      __nv_bfloat16, wmma::row_major>;
+  using Accumulator = wmma::fragment<
+      wmma::accumulator, kMatrix, kMatrix, kMatrix, float>;
+
+  for (int local_chunk = 0; local_chunk < group_chunks; ++local_chunk) {
+    const int group_n = recurrence * group_chunks + local_chunk;
+    const int chunk_id = chunk_start + local_chunk;
+    const int n = recurrence * kChunks + chunk_id;
+
+    // Z = U - W H. Four warps own the four 16-row token tiles.
+    if (warp < kChunk / kMatrix) {
+      Accumulator accumulators[2];
+      wmma::fill_fragment(accumulators[0], 0.0f);
+      wmma::fill_fragment(accumulators[1], 0.0f);
+      const int row_start = warp * kMatrix;
+      for (int key_start = 0; key_start < kDim; key_start += kMatrix) {
+        for (int element = lane; element < kTileElements;
+             element += warpSize) {
+          const int row = element / kMatrix;
+          const int column = element - row * kMatrix;
+          const int64_t offset =
+              (static_cast<int64_t>(group_n) * kChunk + row_start + row) *
+              kDim + key_start + column;
+          operand_a[warp * kTileElements + element] =
+              __float2bfloat16_rn(W[offset]);
+        }
+        __syncwarp();
+        MatrixA a_fragment;
+        wmma::load_matrix_sync(
+            a_fragment, operand_a + warp * kTileElements, kMatrix);
+        for (int value_half = 0; value_half < 2; ++value_half) {
+          for (int element = lane; element < kTileElements;
+               element += warpSize) {
+            const int row = element / kMatrix;
+            const int column = element - row * kMatrix;
+            operand_b[warp * kTileElements + element] =
+                __float2bfloat16_rn(local_state[
+                    (key_start + row) * kValueTile +
+                    value_half * kMatrix + column]);
+          }
+          __syncwarp();
+          MatrixB b_fragment;
+          wmma::load_matrix_sync(
+              b_fragment, operand_b + warp * kTileElements, kMatrix);
+          wmma::mma_sync(
+              accumulators[value_half], a_fragment, b_fragment,
+              accumulators[value_half]);
+        }
+      }
+      wmma::store_matrix_sync(
+          z + row_start * kValueTile,
+          accumulators[0], kValueTile, wmma::mem_row_major);
+      wmma::store_matrix_sync(
+          z + row_start * kValueTile + kMatrix,
+          accumulators[1], kValueTile, wmma::mem_row_major);
+    }
+    __syncthreads();
+    for (int index = threadIdx.x; index < kChunk * kValueTile;
+         index += blockDim.x) {
+      const int row = index / kValueTile;
+      const int value = index - row * kValueTile;
+      const int64_t offset =
+          (static_cast<int64_t>(group_n) * kChunk + row) * kDim +
+          value_start + value;
+      z[index] = U[offset] - z[index];
+    }
+    __syncthreads();
+
+    // next_state = E^T Z. Eight warps own the eight 16-row key tiles.
+    if (warp < kDim / kMatrix) {
+      Accumulator accumulators[2];
+      wmma::fill_fragment(accumulators[0], 0.0f);
+      wmma::fill_fragment(accumulators[1], 0.0f);
+      const int key_start = warp * kMatrix;
+      for (int source_start = 0; source_start < kChunk;
+           source_start += kMatrix) {
+        for (int element = lane; element < kTileElements;
+             element += warpSize) {
+          const int row = element / kMatrix;
+          const int column = element - row * kMatrix;
+          const int64_t offset =
+              (static_cast<int64_t>(group_n) * kChunk +
+               source_start + column) * kDim + key_start + row;
+          operand_a[warp * kTileElements + element] =
+              __float2bfloat16_rn(E[offset]);
+        }
+        __syncwarp();
+        MatrixA a_fragment;
+        wmma::load_matrix_sync(
+            a_fragment, operand_a + warp * kTileElements, kMatrix);
+        for (int value_half = 0; value_half < 2; ++value_half) {
+          for (int element = lane; element < kTileElements;
+               element += warpSize) {
+            const int row = element / kMatrix;
+            const int column = element - row * kMatrix;
+            operand_b[warp * kTileElements + element] =
+                __float2bfloat16_rn(z[
+                    (source_start + row) * kValueTile +
+                    value_half * kMatrix + column]);
+          }
+          __syncwarp();
+          MatrixB b_fragment;
+          wmma::load_matrix_sync(
+              b_fragment, operand_b + warp * kTileElements, kMatrix);
+          wmma::mma_sync(
+              accumulators[value_half], a_fragment, b_fragment,
+              accumulators[value_half]);
+        }
+      }
+      wmma::store_matrix_sync(
+          next_state + key_start * kValueTile,
+          accumulators[0], kValueTile, wmma::mem_row_major);
+      wmma::store_matrix_sync(
+          next_state + key_start * kValueTile + kMatrix,
+          accumulators[1], kValueTile, wmma::mem_row_major);
+    }
+    __syncthreads();
+    for (int index = threadIdx.x; index < kDim * kValueTile;
+         index += blockDim.x) {
+      const int key = index / kValueTile;
+      local_state[index] =
+          expf(prefix_g[chunk_vector_index(n, kChunk - 1, key)]) *
+          local_state[index] + next_state[index];
+    }
+    __syncthreads();
+  }
+
+  for (int index = threadIdx.x; index < kDim * kValueTile;
+       index += blockDim.x) {
+    const int key = index / kValueTile;
+    const int value = index - key * kValueTile;
+    state[(static_cast<int64_t>(recurrence) * kDim + key) * kDim +
+          value_start + value] = local_state[index];
   }
 }
 
@@ -1057,8 +1242,6 @@ nanochat_kda_chunk_wy_backward_c64(
   at::Tensor state = at::zeros({kRecurrences, kDim, kDim}, fp32);
   at::Tensor group_boundaries = at::empty(
       {kRecurrences, kGroups, kDim, kDim}, fp32);
-  at::Tensor z = at::empty({kRecurrences, kChunk, kDim}, fp32);
-  at::Tensor state_delta = at::empty_like(state);
 
   for (int group_id = 0; group_id < kGroups; ++group_id) {
     const int chunk_start = group_id * kGroupChunks;
@@ -1078,38 +1261,14 @@ nanochat_kda_chunk_wy_backward_c64(
         prefix_g.data_ptr<float>(), R_group.data_ptr<float>(),
         E_group.data_ptr<float>(), chunk_start, kGroupChunks);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
-    at::Tensor U_chunks = U_group.view(
-        {kRecurrences, kGroupChunks, kChunk, kDim});
-    at::Tensor W_chunks = W_group.view(
-        {kRecurrences, kGroupChunks, kChunk, kDim});
-    at::Tensor E_chunks = E_group.view(
-        {kRecurrences, kGroupChunks, kChunk, kDim});
-    for (int local_chunk = 0; local_chunk < kGroupChunks; ++local_chunk) {
-      const int chunk_id = chunk_start + local_chunk;
-      const at::Tensor W_chunk = W_chunks.select(1, local_chunk);
-      at::bmm_out(z, W_chunk, state);
-      nanochat_kda_wy_backward_sub_group_z_c64_kernel<<<
-          (kVectorElements + kThreads - 1) / kThreads,
-          kThreads, 0, stream>>>(U_group.data_ptr<float>(), z.data_ptr<float>(),
-          z.data_ptr<float>(), local_chunk, kGroupChunks);
-      C10_CUDA_KERNEL_LAUNCH_CHECK();
-      nanochat_kda_wy_backward_decay_state_c64_kernel<<<
-          (kStateElements + kThreads - 1) / kThreads,
-          kThreads, 0, stream>>>(
-          prefix_g.data_ptr<float>(), state.data_ptr<float>(), chunk_id);
-      C10_CUDA_KERNEL_LAUNCH_CHECK();
-      const at::Tensor E_chunk = E_chunks.select(1, local_chunk);
-      at::bmm_out(state_delta, E_chunk.transpose(1, 2), z);
-      nanochat_kda_wy_backward_add_c64_kernel<<<
-          (kStateElements + kThreads - 1) / kThreads,
-          kThreads, 0, stream>>>(state.data_ptr<float>(),
-          state_delta.data_ptr<float>(), kStateElements);
-      C10_CUDA_KERNEL_LAUNCH_CHECK();
-    }
+    nanochat_kda_wy_backward_group_boundary_wmma_c64_kernel<<<
+        kRecurrences * (kDim / 32), 256, 0, stream>>>(
+        prefix_g.data_ptr<float>(), U_group.data_ptr<float>(),
+        W_group.data_ptr<float>(), E_group.data_ptr<float>(),
+        state.data_ptr<float>(), chunk_start, kGroupChunks);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
   }
   state = at::Tensor();
-  state_delta = at::Tensor();
-  z = at::Tensor();
 
   at::Tensor dq = at::empty_like(q);
   at::Tensor dk = at::empty_like(k);
