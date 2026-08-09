@@ -2311,3 +2311,143 @@ uv run --no-sync research cuda-candidate-check   --worktree /home/veer/Master/pr
   `2a0a08e...`. Do not rewrite the validated F0-F3 stages.
 - Keep intermediate targets advisory while continuing toward 45k, but never
   weaken correctness, ownership, sanitizer, or provenance requirements.
+
+## 2026-08-09 [agent] accept FP32 batched-matrix C64 scan as development baseline
+
+**Context**
+
+- Attempt 26 retained attempt 25's validated FP32 C=64 preprocessing, stable
+  pair matrices, solve, and equations, replacing only the slow scalar boundary
+  scan with a batched FP32 matrix scan. The exact convolution baseline
+  `2a0a08e...` remained the matched comparison anchor.
+- This was a Level-1 and single Level-2 development decision only. It did not
+  run quality evaluation, nine-pair statistical confirmation, private seeds,
+  or an official retention action.
+
+**Commands**
+
+```bash
+.venv/bin/python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_024 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_026 \
+  runs/kda-cuda-development/attempts/attempt-00026-level1
+# Executed the predeclared candidate-first Level-2 pair, finalized its
+# summary/manifest and baseline record, then pushed the exact clean branch.
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_026 \
+  push origin HEAD:kda-cuda/wy-fp32-bmm-scan-026
+```
+
+**Artifacts**
+
+- Level 1 and runtime/profile evidence:
+  `runs/kda-cuda-development/attempts/attempt-00026-level1`, manifest SHA-256
+  `ec4daf9418fbc2d452aa80f6052b077db68eae96bed9f4db7bb200947ffd2a7e`.
+- Level-2 candidate-first pair:
+  `runs/kda-cuda-development/attempts/attempt-00026-level1/level2-execution`,
+  final manifest SHA-256
+  `cba8ef86d9dfeecae77d96ba8e7ff8e50bba11edbe16892bf3c3001ccfbc1b37`.
+- Development-baseline manifest:
+  `runs/kda-cuda-development/baseline/fb89c2605.json`, SHA-256
+  `2db903d49dc32ef619b24e99ac8c326214e96c5556c9e9af218a2fd27ebf4149`.
+- Append-only attempt/reference index SHA-256:
+  `ab2b4926a800119b262c7197a2287592dc3345e4570ce669f3f392eb70160ee7`.
+
+**Result**
+
+- Exact pushed commit `fb89c260541db40662bc79929d8391081ed5fc5e`
+  matched the project recurrence at max absolute output error
+  `6.103515625e-05`; deterministic repeat passed, returned gradients were
+  finite, and the protected runtime/profile audit passed at ownership 1.0 with
+  no runtime FLA.
+- T=4096 Level-1 forward+backward improved `79.074 -> 63.652 ms` (19.50%).
+  The allocator-visible kernel memory ratio was `1.00486`, within the frozen
+  development limit.
+- The exact candidate-first Level-2 pair measured candidate
+  `[14790,14778,14800,14973,14879]`, median `14800 tok/s`, versus baseline
+  `[12950,12507,12949,12932,12917]`, median `12932 tok/s`: a 14.44% point
+  improvement. Candidate peak was `5508.533 MiB` versus `5511.408 MiB`.
+- This reaches 33.88% of the matched external `43680 tok/s` target. It is an
+  accepted development baseline, not statistical confirmation, an LM-quality
+  result, a default change, a merge, or official milestone retention.
+
+**Next**
+
+- Inspect the already-preserved independent BF16 WMMA attempt 27 once and run
+  the normal bounded gate only if its correctness evidence is complete.
+- Use attempt 26 as the fallback development baseline and begin replacing full
+  token history with C64 chunk-boundary recomputation/reverse scan, followed by
+  the complete WY/UT VJP. Keep sparse confirmation cadence and every existing
+  correctness, ownership, sanitizer, deterministic-gradient, and provenance
+  gate.
+
+## 2026-08-09 [agent] preserve valid BF16 WMMA scan without selecting it
+
+**Context**
+
+- Recovered attempt 27 once after its parallel worker had stopped. The clean
+  committed branch replaces attempt 25's scalar C64 scan with an eight-warp,
+  32-value-tile BF16 WMMA scan and retains FP32 accumulation.
+- Scratch evidence was complete enough to justify the normal bounded gate: the
+  protected 21-check runtime and profile audits passed, runtime remained
+  FLA-free at ownership 1.0, production output was deterministic and within
+  tolerance, and all returned gradients were finite.
+
+**Commands**
+
+```bash
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_024 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_027 \
+  runs/kda-cuda-development/attempts/attempt-00027-level1
+# Executed only the predeclared baseline-first Level-2 pair after Level 1
+# advanced, finalized the artifact, and pushed the exact clean branch.
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_027 \
+  push origin HEAD:kda-cuda/wy-bf16-wmma-scan-027
+```
+
+**Artifacts**
+
+- Recovered one-shot diagnostics:
+  `runs/kda-cuda-development/diagnostics/attempt-00027-recovered-preflight`,
+  manifest SHA-256
+  `6ff70ceaab3e8daf8b6332a2cc8015f8ec9cb72530d4bdaab06e8012aa642447`.
+- Level 1:
+  `runs/kda-cuda-development/attempts/attempt-00027-level1`, manifest SHA-256
+  `f77e4f5072a25bf1dbab51884eae0cb022e6752c2c8545cc0e326f60f8041f98`.
+- Level-2 baseline-first pair:
+  `runs/kda-cuda-development/attempts/attempt-00027-level1/level2-execution`,
+  final manifest SHA-256
+  `d83ff71626fde1d00083f6409ec12557b36cc5f908f6c321733cddb8e1041e49`.
+- Append-only attempt/reference index SHA-256:
+  `a101165634df5f55d4aaf635e4c358f238286ce5ce3e55333981e36a5b95eac8`.
+
+**Result**
+
+- Exact pushed commit `f73a68a9efcbbb7e4de4ea7cdf23801b58d35378`
+  executed `HMMA.16816.F32.BF16`. Production output matched within protected
+  tolerance at max absolute `4.8828125e-4`, p99 `6.103515625e-5`; deterministic
+  repeat and finite-gradient checks passed.
+- Level 1 advanced: T=4096 forward+backward improved
+  `79.164 -> 62.703 ms` (20.79%), with `1.00486x` memory. Its normal
+  forward-only row was `19.730 ms`, slightly slower than attempt 26's
+  `19.622 ms`; the much smaller recovered direct diagnostic used a different
+  import/input setup and is not used for selection.
+- The baseline-first Level-2 pair measured baseline
+  `[13046,13034,13041,12998,13023]`, median `13034 tok/s`, and candidate
+  `[14984,14916,14989,14929,14981]`, median `14981 tok/s`, a 14.94% point
+  improvement with `5508.533 MiB` peak. This is 34.30% of the matched FLA goal.
+- Attempt 27 is valid and preserved, but not selected over attempt 26. The
+  cross-attempt whole-step delta is small and unconfirmed, the matched normal
+  forward-only gate did not improve, and BF16 operand casting increased max
+  output error while remaining within tolerance. No quality, statistical,
+  default, merge, or official-retention claim is made.
+
+**Next**
+
+- Continue from exact FP32 BMM development baseline `fb89c260...` for the C64
+  backward transition. Preserve attempt 27 as an independently valid tensor-
+  core option that can be revisited after backward dominates less of the step.
+- First eliminate full token-state history via chunk-boundary recomputation and
+  reverse scan, then implement the complete WY/UT VJP. Do not run another
+  confirmation until the next major strategy boundary, plateau, roughly
+  four-hour checkpoint, or final candidate.
