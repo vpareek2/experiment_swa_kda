@@ -4564,3 +4564,54 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_063 \
   accepted baseline. Continue from attempt 53 with a larger structural change
   to pair-pack/accumulate or recurrent group-state work rather than reduction
   scheduling alone.
+
+## 2026-08-09 [agent] preserve near-threshold WMMA boundary scan
+
+**Context**
+
+- Attempt 64 replaces only backward group-boundary reconstruction with an
+  eight-chunk persistent WMMA scan. Twenty-four CTAs retain FP32 state and
+  accumulators while explicitly casting WMMA operands to BF16. The complete
+  reverse WY/UT VJP remains unchanged.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_064 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact seeded B=2/H=3/T=4096 saved-gradient comparison plus repeat.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_053 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_064 \
+  runs/kda-cuda-development/attempt-00064-wmma-boundary-level1
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_064 \
+  push -u origin kda-cuda/wy-wmma-boundary-scan-064
+```
+
+**Artifacts**
+
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00064-protected-checker`, manifest `5c55811313fa67cf5c13f6aa8f4433263ac4b3c8e530525f50358227c1b2cbe6`.
+- Production comparison/repeat: `runs/kda-cuda-development/diagnostics/attempt-00064-wmma-boundary-gradient`, manifest `f91a7409f6c9d3dd5b59a0413c006d09b044a0b5004a35e1beab45cc73fb3845`.
+- Level 1: `runs/kda-cuda-development/attempt-00064-wmma-boundary-level1`, manifest `30b33d456c252472eba06235679b54f9350979d562186677fa8e2ff7563af888`.
+- Append-only attempt/reference index SHA-256: `c9dbd9c357ba91f8ef2ad71e450a58077eb2317cde9acf03a34bb006d650e74d`.
+
+**Result**
+
+- Pushed commit `0fc6bf77c57ce59d9eb995c8bc4ebcc2fee6d4df`
+  passed protected ownership/runtime gates and the production frozen-tolerance
+  gate. Output, `dv`, and `dbeta` are bitwise equal to attempt 53; the largest
+  changed gradient difference is `1.819e-12`; repeat is bitwise deterministic.
+- Level 1 classified the candidate `do_not_advance`: T=4096
+  forward+backward improved `21.550 -> 20.967 ms` (2.70%), below the frozen 3%
+  gate. Peak allocation was unchanged and all important regressions remained
+  within 5%. No sanitizer, Level 2, profile, confirmation, or retest ran.
+- Attempt 53 remains accepted. This is neither quality nor statistically
+  confirmed evidence.
+
+**Next**
+
+- Attempt 64 supplies new independent strategy evidence: attempt 56's forward
+  WMMA scan improved 2.60%, while attempt 64's backward boundary scan improves
+  2.70%. Test both validated substitutions together from exact attempt 53 as a
+  unified scan-backend boundary; do not add unrelated changes.
