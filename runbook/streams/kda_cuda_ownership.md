@@ -7664,3 +7664,85 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_111 \
   reduce shared-memory residency and separate token-parallel preparation from
   the low-parallelism recurrence, following FlashKDA's two-stage scheduling
   principle while independently implementing the project training equations.
+
+## 2026-08-09 [Codex] Attempt 112 fused C16 preparation rejected at Level 1
+
+**Context**
+
+- Attempt 112 starts directly from accepted attempt 100 and implements the
+  complete C16 preparation half of the offline two-stage scheduling idea. One
+  128-thread CTA per chunk performs normalization/gating, causal `A/M`, unit
+  lower solve, and both `U=T@P` and `W=T@Q` products. `P/Q/M/T` remain CTA-local;
+  only `qbar/khat/prefix_g/A/U/W` reach the persistent recurrence.
+- Backward remains the accepted C64 recomputation and complete analytical VJP.
+  The intervention therefore tests whether a fully fused high-occupancy C16
+  producer can offset the unchanged recurrence scanning four times more chunks.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_112 \
+  --lane optimization <isolated artifact/cache arguments>
+# After the alignment fix, validate the exact final source staged in validation
+# worktree 112, whose source SHA-256 matches the candidate commit.
+# Seed-4101 production comparison and independent fresh-cache repeat.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_100 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_112 \
+  runs/kda-cuda-development/attempt-00112-c16-fused-prepare-level1 \
+  --level2-order candidate-first
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_112 \
+  push -u origin kda-cuda/wy-c16-fused-prepare-112
+```
+
+**Artifacts**
+
+- Pushed final commit `2d04feb6f51fee690d3261ef63c9081f83fced57`
+  after preserved pre-fix commit `75da7acd4091ba5550c08b37c970b212a5fcf83d`;
+  final forward source SHA-256 `e0ab23bff65cf4db67932e2482e3a7ec40a60e289d70265a65d855e19edab74f`.
+- Final protected checker: `runs/kda-cuda-development/diagnostics/attempt-00112-c16-fused-prepare-protected-checker`,
+  manifest `77b1696a5673c27915585e1703800181b28386f13619d5ecf8d19dab78c708c7`.
+- Pre-alignment protected checker: `runs/kda-cuda-development/diagnostics/attempt-00112-c16-fused-prepare-protected-checker-pre-alignment-001`,
+  manifest `27b0d383812d9e8af24035d72f870fdd3b6f810fac8bce975f4ea1fa3dade605`.
+- Invalid empty-stage invocation: `runs/kda-cuda-development/diagnostics/attempt-00112-c16-fused-prepare-protected-checker-invalid-empty-stage-001`,
+  manifest `ee87409dbadf872164b3ac9afc99ffc21ed4bc9c69bba58149c7bb1cb9297a3f`.
+- Production comparison/repeat: `runs/kda-cuda-development/diagnostics/attempt-00112-c16-fused-prepare-gradient`,
+  manifest `ce04a16ed0471fd0117bcb15fc4a16df3e327725dbc29aa2d936677b262017ae`.
+- Invalid pre-alignment production capture: `runs/kda-cuda-development/diagnostics/attempt-00112-c16-fused-prepare-gradient-invalid-misaligned-001`,
+  manifest `28ea4b5b9900d6e4d4363661a447ac84cde4615383cabdfbc11b5d5cd4c11289`.
+- Level 1: `runs/kda-cuda-development/attempt-00112-c16-fused-prepare-level1`,
+  manifest `0b5e0e09147a756e1bc295ebd23c439f9a912224223a48b1fabc91fafe16ca26`.
+- Append-only attempt/reference index SHA-256:
+  `c9731adb1574ee1e0bd37dad34599917ebb1213b3b2cf6fb15e49872a5b85177`.
+
+**Result**
+
+- The first exact production capture failed with
+  `CUDA error: misaligned address`: WMMA shared arrays followed three scalar
+  floats without explicit alignment. The failed capture is preserved. A new
+  commit adds 32-byte alignment to every WMMA load/store array; no history was
+  rewritten. The final source passes the protected build/runtime/profile audit,
+  ownership 1.0, and runtime FLA freedom.
+- Final production output differs from attempt 100 by at most `0.00048828125`;
+  maximum gradient delta is `2.0559127733577043e-09`. All tensors are finite,
+  pass the frozen tolerance, and the independent fresh-cache repeat is bitwise
+  exact for all eight tensors.
+- Level 1 decisively rejects the strategy. T=4096 forward-only improves just
+  `19.320800 -> 19.182288 ms` (0.717%), while forward+backward regresses
+  `12.588512 -> 15.585776 ms` (23.810%). T=256 forward+backward regresses
+  5.399%, violating the important-row guard. Peak allocation improves 3.943%,
+  from 202,770,944 to 194,775,552 bytes.
+- No sanitizer, Level 2, profile beyond the protected audit, confirmation, or
+  LM-quality evaluation ran. This is not statistically confirmed evidence.
+
+**Next**
+
+- Retain attempt 100. Close C16 unless the recurrence kernel itself is replaced:
+  complete preparation fusion does not compensate for four times as many
+  persistent recurrence iterations.
+- The forward route to the target now requires a coupled recurrence redesign
+  with pipelined loads/register-resident handoffs, not further preparation
+  fusion. The more direct training route remains a lower-shared-memory C64
+  backward VJP that removes generic GEMM/global handoffs without serializing
+  work into one chunk-owned CTA.
