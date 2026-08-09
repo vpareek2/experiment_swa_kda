@@ -3125,3 +3125,142 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_036 \
 - Profile exact production backward at attempt 36, attack the largest remaining
   exact kernel or dispatch cost, and continue toward at least 45k without
   relaxing correctness, ownership, provenance, or sanitizer gates.
+
+## 2026-08-09 [agent] reject eight-row pair-VJP scheduling
+
+**Context**
+
+- Attempt 36's production profile showed the row-parallel pair VJP at 34.0% of
+  GPU kernel time (`10.335 ms` per iteration). Attempt 37 reduced launch count
+  by assigning eight consecutive rows to each block while preserving each
+  output's arithmetic order.
+
+**Commands**
+
+```bash
+nsys profile --trace=cuda,nvtx,osrt --sample=none --cpuctxsw=none \
+  <exact B=2/H=3/T=4096 attempt-36 helper>
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_037 \
+  --lane optimization <isolated artifact/cache arguments>
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_036 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_037 \
+  runs/kda-cuda-development/attempt-00037-eight-row-level1
+```
+
+**Artifacts**
+
+- Attempt-36 profile: `runs/kda-cuda-development/diagnostics/attempt-00036-production-profile`, manifest `6024c5e904824d3e4bc191214d14c71d01feb38dee7960df038a2b70e495e487`.
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00037-protected-checker`, manifest `9e8e1bf10346b5eea833d414cdbf11523e503bc66829346ebb6de1d0b732f834`.
+- Exact gradients: `runs/kda-cuda-development/diagnostics/attempt-00037-eight-row-gradient-exact`, manifest `7b3ba09b2f5f6de9ea2e8fd79c1ca2433a3f1b8ac249a44081590a8d6e4dac01`.
+- Level 1: `runs/kda-cuda-development/attempt-00037-eight-row-level1`, manifest `94dce8aaf4e5ba924d5c9db9cd73cf9897749ecd65833de84ddb01bf6e62fe8b`.
+
+**Result**
+
+- Pushed commit `22f9e321240da49eb0614250b8ccd848087aac54` is
+  bitwise identical to attempt 36 for output and all seven gradients and passed
+  ownership/runtime gates. The first checker invocation stopped before build
+  because staging ran in the coordinator; that exact error is preserved.
+- Level 1 rejected it: T=4096 forward+backward regressed
+  `35.193 -> 44.034 ms` (25.12%) at identical memory. No retest, sanitizer, or
+  Level 2 ran; no sanitizer-valid claim is made.
+
+**Next**
+
+- Keep one row per block and parallelize the lane-zero beta-gradient tail.
+
+## 2026-08-09 [agent] accept parallel exact beta-gradient baseline
+
+**Context**
+
+- Attempt 38 distributes per-key `dbeta` terms across all 128 lanes, stores
+  them in bounded shared scratch, and retains lane-zero key-ascending sums.
+  The row-per-block pair schedule and all reported accumulation orders remain.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_038 \
+  --lane optimization <isolated artifact/cache arguments> --sanitizers
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_036 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_038 \
+  runs/kda-cuda-development/attempt-00038-parallel-beta-level1
+# Executed the predeclared baseline-first Level-2 pair once.
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_038 \
+  push -u origin kda-cuda/wy-vjp-parallel-beta-038
+```
+
+**Artifacts**
+
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00038-protected-checker`, manifest `c7ba09fca477d87f4ef33fb9984748cf9765c06046357764c3122c51d366c1d5`.
+- Exact comparison/repeat: `runs/kda-cuda-development/diagnostics/attempt-00038-parallel-beta-gradient-exact`, manifest `f76616b60a4c11c1ec307f749eceb79400a1285880cd7f9b76a8bb0fac9ce8d9`.
+- Full sanitizer validation: `runs/kda-cuda-development/validations/validation-00006-parallel-beta`, manifest `372f79ec6dfeff5e018ea13883b83287d4f3f41a5fb5cffb725fa1ffa7eb0039`.
+- Level 1: `runs/kda-cuda-development/attempt-00038-parallel-beta-level1`, manifest `a34cb63c37a2b83b946ad8001d5e4bf9b08463fd30071e40daee47352b658bf8`.
+- Level 2: `runs/kda-cuda-development/attempt-00038-parallel-beta-level2`, manifest `ffab3e47d4798c16618cf5ccb61b976c930c86f0fb096f4111b05d248745e26e`.
+- Production profile: `runs/kda-cuda-development/diagnostics/attempt-00038-production-profile`, manifest `fb0395d946ba98395fbfb1a366efbff4ed9b5f2a86b31398cff1ba003c1b48fa`.
+- Baseline manifest: `runs/kda-cuda-development/baseline/315cb4a19a.json`, SHA-256 `8c520aa8a8ed02aaad86f439e4e74f92f4b4c36c610ffe5809653516532a9693`.
+
+**Result**
+
+- Exact pushed commit `315cb4a19ac6cf94f815da7c1afd1f20caf15fe6`
+  passed ownership 1.0, runtime/profile audit, runtime FLA freedom, all four
+  sanitizers, and a bitwise deterministic repeat for output and seven gradients.
+- Level 1 improved T=4096 forward+backward `35.452 -> 28.984 ms`
+  (18.24%) at identical memory; all other rows stayed within the 5% guard.
+- Level 2 measured baseline `[21634,21648,21717,21747,21653]`, median
+  `21653 tok/s`, and candidate `[23875,23820,23867,23708,23851]`, median
+  `23851 tok/s`: +10.15%, identical `5508.533 MiB`, and 54.60% of the fixed
+  43,680 tok/s external reference.
+- The new profile measured the pair kernel at `4.749 ms` per iteration, down
+  54% from attempt 36, but it remains the largest named kernel. Attempt 38 is
+  the accepted development baseline, not confirmation, quality evidence,
+  official retention, a merge, or a default change.
+
+**Next**
+
+- Continue from attempt 38 toward 45k; optimize only profile-supported costs.
+
+## 2026-08-09 [agent] reject shared pair-ratio cache
+
+**Context**
+
+- Attempt 39 reused attempt 38's already allocated shared buffer to cache decay
+  ratios from the `dA` loops for the later `dM` loops, removing duplicate
+  exponentials without changing accumulation order.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_039 \
+  --lane optimization <isolated artifact/cache arguments>
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_038 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_039 \
+  runs/kda-cuda-development/attempt-00039-cache-ratios-level1
+```
+
+**Artifacts**
+
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00039-protected-checker`, manifest `b9e1a1c458b06ce695ead8ee08f227fca30bd3522014d008e5a8294ce8afdfca`.
+- Exact gradients: `runs/kda-cuda-development/diagnostics/attempt-00039-cache-ratios-gradient-exact`, manifest `2d6bd5c778b6c218ceff8d863bfe4de2423c32141e030c65193094a12221fd6f`.
+- Level 1: `runs/kda-cuda-development/attempt-00039-cache-ratios-level1`, manifest `b679fade6f1f5dbf8632ecb997871d8dc710aad60243b2176454f6c144af79c4`.
+- Append-only attempt/reference index SHA-256: `7331a52ca9a2a8ed11ad3601dfc422fa9c78f365837ab040a098a728579f79f9`.
+
+**Result**
+
+- Exact pushed commit `63752a3722454bdfbd613ba40be79dccf5894b2d`
+  passed ownership/runtime gates and remained bitwise identical to attempt 38.
+  Its first checker command used an empty worktree-local `uv` environment and
+  stopped before build; the exact failure is preserved and excluded.
+- Level 1 rejected it: T=4096 forward+backward changed
+  `29.394 -> 29.637 ms` (-0.83%), T=1024 regressed 4.13%, and memory was
+  unchanged. No retest, sanitizer, or Level 2 ran.
+
+**Next**
+
+- Keep attempt 38 accepted. Do not sweep ratio-cache variants; target the
+  parameter kernel or the paired forward/backward M/A construction instead.
