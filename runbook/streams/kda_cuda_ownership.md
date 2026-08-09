@@ -3764,3 +3764,50 @@ uv run --no-sync python scripts/kda_cuda_development.py \
 - Stop scalar pair scheduling/cache variants. The remaining credible strategy
   is a bounded stable algebraic A/M VJP, designed to avoid attempt 29's 1,284
   BMM calls and attempt 30's full-history memory expansion.
+
+## 2026-08-09 [agent] reject split warp-reduced pair VJP
+
+**Context**
+
+- Attempt 49 separates base R/E/P/Q/D work from complete A/M pair work. Eight
+  warps reduce causal time for interleaved key channels, while four source
+  warps compute the beta pair dot. It avoids atomics, ratio caches, BMMs, and
+  additional persistent history, but adds two row-granular launches per group.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_049 \
+  --lane optimization <isolated artifact/cache arguments>
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_046 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_049 \
+  runs/kda-cuda-development/attempt-00049-warp-pair-level1
+```
+
+**Artifacts**
+
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00049-protected-checker`, manifest `cffa528d45f4b1feda924d9b0dcfbdc71252e64d83e0a8de506e3a99a0119870`.
+- Production comparison/repeat: `runs/kda-cuda-development/diagnostics/attempt-00049-warp-pair-gradient`, manifest `8fba42ac6efec13190c51da27ea8ea56a75e90a28d0b89a9a1a7785a6bed979e`.
+- Level 1: `runs/kda-cuda-development/attempt-00049-warp-pair-level1`, manifest `4d62b4c71a69b66e411ef9d44765c29e4ac3d4331828442cbebf746edb854cf3`.
+- Append-only attempt/reference index SHA-256: `f235dfc4e079040430b10a6b6e1c39ac2e426a5f1dbd4512ca716db2620369a8`.
+
+**Result**
+
+- Pushed commit `1d377d656e240759959f0adafc0da9c682cfb897`
+  passed ownership 1.0 and runtime FLA freedom. Its deterministic gradient
+  differences were tiny (maximum `3.638e-12`), while output, `dv`, and `dbeta`
+  remained bitwise equal to attempt 46.
+- Level 1 rejected the split: T=4096 forward+backward changed
+  `24.431 -> 30.829 ms` (-26.19%), with memory ratio 1.0. No sanitizer,
+  Level 2, or retest ran.
+- Attempts 48-49 show that extra pair scheduling overwhelms scalar arithmetic
+  savings. Attempt 46 remains the accepted baseline, not confirmation or
+  quality evidence.
+
+**Next**
+
+- Retain the fused row-per-block pair kernel. Reassess whole-operator launch
+  and BMM structure from the accepted attempt-46 profile before another major
+  strategy boundary; do not continue pair scheduling/cache variants.
