@@ -7247,3 +7247,62 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_105 \
   regime. The independent larger alternative is a complete two-kernel forward
   pipeline matching FlashKDA's prepare-plus-persistent schedule rather than
   another isolated algebraic reassociation.
+
+## 2026-08-09 [Codex] Attempt 106 dual-value consumer rejected at Level 1
+
+**Context**
+
+- Attempt 106 preserves attempt 105's correctness-valid vector-consumer VJP but
+  changes ownership from eight 16-column CTAs to four 32-column CTAs per chunk.
+  Eight warps cover the exact four-row by two-column WMMA grid, loading each
+  large left operand once for two output tiles. Shared storage rises from 24 to
+  32 KiB while remaining below attempt 95's rejected 48-KiB schedule.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_106 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact seed-4101 production comparison and fresh-cache repeat against 100.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_100 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_106 \
+  runs/kda-cuda-development/attempt-00106-dual-value-consumer-level1 \
+  --level2-order candidate-first
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_106 \
+  push -u origin kda-cuda/wy-dual-value-consumer-vjp-106
+```
+
+**Artifacts**
+
+- Pushed commit `322084fb732be2f2a9fad3ce0d89222aba86f13a`;
+  source SHA-256 `59a10f2411f93e68b4d7c90c13d045a1557192fd48499448f7eb2572d8d63a9e`.
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00106-dual-value-consumer-protected-checker`, manifest `ae636a89454bd4f5c5bfb4460c3309fda40d66a784f3f56adfeecce03c1f58ec`.
+- Production comparison/repeat: `runs/kda-cuda-development/diagnostics/attempt-00106-dual-value-consumer-gradient`, manifest `e9c6cf9744872e34254035636f353eb2c06c86de27f2da1d05e2c05e3e5564d1`.
+- Level 1: `runs/kda-cuda-development/attempt-00106-dual-value-consumer-level1`, manifest `05ffc5226cc34ce682888232517c0e5a213845474857a032ca86f64e5f0bf508`.
+- Append-only attempt/reference index SHA-256:
+  `f62c32fb94d9699f2174f82075499f8e237a9ae2459dae6f27039e8d243d4bff`.
+
+**Result**
+
+- The pushed candidate passes ownership 1.0, protected runtime/profile audit,
+  runtime FLA freedom, frozen tolerance, and finite-gradient checks. Output is
+  bitwise equal to attempt 100, maximum gradient delta is
+  `5.820766091346741e-11`, and every fresh-cache repeat tensor is bitwise exact.
+- Level 1 rejects the candidate. T=4096 forward+backward improves only
+  `12.151440 -> 11.956128 ms` (1.607%), below both attempt 105 and the frozen
+  3% gate. Peak allocation improves 3.337%, from 202,770,944 to 196,004,352
+  bytes. T=256 improves 2.028%, while T=1024 regresses 1.167%; all guards pass.
+- No sanitizer, Level-2, profile, confirmation, or LM-quality evaluation ran.
+  This is development evidence only and is not statistically confirmed.
+
+**Next**
+
+- Retain attempt 100 and close value-column CTA scaling. The 32-KiB footprint
+  loses more concurrency than dual-tile left-operand reuse saves; a 64-column
+  variant would move toward the already-rejected 48-KiB serialization regime.
+- Move to a complete forward strategy boundary: a high-occupancy preparation
+  kernel plus persistent recurrence/output kernel with register-resident
+  handoff between dependent MMAs, following FlashKDA's dataflow principles but
+  independently implementing the training-compatible project equations.
