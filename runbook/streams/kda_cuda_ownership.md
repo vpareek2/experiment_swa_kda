@@ -2174,3 +2174,82 @@ nsys stats --report cuda_gpu_kern_sum,cuda_api_sum,osrt_sum <report>
   deterministic tiled weight reduction. Preserve the bounded generic fallback.
 - After the convolution family plateaus, run its full sanitizer boundary and
   begin the staged project-owned FP32 C=64 WY/UT forward path.
+
+## 2026-08-09 [agent] complete and validate convolution optimization boundary
+
+**Context**
+
+- Attempt 23 removed the asymptotic dependency search but still recomputed the
+  same SiLU preactivation gradient in both `dx` and `dweight`. Attempt 24
+  isolates that remaining hot-path redundancy without changing schemas or the
+  generic state/final-cotangent implementation.
+
+**Commands**
+
+```bash
+# KDA-only audit/provenance run (timing decision not applicable), then an
+# A/B/B/A convolution microgate and exact candidate-first Level-2 pair.
+# Reprofile all seven steps with nsys.
+uv run --no-sync research cuda-candidate-check   --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_validation_024   --lane optimization --sanitizers <isolated artifact/cache arguments>
+```
+
+**Artifacts**
+
+- Attempt/audit:
+  `runs/kda-cuda-development/attempts/attempt-00024-level1-kda-not-applicable`.
+- Convolution microgate:
+  `runs/kda-cuda-development/attempts/attempt-00024-convolution-microgate`,
+  final manifest SHA-256
+  `16c7fc20288372abfe414a72d280a666c82fc0f57229db80c19659a9d59a8f04`.
+- Level-2 execution manifest SHA-256:
+  `f8793cba03cdaeb2a545d2a1a663250a1a0014821319e44aa196cd8e23613858`.
+- Whole-step profile:
+  `runs/kda-cuda-development/profiles/whole-step-attribution-003-attempt24`,
+  final manifest SHA-256
+  `0a28ed022afc24fa23ff875f528feab04be9f327b5b0ae4efc5bf4554ca79906`.
+- Full checker/sanitizer boundary:
+  `runs/kda-cuda-development/validations/validation-00001-convolution-boundary`,
+  final manifest SHA-256
+  `d01e580cf803cd86dcea8a2bce45e641f906d315f68b73e8812f2684705f9f71`.
+- Development-baseline manifest:
+  `runs/kda-cuda-development/baseline/2a0a08e25.json`, SHA-256
+  `6edaeaa9b563aebd0d993e99fbcd904ee044f1b93b1a977f21f91b33158631bc`.
+- Append-only attempt/reference index SHA-256:
+  `fcee0353d5cc4bf9bf5270b1298365df76f4b3e8313aea5314a762f6618413a8`.
+
+**Result**
+
+- Exact commit `2a0a08e254e3af81a57b4ee472aea4d8e8b76a56`, source SHA-256
+  `7a356fd341e07aeea376dabdd3716b2f265e2ca85ab2322b2bdc7dfef5b8e586`,
+  materializes allocator-visible FP32 `dz`, computes `dx` from it, and uses
+  fixed 256-token FP32 weight partials plus a deterministic finalizer. All other
+  shapes/state cases route to the bounded project fallback.
+- Against attempt 23, T=4096 convolution backward fell
+  `6.348 -> 0.371 ms` (`17.10x`) and forward+backward fell
+  `7.111 -> 0.466 ms`. `dx` remained bit-identical. Weight reassociation changed
+  one of 1,536 BF16 values at production shape, max abs `0.03125` / max relative
+  `0.00437`, within protected gradient tolerance.
+- Isolated convolution peak rose about 29% because the 12 MiB FP32 `dz` and
+  partials are visible. The exact full model remained unchanged at
+  `5511.408 MiB`, so the enabling scratch did not move the training peak.
+- Exact Level 2 observed `10961 -> 12977 tok/s` (18.39%), reaching 29.71% of
+  the 43,680 FLA target. This remains a development pair, not quality evidence
+  or a confidence interval.
+- Full protected runtime/profile checking passed at ownership 1.0 and runtime
+  FLA freedom. Memcheck, racecheck, synccheck, and initcheck each completed with
+  genuine zero-error summaries.
+- The fresh whole-step profile accounted for 98.88% of the `2.531 s` warmed
+  step. All convolution backward stages now total only `30.75 ms/step` (1.23%
+  of GPU time), while project KDA forward/reverse/history/preprocess consume
+  about 72.7%. Convolution has reached its useful development plateau.
+- Attempt 24 is pushed and becomes the new development baseline. It remains
+  unmerged, non-default, non-quality, and separate from official retention.
+
+**Next**
+
+- Start the independently authored project FP32 C=64 WY/UT forward stage from
+  exact `2a0a08e...`, keeping the existing project backward as the analytical
+  recurrence derivative and all non-production shapes on the legacy project
+  path.
+- Continue toward the overall 45k target without treating intermediate latency
+  aims as automatic stop conditions; preserve every diagnostic and rollback.
