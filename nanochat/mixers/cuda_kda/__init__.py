@@ -6,12 +6,14 @@ from typing import Any
 _RECEIPT: dict[str, object] | None = None
 _CHUNK_SOURCE = "nanochat/mixers/cuda_kda/chunk.cu"
 _CHUNK_WY_FORWARD_SOURCE = "nanochat/mixers/cuda_kda/chunk_wy_forward.cu"
+_CHUNK_WY_BACKWARD_SOURCE = "nanochat/mixers/cuda_kda/chunk_wy_backward.cu"
 _RECURRENT_SOURCE = "nanochat/mixers/cuda_kda/recurrent_decode.cu"
 _CONVOLUTION_FORWARD_SOURCE = "nanochat/mixers/cuda_kda/causal_convolution_forward.cu"
 _CONVOLUTION_BACKWARD_SOURCE = "nanochat/mixers/cuda_kda/causal_convolution_backward.cu"
 _SOURCES = (
     _CHUNK_SOURCE,
     _CHUNK_WY_FORWARD_SOURCE,
+    _CHUNK_WY_BACKWARD_SOURCE,
     _RECURRENT_SOURCE,
     _CONVOLUTION_FORWARD_SOURCE,
     _CONVOLUTION_BACKWARD_SOURCE,
@@ -54,7 +56,7 @@ def provenance() -> dict[str, Any]:
     }
     components["chunk_backward"] = {
         "owner": "project",
-        "sources": [_CHUNK_SOURCE],
+        "sources": [_CHUNK_SOURCE, _CHUNK_WY_BACKWARD_SOURCE],
         "kernel_symbols": ["nanochat_kda_chunk_backward_kernel"],
         "torch_operator": "nanochat_kda::chunk_backward",
     }

@@ -1,0 +1,896 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025 Andrej Karpathy
+//
+// Independently derived reverse-mode implementation of the published C64
+// KDA WY/UT equations.  The matrix VJP is checked against an FP64 multi-chunk
+// equation prototype; non-production shapes retain the analytical recurrence.
+
+#include "chunk_wy_common.cuh"
+
+#include <ATen/Context.h>
+#include <ATen/core/grad_mode.h>
+#include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAException.h>
+
+#include <cuda_bf16.h>
+#include <cuda_runtime.h>
+
+namespace {
+
+constexpr int kBatch = 2;
+constexpr int kHeads = 3;
+constexpr int kLength = 4096;
+constexpr int kDim = 128;
+constexpr int kChunk = 64;
+constexpr int kChunks = kLength / kChunk;
+constexpr int kRecurrences = kBatch * kHeads;
+constexpr int kChunkRows = kRecurrences * kChunks;
+
+__device__ __forceinline__ float wy_sigmoid(float x) {
+  if (x >= 0.0f) {
+    const float z = expf(-x);
+    return 1.0f / (1.0f + z);
+  }
+  const float z = expf(x);
+  return z / (1.0f + z);
+}
+
+__device__ __forceinline__ int64_t input_vector_index(
+    int b, int token, int h, int d) {
+  return (((static_cast<int64_t>(b) * kLength + token) * kHeads + h) *
+          kDim + d);
+}
+
+__device__ __forceinline__ int64_t input_scalar_index(
+    int b, int token, int h) {
+  return ((static_cast<int64_t>(b) * kLength + token) * kHeads + h);
+}
+
+__device__ __forceinline__ int64_t chunk_vector_index(
+    int n, int row, int d) {
+  return ((static_cast<int64_t>(n) * kChunk + row) * kDim + d);
+}
+
+__device__ __forceinline__ int64_t chunk_matrix_index(
+    int n, int row, int column) {
+  return ((static_cast<int64_t>(n) * kChunk + row) * kChunk + column);
+}
+
+__global__ void nanochat_kda_wy_backward_preprocess_c64_kernel(
+    const __nv_bfloat16* q,
+    const __nv_bfloat16* k,
+    const __nv_bfloat16* v,
+    const __nv_bfloat16* raw_gate,
+    const __nv_bfloat16* beta_logits,
+    const float* A_log,
+    const float* dt_bias,
+    float* q_inverse,
+    float* k_inverse,
+    float* qbar,
+    float* khat,
+    float* prefix_g,
+    float* beta,
+    float* P,
+    float* Q,
+    float lower_bound,
+    float scale) {
+  const int n = blockIdx.x;
+  const int d = threadIdx.x;
+  if (n >= kChunkRows || d >= kDim) {
+    return;
+  }
+  const int chunk_id = n % kChunks;
+  const int recurrence = n / kChunks;
+  const int h = recurrence % kHeads;
+  const int b = recurrence / kHeads;
+  const int token_start = chunk_id * kChunk;
+  __shared__ float q_squares[kDim];
+  __shared__ float k_squares[kDim];
+  __shared__ float q_inv;
+  __shared__ float k_inv;
+  __shared__ float beta_value;
+
+  const float a = expf(A_log[h]);
+  float running_g = 0.0f;
+  for (int row = 0; row < kChunk; ++row) {
+    const int token = token_start + row;
+    const int64_t source = input_vector_index(b, token, h, d);
+    const float q_value = __bfloat162float(q[source]);
+    const float k_value = __bfloat162float(k[source]);
+    q_squares[d] = q_value * q_value;
+    k_squares[d] = k_value * k_value;
+    __syncthreads();
+    if (d == 0) {
+      float q_sum = 0.0f;
+      float k_sum = 0.0f;
+      for (int key = 0; key < kDim; ++key) {
+        q_sum += q_squares[key];
+        k_sum += k_squares[key];
+      }
+      q_inv = rsqrtf(fmaxf(q_sum, 1.0e-24f));
+      k_inv = rsqrtf(fmaxf(k_sum, 1.0e-24f));
+      q_inverse[static_cast<int64_t>(n) * kChunk + row] = q_inv;
+      k_inverse[static_cast<int64_t>(n) * kChunk + row] = k_inv;
+      beta_value = wy_sigmoid(__bfloat162float(
+          beta_logits[input_scalar_index(b, token, h)]));
+      beta[static_cast<int64_t>(n) * kChunk + row] = beta_value;
+    }
+    __syncthreads();
+
+    const int64_t destination = chunk_vector_index(n, row, d);
+    const float normalized_q = (q_value * q_inv) * scale;
+    const float normalized_k = k_value * k_inv;
+    const float gate_input = __bfloat162float(raw_gate[source]) +
+        dt_bias[h * kDim + d];
+    running_g += lower_bound * wy_sigmoid(a * gate_input);
+    qbar[destination] = normalized_q;
+    khat[destination] = normalized_k;
+    prefix_g[destination] = running_g;
+    P[destination] = beta_value * __bfloat162float(v[source]);
+    Q[destination] = beta_value * expf(running_g) * normalized_k;
+    __syncthreads();
+  }
+}
+
+__global__ void nanochat_kda_wy_backward_build_m_a_c64_kernel(
+    const float* qbar,
+    const float* khat,
+    const float* prefix_g,
+    const float* beta,
+    float* M,
+    float* A) {
+  const int n = blockIdx.x;
+  if (n >= kChunkRows) {
+    return;
+  }
+  for (int pair = threadIdx.x; pair < kChunk * kChunk;
+       pair += blockDim.x) {
+    const int i = pair / kChunk;
+    const int s = pair - i * kChunk;
+    float m_value = 0.0f;
+    float a_value = 0.0f;
+    if (s <= i) {
+      for (int d = 0; d < kDim; ++d) {
+        const int64_t io = chunk_vector_index(n, i, d);
+        const int64_t so = chunk_vector_index(n, s, d);
+        const float ratio = expf(prefix_g[io] - prefix_g[so]);
+        a_value += qbar[io] * khat[so] * ratio;
+        if (s < i) {
+          m_value += khat[io] * khat[so] * ratio;
+        }
+      }
+      if (s < i) {
+        m_value *= beta[static_cast<int64_t>(n) * kChunk + i];
+      }
+    }
+    M[chunk_matrix_index(n, i, s)] = m_value;
+    A[chunk_matrix_index(n, i, s)] = a_value;
+  }
+}
+
+__global__ void nanochat_kda_wy_backward_solve_c64_kernel(
+    const float* M, float* T) {
+  const int n = blockIdx.x;
+  const int column = threadIdx.x;
+  if (n >= kChunkRows || column >= kChunk) {
+    return;
+  }
+  for (int row = 0; row < kChunk; ++row) {
+    float value = 0.0f;
+    if (column == row) {
+      value = 1.0f;
+    } else if (column < row) {
+      float sum = 0.0f;
+      for (int inner = column; inner < row; ++inner) {
+        sum += M[chunk_matrix_index(n, row, inner)] *
+            T[chunk_matrix_index(n, inner, column)];
+      }
+      value = -sum;
+    }
+    T[chunk_matrix_index(n, row, column)] = value;
+    __syncthreads();
+  }
+}
+
+__global__ void nanochat_kda_wy_backward_pack_c64_kernel(
+    const float* qbar,
+    const float* khat,
+    const float* prefix_g,
+    float* R,
+    float* E,
+    int chunk_id) {
+  const int index = blockIdx.x * blockDim.x + threadIdx.x;
+  const int elements = kRecurrences * kChunk * kDim;
+  if (index >= elements) {
+    return;
+  }
+  const int recurrence = index / (kChunk * kDim);
+  const int within = index - recurrence * kChunk * kDim;
+  const int row = within / kDim;
+  const int d = within - row * kDim;
+  const int n = recurrence * kChunks + chunk_id;
+  const int64_t source = chunk_vector_index(n, row, d);
+  const float g = prefix_g[source];
+  const float end_g = prefix_g[chunk_vector_index(n, kChunk - 1, d)];
+  R[index] = qbar[source] * expf(g);
+  E[index] = khat[source] * expf(end_g - g);
+}
+
+__global__ void nanochat_kda_wy_backward_sub_z_c64_kernel(
+    const float* U, const float* wh, float* z, int chunk_id) {
+  const int index = blockIdx.x * blockDim.x + threadIdx.x;
+  const int elements = kRecurrences * kChunk * kDim;
+  if (index >= elements) {
+    return;
+  }
+  const int recurrence = index / (kChunk * kDim);
+  const int within = index - recurrence * kChunk * kDim;
+  const int n = recurrence * kChunks + chunk_id;
+  z[index] = U[static_cast<int64_t>(n) * kChunk * kDim + within] - wh[index];
+}
+
+__global__ void nanochat_kda_wy_backward_decay_state_c64_kernel(
+    const float* prefix_g, float* state, int chunk_id) {
+  const int index = blockIdx.x * blockDim.x + threadIdx.x;
+  const int elements = kRecurrences * kDim * kDim;
+  if (index >= elements) {
+    return;
+  }
+  const int recurrence = index / (kDim * kDim);
+  const int within = index - recurrence * kDim * kDim;
+  const int key = within / kDim;
+  const int n = recurrence * kChunks + chunk_id;
+  state[index] *= expf(prefix_g[chunk_vector_index(n, kChunk - 1, key)]);
+}
+
+__global__ void nanochat_kda_wy_backward_add_c64_kernel(
+    float* destination, const float* source, int elements) {
+  const int index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (index < elements) {
+    destination[index] += source[index];
+  }
+}
+
+__global__ void nanochat_kda_wy_backward_sub_c64_kernel(
+    float* destination, const float* source, int elements) {
+  const int index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (index < elements) {
+    destination[index] -= source[index];
+  }
+}
+
+__global__ void nanochat_kda_wy_backward_negate_c64_kernel(
+    float* values, int elements) {
+  const int index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (index < elements) {
+    values[index] = -values[index];
+  }
+}
+
+__global__ void nanochat_kda_wy_backward_pack_grad_output_c64_kernel(
+    const __nv_bfloat16* grad_output, float* packed) {
+  const int index = blockIdx.x * blockDim.x + threadIdx.x;
+  constexpr int elements = kBatch * kLength * kHeads * kDim;
+  if (index >= elements) {
+    return;
+  }
+  const int value = index % kDim;
+  const int h = (index / kDim) % kHeads;
+  const int token = (index / (kDim * kHeads)) % kLength;
+  const int b = index / (kLength * kHeads * kDim);
+  const int chunk_id = token / kChunk;
+  const int row = token - chunk_id * kChunk;
+  const int recurrence = b * kHeads + h;
+  const int n = recurrence * kChunks + chunk_id;
+  packed[chunk_vector_index(n, row, value)] =
+      __bfloat162float(grad_output[index]);
+}
+
+__global__ void nanochat_kda_wy_backward_boundary_terms_c64_kernel(
+    const float* prefix_g,
+    const float* state,
+    const float* dstate_next,
+    float* dstate,
+    float* dD,
+    int chunk_id) {
+  const int index = blockIdx.x * blockDim.x + threadIdx.x;
+  const int state_elements = kRecurrences * kDim * kDim;
+  if (index < state_elements) {
+    const int recurrence = index / (kDim * kDim);
+    const int within = index - recurrence * kDim * kDim;
+    const int key = within / kDim;
+    const int n = recurrence * kChunks + chunk_id;
+    const float D = expf(prefix_g[chunk_vector_index(n, kChunk - 1, key)]);
+    dstate[index] += D * dstate_next[index];
+  }
+  const int d_index = index;
+  if (d_index < kRecurrences * kDim) {
+    const int recurrence = d_index / kDim;
+    const int key = d_index - recurrence * kDim;
+    float sum = 0.0f;
+    for (int value = 0; value < kDim; ++value) {
+      const int64_t state_offset =
+          (static_cast<int64_t>(recurrence) * kDim + key) * kDim + value;
+      sum += dstate_next[state_offset] * state[state_offset];
+    }
+    dD[d_index] = sum;
+  }
+}
+
+// Complete vector/pair VJP for one reverse chunk.  This is the profile-visible
+// production backward kernel: every lane owns one key channel and accumulates
+// all appearances of that channel in R/E/P/Q/A/M without atomics.
+__global__ void nanochat_kda_chunk_backward_kernel(
+    const __nv_bfloat16* v,
+    const float* qbar,
+    const float* khat,
+    const float* prefix_g,
+    const float* beta,
+    const float* R,
+    const float* E,
+    const float* dR,
+    const float* dA,
+    const float* dM,
+    const float* dP,
+    const float* dQ,
+    const float* dE,
+    const float* dD,
+    float* dqbar,
+    float* dkhat,
+    float* dv,
+    float* dbeta,
+    float* dprefix,
+    int chunk_id) {
+  const int recurrence = blockIdx.x;
+  const int d = threadIdx.x;
+  if (recurrence >= kRecurrences || d >= kDim) {
+    return;
+  }
+  const int h = recurrence % kHeads;
+  const int b = recurrence / kHeads;
+  const int n = recurrence * kChunks + chunk_id;
+  const int token_start = chunk_id * kChunk;
+  const int local_base = recurrence * kChunk * kDim;
+
+  for (int row = 0; row < kChunk; ++row) {
+    const int64_t offset = chunk_vector_index(n, row, d);
+    const int local = local_base + row * kDim + d;
+    const float g = prefix_g[offset];
+    const float exp_g = expf(g);
+    float query_gradient = dR[local] * exp_g;
+    float key_gradient = dQ[local] *
+        beta[static_cast<int64_t>(n) * kChunk + row] * exp_g;
+    const float end_g = prefix_g[
+        chunk_vector_index(n, kChunk - 1, d)];
+    const float e_factor = expf(end_g - g);
+    key_gradient += dE[local] * e_factor;
+    float prefix_gradient = dR[local] * R[local] +
+        dQ[local] *
+            (beta[static_cast<int64_t>(n) * kChunk + row] *
+             exp_g * khat[offset]) -
+        dE[local] * E[local];
+
+    for (int source = 0; source <= row; ++source) {
+      const int64_t source_offset = chunk_vector_index(n, source, d);
+      const float ratio = expf(g - prefix_g[source_offset]);
+      query_gradient += dA[(recurrence * kChunk + row) * kChunk + source] *
+          khat[source_offset] * ratio;
+      if (source < row) {
+        const float term =
+            dA[(recurrence * kChunk + row) * kChunk + source] *
+            qbar[offset] * khat[source_offset] * ratio;
+        prefix_gradient += term;
+      }
+    }
+    for (int target = row; target < kChunk; ++target) {
+      const int64_t target_offset = chunk_vector_index(n, target, d);
+      const float ratio = expf(prefix_g[target_offset] - g);
+      key_gradient += dA[(recurrence * kChunk + target) * kChunk + row] *
+          qbar[target_offset] * ratio;
+      if (target > row) {
+        const float term =
+            dA[(recurrence * kChunk + target) * kChunk + row] *
+            qbar[target_offset] * khat[offset] * ratio;
+        prefix_gradient -= term;
+      }
+    }
+
+    const float beta_row = beta[static_cast<int64_t>(n) * kChunk + row];
+    for (int source = 0; source < row; ++source) {
+      const int64_t source_offset = chunk_vector_index(n, source, d);
+      const float ratio = expf(g - prefix_g[source_offset]);
+      const float upstream =
+          dM[(recurrence * kChunk + row) * kChunk + source] * beta_row;
+      key_gradient += upstream * khat[source_offset] * ratio;
+      prefix_gradient += upstream * khat[offset] * khat[source_offset] * ratio;
+    }
+    for (int target = row + 1; target < kChunk; ++target) {
+      const int64_t target_offset = chunk_vector_index(n, target, d);
+      const float ratio = expf(prefix_g[target_offset] - g);
+      const float upstream =
+          dM[(recurrence * kChunk + target) * kChunk + row] *
+          beta[static_cast<int64_t>(n) * kChunk + target];
+      key_gradient += upstream * khat[target_offset] * ratio;
+      prefix_gradient -= upstream * khat[target_offset] * khat[offset] * ratio;
+    }
+
+    if (row == kChunk - 1) {
+      float end_contribution = dD[recurrence * kDim + d] * exp_g;
+      for (int source = 0; source < kChunk; ++source) {
+        const int source_local = local_base + source * kDim + d;
+        end_contribution += dE[source_local] * E[source_local];
+      }
+      prefix_gradient += end_contribution;
+    }
+    dqbar[offset] = query_gradient;
+    dkhat[offset] = key_gradient;
+    dprefix[offset] = prefix_gradient;
+
+    const int token = token_start + row;
+    const int64_t input = input_vector_index(b, token, h, d);
+    dv[input] = beta_row * dP[local];
+  }
+
+  if (d < kChunk) {
+    const int row = d;
+    const float beta_row = beta[static_cast<int64_t>(n) * kChunk + row];
+    float gradient = 0.0f;
+    for (int value = 0; value < kDim; ++value) {
+      const int token = token_start + row;
+      gradient += dP[(recurrence * kChunk + row) * kDim + value] *
+          __bfloat162float(v[input_vector_index(b, token, h, value)]);
+    }
+    for (int key = 0; key < kDim; ++key) {
+      const int64_t offset = chunk_vector_index(n, row, key);
+      gradient += dQ[(recurrence * kChunk + row) * kDim + key] *
+          expf(prefix_g[offset]) * khat[offset];
+    }
+    for (int source = 0; source < row; ++source) {
+      float dot = 0.0f;
+      for (int key = 0; key < kDim; ++key) {
+        const int64_t row_offset = chunk_vector_index(n, row, key);
+        const int64_t source_offset = chunk_vector_index(n, source, key);
+        dot += khat[row_offset] * khat[source_offset] *
+            expf(prefix_g[row_offset] - prefix_g[source_offset]);
+      }
+      gradient += dM[(recurrence * kChunk + row) * kChunk + source] * dot;
+    }
+    dbeta[static_cast<int64_t>(n) * kChunk + row] = gradient;
+  }
+}
+
+__global__ void nanochat_kda_wy_backward_prefix_reverse_c64_kernel(
+    float* dprefix) {
+  const int n = blockIdx.x;
+  const int d = threadIdx.x;
+  if (n >= kChunkRows || d >= kDim) {
+    return;
+  }
+  float running = 0.0f;
+  for (int row = kChunk; row-- > 0;) {
+    const int64_t offset = chunk_vector_index(n, row, d);
+    running += dprefix[offset];
+    dprefix[offset] = running;
+  }
+}
+
+__global__ void nanochat_kda_wy_backward_finalize_c64_kernel(
+    const __nv_bfloat16* raw_gate,
+    const __nv_bfloat16* beta_logits,
+    const float* A_log,
+    const float* dt_bias,
+    const float* q_inverse,
+    const float* k_inverse,
+    const float* qbar,
+    const float* khat,
+    const float* beta,
+    const float* dqbar,
+    const float* dkhat,
+    const float* dbeta,
+    const float* ddecay,
+    __nv_bfloat16* dq,
+    __nv_bfloat16* dk,
+    __nv_bfloat16* draw_gate,
+    __nv_bfloat16* dbeta_logits,
+    float* raw_gate_gradient,
+    float lower_bound,
+    float scale) {
+  const int n = blockIdx.x;
+  const int d = threadIdx.x;
+  if (n >= kChunkRows || d >= kDim) {
+    return;
+  }
+  const int chunk_id = n % kChunks;
+  const int recurrence = n / kChunks;
+  const int h = recurrence % kHeads;
+  const int b = recurrence / kHeads;
+  const int token_start = chunk_id * kChunk;
+  __shared__ float q_contribution[kDim];
+  __shared__ float k_contribution[kDim];
+  __shared__ float q_dot;
+  __shared__ float k_dot;
+
+  const float a = expf(A_log[h]);
+  for (int row = 0; row < kChunk; ++row) {
+    const int64_t offset = chunk_vector_index(n, row, d);
+    const float normalized_q = qbar[offset] / scale;
+    q_contribution[d] = dqbar[offset] * normalized_q;
+    k_contribution[d] = dkhat[offset] * khat[offset];
+    __syncthreads();
+    if (d == 0) {
+      float q_sum = 0.0f;
+      float k_sum = 0.0f;
+      for (int key = 0; key < kDim; ++key) {
+        q_sum += q_contribution[key];
+        k_sum += k_contribution[key];
+      }
+      q_dot = q_sum;
+      k_dot = k_sum;
+    }
+    __syncthreads();
+    const int token = token_start + row;
+    const int64_t input = input_vector_index(b, token, h, d);
+    dq[input] = __float2bfloat16_rn(
+        scale * q_inverse[static_cast<int64_t>(n) * kChunk + row] *
+        (dqbar[offset] - normalized_q * q_dot));
+    dk[input] = __float2bfloat16_rn(
+        k_inverse[static_cast<int64_t>(n) * kChunk + row] *
+        (dkhat[offset] - khat[offset] * k_dot));
+
+    const float biased_gate = __bfloat162float(raw_gate[input]) +
+        dt_bias[h * kDim + d];
+    const float activated = wy_sigmoid(a * biased_gate);
+    const float raw_gradient = ddecay[offset] * lower_bound *
+        activated * (1.0f - activated) * a;
+    draw_gate[input] = __float2bfloat16_rn(raw_gradient);
+    raw_gate_gradient[offset] = raw_gradient;
+    if (d == 0) {
+      const int64_t scalar = input_scalar_index(b, token, h);
+      const float beta_value = beta[static_cast<int64_t>(n) * kChunk + row];
+      dbeta_logits[scalar] = __float2bfloat16_rn(
+          dbeta[static_cast<int64_t>(n) * kChunk + row] *
+          beta_value * (1.0f - beta_value));
+    }
+    __syncthreads();
+  }
+}
+
+__global__ void nanochat_kda_wy_backward_parameter_c64_kernel(
+    const __nv_bfloat16* raw_gate,
+    const float* dt_bias,
+    const float* raw_gate_gradient,
+    float* dA_partial,
+    float* ddt_partial) {
+  const int owner = blockIdx.x;
+  if (owner >= kRecurrences * kDim || threadIdx.x != 0) {
+    return;
+  }
+  const int key = owner % kDim;
+  const int recurrence = owner / kDim;
+  const int h = recurrence % kHeads;
+  const int b = recurrence / kHeads;
+  float bias_gradient = 0.0f;
+  for (int token = kLength; token-- > 0;) {
+    const int chunk_id = token / kChunk;
+    const int row = token - chunk_id * kChunk;
+    const int n = recurrence * kChunks + chunk_id;
+    bias_gradient += raw_gate_gradient[chunk_vector_index(n, row, key)];
+  }
+  ddt_partial[(recurrence * kDim) + key] = bias_gradient;
+  if (key == 0) {
+    float A_gradient = 0.0f;
+    for (int token = kLength; token-- > 0;) {
+      const int chunk_id = token / kChunk;
+      const int row = token - chunk_id * kChunk;
+      const int n = recurrence * kChunks + chunk_id;
+      for (int reduction_key = 0; reduction_key < kDim; ++reduction_key) {
+        const int64_t input = input_vector_index(b, token, h, reduction_key);
+        A_gradient += raw_gate_gradient[
+            chunk_vector_index(n, row, reduction_key)] *
+            (__bfloat162float(raw_gate[input]) +
+             dt_bias[h * kDim + reduction_key]);
+      }
+    }
+    dA_partial[recurrence] = A_gradient;
+  }
+}
+
+__global__ void nanochat_kda_wy_backward_reduce_parameters_c64_kernel(
+    const float* dA_partial,
+    const float* ddt_partial,
+    float* dA_log,
+    float* ddt_bias) {
+  const int index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (index < kHeads) {
+    float sum = 0.0f;
+    for (int b = 0; b < kBatch; ++b) {
+      sum += dA_partial[b * kHeads + index];
+    }
+    dA_log[index] = sum;
+  }
+  if (index < kHeads * kDim) {
+    const int h = index / kDim;
+    const int key = index - h * kDim;
+    float sum = 0.0f;
+    for (int b = 0; b < kBatch; ++b) {
+      sum += ddt_partial[((b * kHeads + h) * kDim) + key];
+    }
+    ddt_bias[index] = sum;
+  }
+}
+
+}  // namespace
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor,
+           at::Tensor, at::Tensor>
+nanochat_kda_chunk_wy_backward_c64(
+    const at::Tensor& q,
+    const at::Tensor& k,
+    const at::Tensor& v,
+    const at::Tensor& raw_gate,
+    const at::Tensor& beta_logits,
+    const at::Tensor& A_log,
+    const at::Tensor& dt_bias,
+    const at::Tensor& grad_output,
+    float lower_bound,
+    float scale) {
+  const at::TensorOptions fp32 = A_log.options();
+  at::NoGradGuard no_grad;
+  at::NoTF32Guard no_tf32;
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream(q.get_device());
+  constexpr int kThreads = 256;
+  constexpr int kVectorElements = kRecurrences * kChunk * kDim;
+  constexpr int kStateElements = kRecurrences * kDim * kDim;
+  constexpr int kMatrixElements = kRecurrences * kChunk * kChunk;
+
+  at::Tensor q_inverse = at::empty({kChunkRows, kChunk}, fp32);
+  at::Tensor k_inverse = at::empty_like(q_inverse);
+  at::Tensor qbar = at::empty({kChunkRows, kChunk, kDim}, fp32);
+  at::Tensor khat = at::empty_like(qbar);
+  at::Tensor prefix_g = at::empty_like(qbar);
+  at::Tensor beta = at::empty({kChunkRows, kChunk}, fp32);
+  at::Tensor P = at::empty_like(qbar);
+  at::Tensor Q = at::empty_like(qbar);
+  at::Tensor M = at::empty({kChunkRows, kChunk, kChunk}, fp32);
+  at::Tensor A = at::empty_like(M);
+  at::Tensor T = at::empty_like(M);
+
+  nanochat_kda_wy_backward_preprocess_c64_kernel<<<
+      kChunkRows, kDim, 0, stream>>>(
+      reinterpret_cast<const __nv_bfloat16*>(q.data_ptr<at::BFloat16>()),
+      reinterpret_cast<const __nv_bfloat16*>(k.data_ptr<at::BFloat16>()),
+      reinterpret_cast<const __nv_bfloat16*>(v.data_ptr<at::BFloat16>()),
+      reinterpret_cast<const __nv_bfloat16*>(
+          raw_gate.data_ptr<at::BFloat16>()),
+      reinterpret_cast<const __nv_bfloat16*>(
+          beta_logits.data_ptr<at::BFloat16>()),
+      A_log.data_ptr<float>(), dt_bias.data_ptr<float>(),
+      q_inverse.data_ptr<float>(), k_inverse.data_ptr<float>(),
+      qbar.data_ptr<float>(), khat.data_ptr<float>(),
+      prefix_g.data_ptr<float>(), beta.data_ptr<float>(),
+      P.data_ptr<float>(), Q.data_ptr<float>(), lower_bound, scale);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  nanochat_kda_wy_backward_build_m_a_c64_kernel<<<
+      kChunkRows, kThreads, 0, stream>>>(
+      qbar.data_ptr<float>(), khat.data_ptr<float>(),
+      prefix_g.data_ptr<float>(), beta.data_ptr<float>(),
+      M.data_ptr<float>(), A.data_ptr<float>());
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  nanochat_kda_wy_backward_solve_c64_kernel<<<
+      kChunkRows, kChunk, 0, stream>>>(M.data_ptr<float>(), T.data_ptr<float>());
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+
+  at::Tensor U = at::empty_like(P);
+  at::Tensor W = at::empty_like(Q);
+  at::bmm_out(U, T, P);
+  at::bmm_out(W, T, Q);
+
+  const at::Tensor U_all = U.view({kRecurrences, kChunks, kChunk, kDim});
+  const at::Tensor W_all = W.view({kRecurrences, kChunks, kChunk, kDim});
+  const at::Tensor A_all = A.view({kRecurrences, kChunks, kChunk, kChunk});
+  const at::Tensor T_all = T.view({kRecurrences, kChunks, kChunk, kChunk});
+  const at::Tensor P_all = P.view({kRecurrences, kChunks, kChunk, kDim});
+  const at::Tensor Q_all = Q.view({kRecurrences, kChunks, kChunk, kDim});
+
+  at::Tensor state = at::zeros({kRecurrences, kDim, kDim}, fp32);
+  at::Tensor boundaries = at::empty(
+      {kRecurrences, kChunks + 1, kDim, kDim}, fp32);
+  boundaries.select(1, 0).copy_(state);
+  at::Tensor z_all = at::empty(
+      {kRecurrences, kChunks, kChunk, kDim}, fp32);
+  at::Tensor R = at::empty({kRecurrences, kChunk, kDim}, fp32);
+  at::Tensor E = at::empty_like(R);
+  at::Tensor z = at::empty_like(R);
+  at::Tensor state_delta = at::empty_like(state);
+
+  for (int chunk_id = 0; chunk_id < kChunks; ++chunk_id) {
+    nanochat_kda_wy_backward_pack_c64_kernel<<<
+        (kVectorElements + kThreads - 1) / kThreads,
+        kThreads, 0, stream>>>(
+        qbar.data_ptr<float>(), khat.data_ptr<float>(),
+        prefix_g.data_ptr<float>(), R.data_ptr<float>(), E.data_ptr<float>(),
+        chunk_id);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    const at::Tensor U_chunk = U_all.select(1, chunk_id);
+    const at::Tensor W_chunk = W_all.select(1, chunk_id);
+    at::bmm_out(z, W_chunk, state);
+    nanochat_kda_wy_backward_sub_z_c64_kernel<<<
+        (kVectorElements + kThreads - 1) / kThreads,
+        kThreads, 0, stream>>>(
+        U.data_ptr<float>(), z.data_ptr<float>(), z.data_ptr<float>(),
+        chunk_id);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    z_all.select(1, chunk_id).copy_(z);
+    nanochat_kda_wy_backward_decay_state_c64_kernel<<<
+        (kStateElements + kThreads - 1) / kThreads,
+        kThreads, 0, stream>>>(
+        prefix_g.data_ptr<float>(), state.data_ptr<float>(), chunk_id);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    at::bmm_out(state_delta, E.transpose(1, 2), z);
+    nanochat_kda_wy_backward_add_c64_kernel<<<
+        (kStateElements + kThreads - 1) / kThreads,
+        kThreads, 0, stream>>>(
+        state.data_ptr<float>(), state_delta.data_ptr<float>(), kStateElements);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    boundaries.select(1, chunk_id + 1).copy_(state);
+  }
+
+  at::Tensor dO_packed = at::empty_like(qbar);
+  constexpr int kInputElements = kBatch * kLength * kHeads * kDim;
+  nanochat_kda_wy_backward_pack_grad_output_c64_kernel<<<
+      (kInputElements + kThreads - 1) / kThreads,
+      kThreads, 0, stream>>>(
+      reinterpret_cast<const __nv_bfloat16*>(
+          grad_output.data_ptr<at::BFloat16>()),
+      dO_packed.data_ptr<float>());
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  const at::Tensor dO_all = dO_packed.view(
+      {kRecurrences, kChunks, kChunk, kDim});
+
+  at::Tensor dqbar = at::empty_like(qbar);
+  at::Tensor dkhat = at::empty_like(khat);
+  at::Tensor dv_float = at::empty(
+      {kBatch, kLength, kHeads, kDim}, fp32);
+  at::Tensor dbeta = at::empty_like(beta);
+  at::Tensor dprefix = at::empty_like(prefix_g);
+  at::Tensor dstate_next = at::zeros_like(state);
+  at::Tensor dstate = at::empty_like(state);
+  at::Tensor dR = at::empty_like(R);
+  at::Tensor dA = at::empty({kRecurrences, kChunk, kChunk}, fp32);
+  at::Tensor dZ = at::empty_like(R);
+  at::Tensor dE = at::empty_like(E);
+  at::Tensor dD = at::empty({kRecurrences, kDim}, fp32);
+  at::Tensor dW = at::empty({kRecurrences, kChunk, kDim}, fp32);
+  at::Tensor dT = at::empty({kRecurrences, kChunk, kChunk}, fp32);
+  at::Tensor dP = at::empty_like(R);
+  at::Tensor dQ = at::empty_like(R);
+  at::Tensor dM = at::empty_like(dT);
+  at::Tensor temp_vector = at::empty_like(R);
+  at::Tensor temp_state = at::empty_like(state);
+  at::Tensor temp_matrix = at::empty_like(dT);
+
+  for (int chunk_id = kChunks; chunk_id-- > 0;) {
+    nanochat_kda_wy_backward_pack_c64_kernel<<<
+        (kVectorElements + kThreads - 1) / kThreads,
+        kThreads, 0, stream>>>(
+        qbar.data_ptr<float>(), khat.data_ptr<float>(),
+        prefix_g.data_ptr<float>(), R.data_ptr<float>(), E.data_ptr<float>(),
+        chunk_id);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    const at::Tensor H = boundaries.select(1, chunk_id);
+    const at::Tensor Z = z_all.select(1, chunk_id);
+    const at::Tensor dO = dO_all.select(1, chunk_id);
+    const at::Tensor A_chunk = A_all.select(1, chunk_id);
+    const at::Tensor T_chunk = T_all.select(1, chunk_id);
+    const at::Tensor P_chunk = P_all.select(1, chunk_id);
+    const at::Tensor Q_chunk = Q_all.select(1, chunk_id);
+    const at::Tensor W_chunk = W_all.select(1, chunk_id);
+
+    at::bmm_out(dstate, R.transpose(1, 2), dO);
+    nanochat_kda_wy_backward_boundary_terms_c64_kernel<<<
+        (kStateElements + kThreads - 1) / kThreads,
+        kThreads, 0, stream>>>(
+        prefix_g.data_ptr<float>(), H.data_ptr<float>(),
+        dstate_next.data_ptr<float>(), dstate.data_ptr<float>(),
+        dD.data_ptr<float>(), chunk_id);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    at::bmm_out(dR, dO, H.transpose(1, 2));
+    at::bmm_out(dA, dO, Z.transpose(1, 2));
+    at::bmm_out(dZ, A_chunk.transpose(1, 2), dO);
+    at::bmm_out(temp_vector, E, dstate_next);
+    nanochat_kda_wy_backward_add_c64_kernel<<<
+        (kVectorElements + kThreads - 1) / kThreads,
+        kThreads, 0, stream>>>(
+        dZ.data_ptr<float>(), temp_vector.data_ptr<float>(), kVectorElements);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    at::bmm_out(dE, Z, dstate_next.transpose(1, 2));
+    at::bmm_out(dW, dZ, H.transpose(1, 2));
+    nanochat_kda_wy_backward_negate_c64_kernel<<<
+        (kVectorElements + kThreads - 1) / kThreads,
+        kThreads, 0, stream>>>(dW.data_ptr<float>(), kVectorElements);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    at::bmm_out(temp_state, W_chunk.transpose(1, 2), dZ);
+    nanochat_kda_wy_backward_sub_c64_kernel<<<
+        (kStateElements + kThreads - 1) / kThreads,
+        kThreads, 0, stream>>>(
+        dstate.data_ptr<float>(), temp_state.data_ptr<float>(), kStateElements);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+
+    at::bmm_out(dT, dZ, P_chunk.transpose(1, 2));
+    at::bmm_out(temp_matrix, dW, Q_chunk.transpose(1, 2));
+    nanochat_kda_wy_backward_add_c64_kernel<<<
+        (kMatrixElements + kThreads - 1) / kThreads,
+        kThreads, 0, stream>>>(
+        dT.data_ptr<float>(), temp_matrix.data_ptr<float>(), kMatrixElements);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    at::bmm_out(dP, T_chunk.transpose(1, 2), dZ);
+    at::bmm_out(dQ, T_chunk.transpose(1, 2), dW);
+    at::bmm_out(temp_matrix, T_chunk.transpose(1, 2), dT);
+    at::bmm_out(dM, temp_matrix, T_chunk.transpose(1, 2));
+    nanochat_kda_wy_backward_negate_c64_kernel<<<
+        (kMatrixElements + kThreads - 1) / kThreads,
+        kThreads, 0, stream>>>(dM.data_ptr<float>(), kMatrixElements);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+
+    nanochat_kda_chunk_backward_kernel<<<
+        kRecurrences, kDim, 0, stream>>>(
+        reinterpret_cast<const __nv_bfloat16*>(v.data_ptr<at::BFloat16>()),
+        qbar.data_ptr<float>(), khat.data_ptr<float>(),
+        prefix_g.data_ptr<float>(), beta.data_ptr<float>(),
+        R.data_ptr<float>(), E.data_ptr<float>(),
+        dR.data_ptr<float>(), dA.data_ptr<float>(), dM.data_ptr<float>(),
+        dP.data_ptr<float>(), dQ.data_ptr<float>(), dE.data_ptr<float>(),
+        dD.data_ptr<float>(), dqbar.data_ptr<float>(), dkhat.data_ptr<float>(),
+        dv_float.data_ptr<float>(), dbeta.data_ptr<float>(),
+        dprefix.data_ptr<float>(), chunk_id);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    dstate_next.copy_(dstate);
+  }
+
+  nanochat_kda_wy_backward_prefix_reverse_c64_kernel<<<
+      kChunkRows, kDim, 0, stream>>>(dprefix.data_ptr<float>());
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+
+  at::Tensor dq = at::empty_like(q);
+  at::Tensor dk = at::empty_like(k);
+  at::Tensor dv = dv_float.to(v.scalar_type());
+  at::Tensor draw_gate = at::empty_like(raw_gate);
+  at::Tensor dbeta_logits = at::empty_like(beta_logits);
+  at::Tensor raw_gate_gradient = at::empty_like(prefix_g);
+  nanochat_kda_wy_backward_finalize_c64_kernel<<<
+      kChunkRows, kDim, 0, stream>>>(
+      reinterpret_cast<const __nv_bfloat16*>(
+          raw_gate.data_ptr<at::BFloat16>()),
+      reinterpret_cast<const __nv_bfloat16*>(
+          beta_logits.data_ptr<at::BFloat16>()),
+      A_log.data_ptr<float>(), dt_bias.data_ptr<float>(),
+      q_inverse.data_ptr<float>(), k_inverse.data_ptr<float>(),
+      qbar.data_ptr<float>(), khat.data_ptr<float>(), beta.data_ptr<float>(),
+      dqbar.data_ptr<float>(), dkhat.data_ptr<float>(), dbeta.data_ptr<float>(),
+      dprefix.data_ptr<float>(),
+      reinterpret_cast<__nv_bfloat16*>(dq.data_ptr<at::BFloat16>()),
+      reinterpret_cast<__nv_bfloat16*>(dk.data_ptr<at::BFloat16>()),
+      reinterpret_cast<__nv_bfloat16*>(draw_gate.data_ptr<at::BFloat16>()),
+      reinterpret_cast<__nv_bfloat16*>(
+          dbeta_logits.data_ptr<at::BFloat16>()),
+      raw_gate_gradient.data_ptr<float>(), lower_bound, scale);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+
+  at::Tensor dA_partial = at::empty({kRecurrences}, fp32);
+  at::Tensor ddt_partial = at::empty({kRecurrences, kDim}, fp32);
+  at::Tensor dA_log = at::empty_like(A_log);
+  at::Tensor ddt_bias = at::empty_like(dt_bias);
+  nanochat_kda_wy_backward_parameter_c64_kernel<<<
+      kRecurrences * kDim, 1, 0, stream>>>(
+      reinterpret_cast<const __nv_bfloat16*>(
+          raw_gate.data_ptr<at::BFloat16>()),
+      dt_bias.data_ptr<float>(), raw_gate_gradient.data_ptr<float>(),
+      dA_partial.data_ptr<float>(), ddt_partial.data_ptr<float>());
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  nanochat_kda_wy_backward_reduce_parameters_c64_kernel<<<
+      1, kDim * kHeads, 0, stream>>>(
+      dA_partial.data_ptr<float>(), ddt_partial.data_ptr<float>(),
+      dA_log.data_ptr<float>(), ddt_bias.data_ptr<float>());
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return {dq, dk, dv, draw_gate, dbeta_logits, dA_log, ddt_bias};
+}

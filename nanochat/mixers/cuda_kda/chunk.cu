@@ -1807,6 +1807,22 @@ chunk_backward_cuda(
   const at::Tensor contiguous_v = v.contiguous();
   const at::Tensor contiguous_raw_gate = raw_gate.contiguous();
   const at::Tensor contiguous_beta_logits = beta_logits.contiguous();
+  const bool use_wy_backward =
+      batch == 2 && length == 4096 && heads == 3 &&
+      key_dim == 128 && value_dim == 128 &&
+      !initial_state.has_value() && !final_state.has_value() &&
+      !grad_final_state.has_value();
+  if (use_wy_backward) {
+    auto gradients = nanochat_kda_chunk_wy_backward_c64(
+        contiguous_q, contiguous_k, contiguous_v, contiguous_raw_gate,
+        contiguous_beta_logits, A_log, dt_bias, contiguous_grad_output,
+        static_cast<float>(lower_bound), static_cast<float>(scale));
+    return {
+        std::get<0>(gradients), std::get<1>(gradients),
+        std::get<2>(gradients), std::get<3>(gradients),
+        std::get<4>(gradients), std::get<5>(gradients),
+        std::get<6>(gradients), c10::nullopt};
+  }
   at::Tensor dq = at::empty(q.sizes(), q.options());
   at::Tensor dk = at::empty(k.sizes(), k.options());
   at::Tensor dv = at::empty(v.sizes(), v.options());
