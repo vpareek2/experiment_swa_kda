@@ -23,7 +23,8 @@ constexpr int kLength = 4096;
 constexpr int kDim = 128;
 constexpr int kChunk = 64;
 constexpr int kChunks = kLength / kChunk;
-constexpr int kChunkRows = kBatch * kHeads * kChunks;
+constexpr int kRecurrences = kBatch * kHeads;
+constexpr int kChunkRows = kRecurrences * kChunks;
 
 __device__ __forceinline__ float wy_sigmoid(float x) {
   if (x >= 0.0f) {
@@ -269,6 +270,96 @@ __global__ void nanochat_kda_chunk_wy_forward_simt_c64_kernel(
   }
 }
 
+// F4 scan pack: form the two decayed boundary operands for one chunk in a
+// dense recurrence-major batch.  The subsequent four products are FP32 ATen
+// batched matrix multiplies; this project kernel keeps the scan dataflow and
+// profiler provenance explicit without changing the validated F0--F3 stages.
+__global__ void nanochat_kda_wy_scan_pack_c64_kernel(
+    const float* qbar,
+    const float* khat,
+    const float* prefix_g,
+    float* q_decay,
+    float* end_decay_k,
+    int chunk_id) {
+  const int index = blockIdx.x * blockDim.x + threadIdx.x;
+  const int elements = kRecurrences * kChunk * kDim;
+  if (index >= elements) {
+    return;
+  }
+  const int recurrence = index / (kChunk * kDim);
+  const int within = index - recurrence * kChunk * kDim;
+  const int row = within / kDim;
+  const int d = within - row * kDim;
+  const int n = recurrence * kChunks + chunk_id;
+  const int64_t source = chunk_vector_index(n, row, d);
+  const float g = prefix_g[source];
+  const float g_end =
+      prefix_g[chunk_vector_index(n, kChunk - 1, d)];
+  q_decay[index] = qbar[source] * expf(g);
+  end_decay_k[index] = khat[source] * expf(g_end - g);
+}
+
+// Complete Z = U-WH without an allocating tensor expression.
+__global__ void nanochat_kda_wy_scan_z_c64_kernel(
+    const float* U,
+    const float* wh,
+    float* z,
+    int chunk_id) {
+  const int index = blockIdx.x * blockDim.x + threadIdx.x;
+  const int elements = kRecurrences * kChunk * kDim;
+  if (index >= elements) {
+    return;
+  }
+  const int recurrence = index / (kChunk * kDim);
+  const int within = index - recurrence * kChunk * kDim;
+  const int n = recurrence * kChunks + chunk_id;
+  z[index] = U[static_cast<int64_t>(n) * kChunk * kDim + within] - wh[index];
+}
+
+// Write O = q_decay H + AZ in the frozen [B,T,H,V] layout and apply the
+// diagonal boundary decay to H in place before the E^T Z update.
+__global__ void nanochat_kda_wy_scan_output_decay_c64_kernel(
+    const float* qh,
+    const float* az,
+    const float* prefix_g,
+    float* state,
+    __nv_bfloat16* output,
+    int chunk_id) {
+  const int index = blockIdx.x * blockDim.x + threadIdx.x;
+  constexpr int kOutputElements = kRecurrences * kChunk * kDim;
+  constexpr int kStateElements = kRecurrences * kDim * kDim;
+  if (index < kOutputElements) {
+    const int recurrence = index / (kChunk * kDim);
+    const int within = index - recurrence * kChunk * kDim;
+    const int row = within / kDim;
+    const int value = within - row * kDim;
+    const int b = recurrence / kHeads;
+    const int h = recurrence - b * kHeads;
+    const int token = chunk_id * kChunk + row;
+    output[input_vector_index(b, token, h, value)] =
+        __float2bfloat16_rn(qh[index] + az[index]);
+  }
+  if (index < kStateElements) {
+    const int recurrence = index / (kDim * kDim);
+    const int within = index - recurrence * kDim * kDim;
+    const int key = within / kDim;
+    const int n = recurrence * kChunks + chunk_id;
+    const float g_end =
+        prefix_g[chunk_vector_index(n, kChunk - 1, key)];
+    state[index] *= expf(g_end);
+  }
+}
+
+__global__ void nanochat_kda_wy_scan_state_add_c64_kernel(
+    float* state,
+    const float* delta) {
+  const int index = blockIdx.x * blockDim.x + threadIdx.x;
+  constexpr int kElements = kRecurrences * kDim * kDim;
+  if (index < kElements) {
+    state[index] += delta[index];
+  }
+}
+
 }  // namespace
 
 at::Tensor nanochat_kda_chunk_wy_forward_c64(
@@ -332,12 +423,67 @@ at::Tensor nanochat_kda_chunk_wy_forward_c64(
   at::bmm_out(U, T, P);
   at::bmm_out(W, T, Q);
 
-  nanochat_kda_chunk_wy_forward_simt_c64_kernel<<<
-      kBatch * kHeads * kDim, kDim, 0, stream>>>(
-      qbar.data_ptr<float>(), khat.data_ptr<float>(),
-      prefix_g.data_ptr<float>(), A.data_ptr<float>(),
-      U.data_ptr<float>(), W.data_ptr<float>(),
-      reinterpret_cast<__nv_bfloat16*>(output.data_ptr<at::BFloat16>()));
-  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  // The six independent B/H recurrences are the batch dimension.  All CUDA
+  // storage is allocated once through PyTorch; select/transpose only create
+  // metadata views, and every matrix result is written with bmm_out.
+  at::Tensor state = at::zeros(
+      {kRecurrences, kDim, kDim}, fp32);
+  at::Tensor q_decay = at::empty(
+      {kRecurrences, kChunk, kDim}, fp32);
+  at::Tensor end_decay_k = at::empty_like(q_decay);
+  at::Tensor z = at::empty_like(q_decay);
+  at::Tensor qh = at::empty_like(q_decay);
+  at::Tensor az = at::empty_like(q_decay);
+  at::Tensor state_delta = at::empty_like(state);
+
+  const at::Tensor U_by_recurrence =
+      U.view({kRecurrences, kChunks, kChunk, kDim});
+  const at::Tensor W_by_recurrence =
+      W.view({kRecurrences, kChunks, kChunk, kDim});
+  const at::Tensor A_by_recurrence =
+      A.view({kRecurrences, kChunks, kChunk, kChunk});
+  constexpr int kVectorElements = kRecurrences * kChunk * kDim;
+  constexpr int kStateElements = kRecurrences * kDim * kDim;
+  constexpr int kThreads = 256;
+
+  for (int chunk_id = 0; chunk_id < kChunks; ++chunk_id) {
+    nanochat_kda_wy_scan_pack_c64_kernel<<<
+        (kVectorElements + kThreads - 1) / kThreads,
+        kThreads, 0, stream>>>(
+        qbar.data_ptr<float>(), khat.data_ptr<float>(),
+        prefix_g.data_ptr<float>(), q_decay.data_ptr<float>(),
+        end_decay_k.data_ptr<float>(), chunk_id);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+
+    const at::Tensor U_chunk = U_by_recurrence.select(1, chunk_id);
+    const at::Tensor W_chunk = W_by_recurrence.select(1, chunk_id);
+    const at::Tensor A_chunk = A_by_recurrence.select(1, chunk_id);
+    at::bmm_out(z, W_chunk, state);
+    nanochat_kda_wy_scan_z_c64_kernel<<<
+        (kVectorElements + kThreads - 1) / kThreads,
+        kThreads, 0, stream>>>(
+        U.data_ptr<float>(), z.data_ptr<float>(), z.data_ptr<float>(),
+        chunk_id);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+
+    at::bmm_out(qh, q_decay, state);
+    at::bmm_out(az, A_chunk, z);
+    nanochat_kda_wy_scan_output_decay_c64_kernel<<<
+        (kStateElements + kThreads - 1) / kThreads,
+        kThreads, 0, stream>>>(
+        qh.data_ptr<float>(), az.data_ptr<float>(),
+        prefix_g.data_ptr<float>(), state.data_ptr<float>(),
+        reinterpret_cast<__nv_bfloat16*>(output.data_ptr<at::BFloat16>()),
+        chunk_id);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+
+    const at::Tensor end_decay_k_transposed = end_decay_k.transpose(1, 2);
+    at::bmm_out(state_delta, end_decay_k_transposed, z);
+    nanochat_kda_wy_scan_state_add_c64_kernel<<<
+        (kStateElements + kThreads - 1) / kThreads,
+        kThreads, 0, stream>>>(
+        state.data_ptr<float>(), state_delta.data_ptr<float>());
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+  }
   return output;
 }
