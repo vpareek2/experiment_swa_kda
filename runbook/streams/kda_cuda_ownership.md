@@ -3717,3 +3717,50 @@ uv run --no-sync python scripts/kda_cuda_development.py \
 
 - Stop independent finalization scheduling and move to the dominant complete
   A/M pair VJP with a bounded algebraic/tiled strategy.
+
+## 2026-08-09 [agent] reject two-way scalar pair VJP
+
+**Context**
+
+- Attempt 48 splits each row/key's causal A/M source and target loops across
+  two 128-lane halves, then deterministically combines the three adjoints. The
+  existing ordered beta dot tail remains unchanged. This tests scalar temporal
+  parallelism without replaying attempt-39 ratio caching.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_048 \
+  --lane optimization <isolated artifact/cache arguments>
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_046 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_048 \
+  runs/kda-cuda-development/attempt-00048-two-way-time-level1
+```
+
+**Artifacts**
+
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00048-protected-checker`, manifest `8604eebf63a7c5ddb471559bfea2b1de8031a50db3104842d682ef4db7002c5d`.
+- Production comparison/repeat: `runs/kda-cuda-development/diagnostics/attempt-00048-two-way-time-gradient`, manifest `f9846a01e682e67b0e213d2a74c1f118a6d8a2b830062f002bd7442f9b7ee5e3`.
+- Preserved invalid artifact invocation: `runs/kda-cuda-development/diagnostics/attempt-00048-gradient-invalid-invocation-001`, manifest `11bdb3834a72a58fef4d7936c2d5ada6086a611f9c82d51adfd4ca4dfd10599a`.
+- Level 1: `runs/kda-cuda-development/attempt-00048-two-way-time-level1`, manifest `f4399a19f3518861d90cdc3de7f7692d29ebf81fd13f2c40bff1218815a064e7`.
+- Append-only attempt/reference index SHA-256: `4a6535bad56566e9e62c2e56188a610b9e941eae9f8594e41284a24d671fe89c`.
+
+**Result**
+
+- Pushed commit `d38eac1137a3f4eb8be6572f66d51d887edaea8d`
+  passed ownership 1.0 and runtime FLA freedom. It was deterministic and well
+  inside frozen tolerances; the largest gradient difference from attempt 46
+  was `3.638e-12`, while output, `dv`, and `dbeta` remained bitwise equal.
+- Level 1 rejected the intervention: T=4096 forward+backward changed
+  `24.281 -> 25.711 ms` (-5.89%), exceeding the frozen 5% important-regression
+  guard, with memory ratio 1.0. No sanitizer, Level 2, or retest ran.
+- Attempt 46 remains the accepted baseline. This result is neither
+  confirmation nor quality evidence.
+
+**Next**
+
+- Stop scalar pair scheduling/cache variants. The remaining credible strategy
+  is a bounded stable algebraic A/M VJP, designed to avoid attempt 29's 1,284
+  BMM calls and attempt 30's full-history memory expansion.
