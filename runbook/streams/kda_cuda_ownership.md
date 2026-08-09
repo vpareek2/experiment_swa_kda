@@ -4512,3 +4512,55 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_062 \
 - Preserve attempt 62 unchanged. Do not reuse U/W through global P/Q in this
   form. Return to attempt 53 and target the dominant pair-pack/accumulate path
   or a group-state formulation that removes work without replacement traffic.
+
+## 2026-08-09 [agent] reject warp-parallel normalization reductions
+
+**Context**
+
+- Attempt 63 replaces lane-zero serial 128-channel normalization sums with
+  deterministic four-warp reductions in forward preprocessing, backward
+  preprocessing, and backward normalization finalization. This changes FP32
+  association but leaves equations, configs, ownership, and storage unchanged.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_063 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact seeded B=2/H=3/T=4096 saved-gradient comparison plus repeat.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_053 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_063 \
+  runs/kda-cuda-development/attempt-00063-warpnorm-level1
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_063 \
+  push -u origin kda-cuda/wy-warp-norm-reduce-063
+```
+
+**Artifacts**
+
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00063-protected-checker`, manifest `e614edf5a0e4c1e51bc2b6b1878e9ffa6b240ddd76bd1c0a195f78eaddac4044`.
+- Production comparison/repeat: `runs/kda-cuda-development/diagnostics/attempt-00063-warpnorm-gradient`, manifest `f26d4023b82cee857989c358a9d1529c0734fae06099284db79d29c1709628d3`.
+- Level 1: `runs/kda-cuda-development/attempt-00063-warpnorm-level1`, manifest `3acfdf2b744bdc86e5cf61ee8e9a2f3aeec138b2fb435577f7b22f3d0e158088`.
+- Append-only attempt/reference index SHA-256: `815712e577b29690d8c5e95931cc56852746fc760fac005c86efe17f6068492e`.
+
+**Result**
+
+- Pushed commit `c753cba267eaf6b4bc0bc39374428eb24df4a995`
+  passed protected ownership/runtime gates and the production frozen-tolerance
+  gate. Maximum output difference was `1.220703125e-4`; the largest gradient
+  difference was `7.276e-12`; the repeat was bitwise deterministic.
+- Level 1 rejected the intervention: T=4096 forward improved 1.61%, but
+  forward+backward changed only `21.658 -> 21.564 ms` (+0.43%). T=256
+  forward+backward regressed 6.67%, exceeding the 5% guard. Peak allocation
+  was unchanged.
+- No sanitizers, Level 2, profile, confirmation, or retest ran. Attempt 53
+  remains the accepted development baseline; this is not quality or
+  statistically confirmed evidence.
+
+**Next**
+
+- Preserve attempt 63 unchanged. Keep serial normalization reductions in the
+  accepted baseline. Continue from attempt 53 with a larger structural change
+  to pair-pack/accumulate or recurrent group-state work rather than reduction
+  scheduling alone.
