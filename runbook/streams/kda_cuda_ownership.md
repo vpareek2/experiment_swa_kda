@@ -4698,3 +4698,56 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_065 \
   BF16 operand rounding and FP32 accumulation. Treat pair-pack/accumulate as
   the next backward target; do not replay rejected pair-width or global
   transform-reuse variants.
+
+## 2026-08-09 [agent] reject separate WMMA decay precompute
+
+**Context**
+
+- Attempt 66 starts from accepted attempt 65 and computes the value-independent
+  `q*exp(G)` and `k*exp(G_end-G)` WMMA operands once into dead P/Q storage
+  after U/W are formed. This removes four-CTA redundant exponentials without
+  adding an allocation or changing the explicit BF16 WMMA casts.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_validation_066 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact seeded B=2/H=3/T=4096 saved-gradient comparison plus repeat.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_065 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_066 \
+  runs/kda-cuda-development/attempt-00066-precompute-decay-level1
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_066 \
+  push -u origin kda-cuda/wy-precompute-wmma-decay-066
+```
+
+**Artifacts**
+
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00066-protected-checker`, manifest `46d209cfcc89bc4030a8daf444812dc02d1c901dd505b0e10abd2a298e636f3d`.
+- Production comparison/repeat: `runs/kda-cuda-development/diagnostics/attempt-00066-precompute-decay-gradient`, manifest `ed90089e550d9d91e76f533307ce2a5fbb9c7031cedd10cb5d43e62836d5eae1`.
+- Preserved invalid candidate-local uv invocation: `runs/kda-cuda-development/diagnostics/attempt-00066-gradient-invalid-001`, manifest `553855be3e164f244a9ef66377fdef3ddc6b3b3bc5c6e3110ac7df79be0d56cd`. It failed before importing Torch or starting GPU work; the ignored empty candidate `.venv` remains preserved.
+- Level 1: `runs/kda-cuda-development/attempt-00066-precompute-decay-level1`, manifest `bf68dc3e04626e60435697fa50f624f9f377540d14a78063a7595fa8a7e60f2c`.
+- Append-only attempt/reference index SHA-256: `a3fa840a229e8c7ac497a87bb86498a882d24a9ce0ac8bcd8b2706193d4106b1`.
+
+**Result**
+
+- Pushed commit `b420cb1291e7010b6079d80453d1e4e747f2cd31`
+  passed ownership 1.0, protected runtime/profile audit, and runtime FLA
+  freedom. Production output, all seven gradients, and the independent repeat
+  are bitwise identical to attempt 65; peak allocation is unchanged.
+- Level 1 rejected the intervention: T=4096 forward+backward changed
+  `20.639 -> 20.683 ms` (-0.21%), forward-only regressed 0.25%, and T=256
+  forward+backward regressed 6.86%, exceeding the 5% guard. The separate
+  whole-history pass adds enough traffic to erase the redundant-exponential
+  saving.
+- No sanitizers, Level 2, profile, confirmation, or retest ran. Attempt 65
+  remains accepted. This is neither quality nor statistically confirmed
+  evidence.
+
+**Next**
+
+- Preserve attempt 66 unchanged. Do not materialize whole-history decay
+  operands. Return to attempt 65 and target work entirely inside the persistent
+  scan, or shift to the measured backward pair-pack/accumulate path.
