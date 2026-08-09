@@ -67,11 +67,91 @@ __device__ __forceinline__ float preactivation_gradient(
   return __bfloat162float(grad_output[output_index]) * silu_derivative;
 }
 
+constexpr int64_t kHotConvolutionWidth = 4;
+constexpr int64_t kDweightTokenTile = 256;
+
+__global__ void nanochat_kda_causal_convolution_preactivation_gradient_kernel(
+    const __nv_bfloat16* x,
+    const __nv_bfloat16* weight,
+    const __nv_bfloat16* grad_output,
+    float* dz,
+    int64_t length,
+    int64_t channels,
+    int64_t element_count) {
+  const int64_t index = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (index >= element_count) {
+    return;
+  }
+  const int64_t c = index % channels;
+  const int64_t token_index = (index / channels) % length;
+  const int64_t b = index / (length * channels);
+  dz[index] = preactivation_gradient(
+      x, weight, nullptr, grad_output, b, token_index, c, length, channels,
+      kHotConvolutionWidth);
+}
+
+__global__ void nanochat_kda_causal_convolution_dweight_partial_kernel(
+    const __nv_bfloat16* x,
+    const float* dz,
+    float* partials,
+    int64_t length,
+    int64_t channels,
+    int64_t flattened_tokens,
+    int64_t partial_elements) {
+  const int64_t index = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (index >= partial_elements) {
+    return;
+  }
+  const int64_t tap = index % kHotConvolutionWidth;
+  const int64_t c = (index / kHotConvolutionWidth) % channels;
+  const int64_t tile = index / (channels * kHotConvolutionWidth);
+  const int64_t first_token = tile * kDweightTokenTile;
+  const int64_t tile_limit = first_token + kDweightTokenTile;
+  const int64_t last_token =
+      tile_limit < flattened_tokens ? tile_limit : flattened_tokens;
+
+  float gradient = 0.0f;
+  for (int64_t flattened_token = first_token;
+       flattened_token < last_token; ++flattened_token) {
+    const int64_t token_index = flattened_token % length;
+    const int64_t source_index =
+        token_index + tap - (kHotConvolutionWidth - 1);
+    if (source_index >= 0) {
+      const int64_t b = flattened_token / length;
+      const float source = __bfloat162float(
+          x[(b * length + source_index) * channels + c]);
+      gradient += dz[flattened_token * channels + c] * source;
+    }
+  }
+  partials[index] = gradient;
+}
+
+__global__ void nanochat_kda_causal_convolution_dweight_finalize_kernel(
+    const float* partials,
+    __nv_bfloat16* dweight,
+    int64_t channels,
+    int64_t tile_count,
+    int64_t weight_elements) {
+  const int64_t index = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (index >= weight_elements) {
+    return;
+  }
+  const int64_t tap = index % kHotConvolutionWidth;
+  const int64_t c = index / kHotConvolutionWidth;
+  float gradient = 0.0f;
+  for (int64_t tile = 0; tile < tile_count; ++tile) {
+    gradient +=
+        partials[(tile * channels + c) * kHotConvolutionWidth + tap];
+  }
+  dweight[index] = __float2bfloat16_rn(gradient);
+}
+
 __global__ void nanochat_kda_causal_convolution_backward_kernel(
     const __nv_bfloat16* x,
     const __nv_bfloat16* weight,
     const __nv_bfloat16* initial_state,
     const __nv_bfloat16* grad_output,
+    const float* factored_dz,
     const __nv_bfloat16* grad_final_state,
     __nv_bfloat16* dx,
     __nv_bfloat16* dweight,
@@ -100,10 +180,14 @@ __global__ void nanochat_kda_causal_convolution_backward_kernel(
     for (int64_t token_index = input_index; token_index < last_token;
          ++token_index) {
       const int64_t tap = input_index - token_index + width - 1;
-      gradient += preactivation_gradient(
-          x, weight, initial_state, grad_output, b, token_index, c,
-          length, channels, width) *
-          __bfloat162float(weight[c * width + tap]);
+      const float dz_value =
+          factored_dz != nullptr
+              ? factored_dz[(b * length + token_index) * channels + c]
+              : preactivation_gradient(
+                    x, weight, initial_state, grad_output, b, token_index, c,
+                    length, channels, width);
+      gradient +=
+          dz_value * __bfloat162float(weight[c * width + tap]);
     }
     if (grad_final_state != nullptr) {
       const int64_t final_index = input_index - length + width;
@@ -242,28 +326,131 @@ causal_convolution_backward_cuda(
         dinitial_state->data_ptr<at::BFloat16>());
     state_elements = batch * channels * width;
   }
-  const int64_t total_elements = dx_elements + weight_elements + state_elements;
+
+  const int threads = 256;
+  const bool use_factored_width_four_path =
+      width == kHotConvolutionWidth && !initial_state.has_value() &&
+      !grad_final_state.has_value();
+  if (use_factored_width_four_path) {
+    at::Tensor dz = at::empty(x.sizes(), x.options().dtype(at::kFloat));
+    const int64_t flattened_tokens = batch * length;
+    const int64_t tile_count =
+        (flattened_tokens + kDweightTokenTile - 1) / kDweightTokenTile;
+    at::Tensor dweight_partials = at::empty(
+        {tile_count, channels, kHotConvolutionWidth},
+        x.options().dtype(at::kFloat));
+
+    if (dx_elements > 0) {
+      const int blocks =
+          static_cast<int>((dx_elements + threads - 1) / threads);
+      nanochat_kda_causal_convolution_preactivation_gradient_kernel
+          <<<blocks, threads, 0,
+             at::cuda::getCurrentCUDAStream(x.get_device())>>>(
+              reinterpret_cast<const __nv_bfloat16*>(
+                  x.data_ptr<at::BFloat16>()),
+              reinterpret_cast<const __nv_bfloat16*>(
+                  weight.data_ptr<at::BFloat16>()),
+              reinterpret_cast<const __nv_bfloat16*>(
+                  grad_output.data_ptr<at::BFloat16>()),
+              dz.data_ptr<float>(),
+              length,
+              channels,
+              dx_elements);
+      C10_CUDA_KERNEL_LAUNCH_CHECK();
+
+      nanochat_kda_causal_convolution_backward_kernel
+          <<<blocks, threads, 0,
+             at::cuda::getCurrentCUDAStream(x.get_device())>>>(
+              reinterpret_cast<const __nv_bfloat16*>(
+                  x.data_ptr<at::BFloat16>()),
+              reinterpret_cast<const __nv_bfloat16*>(
+                  weight.data_ptr<at::BFloat16>()),
+              nullptr,
+              reinterpret_cast<const __nv_bfloat16*>(
+                  grad_output.data_ptr<at::BFloat16>()),
+              dz.data_ptr<float>(),
+              nullptr,
+              reinterpret_cast<__nv_bfloat16*>(
+                  dx.data_ptr<at::BFloat16>()),
+              reinterpret_cast<__nv_bfloat16*>(
+                  dweight.data_ptr<at::BFloat16>()),
+              nullptr,
+              batch,
+              length,
+              channels,
+              width,
+              dx_elements,
+              weight_elements,
+              0,
+              dx_elements);
+      C10_CUDA_KERNEL_LAUNCH_CHECK();
+    }
+
+    const int64_t partial_elements =
+        tile_count * channels * kHotConvolutionWidth;
+    if (partial_elements > 0) {
+      const int partial_blocks =
+          static_cast<int>((partial_elements + threads - 1) / threads);
+      nanochat_kda_causal_convolution_dweight_partial_kernel
+          <<<partial_blocks, threads, 0,
+             at::cuda::getCurrentCUDAStream(x.get_device())>>>(
+              reinterpret_cast<const __nv_bfloat16*>(
+                  x.data_ptr<at::BFloat16>()),
+              dz.data_ptr<float>(),
+              dweight_partials.data_ptr<float>(),
+              length,
+              channels,
+              flattened_tokens,
+              partial_elements);
+      C10_CUDA_KERNEL_LAUNCH_CHECK();
+    }
+    if (weight_elements > 0) {
+      const int finalize_blocks =
+          static_cast<int>((weight_elements + threads - 1) / threads);
+      nanochat_kda_causal_convolution_dweight_finalize_kernel
+          <<<finalize_blocks, threads, 0,
+             at::cuda::getCurrentCUDAStream(x.get_device())>>>(
+              dweight_partials.data_ptr<float>(),
+              reinterpret_cast<__nv_bfloat16*>(
+                  dweight.data_ptr<at::BFloat16>()),
+              channels,
+              tile_count,
+              weight_elements);
+      C10_CUDA_KERNEL_LAUNCH_CHECK();
+    }
+    return {dx, dweight, dinitial_state};
+  }
+
+  const int64_t total_elements =
+      dx_elements + weight_elements + state_elements;
   if (total_elements > 0) {
-    const int threads = 256;
-    const int blocks = static_cast<int>((total_elements + threads - 1) / threads);
-    nanochat_kda_causal_convolution_backward_kernel<<<blocks, threads, 0,
-        at::cuda::getCurrentCUDAStream(x.get_device())>>>(
-        reinterpret_cast<const __nv_bfloat16*>(x.data_ptr<at::BFloat16>()),
-        reinterpret_cast<const __nv_bfloat16*>(weight.data_ptr<at::BFloat16>()),
-        initial_pointer,
-        reinterpret_cast<const __nv_bfloat16*>(grad_output.data_ptr<at::BFloat16>()),
-        grad_final_pointer,
-        reinterpret_cast<__nv_bfloat16*>(dx.data_ptr<at::BFloat16>()),
-        reinterpret_cast<__nv_bfloat16*>(dweight.data_ptr<at::BFloat16>()),
-        dinitial_pointer,
-        batch,
-        length,
-        channels,
-        width,
-        dx_elements,
-        weight_elements,
-        state_elements,
-        total_elements);
+    const int blocks =
+        static_cast<int>((total_elements + threads - 1) / threads);
+    nanochat_kda_causal_convolution_backward_kernel
+        <<<blocks, threads, 0,
+           at::cuda::getCurrentCUDAStream(x.get_device())>>>(
+            reinterpret_cast<const __nv_bfloat16*>(
+                x.data_ptr<at::BFloat16>()),
+            reinterpret_cast<const __nv_bfloat16*>(
+                weight.data_ptr<at::BFloat16>()),
+            initial_pointer,
+            reinterpret_cast<const __nv_bfloat16*>(
+                grad_output.data_ptr<at::BFloat16>()),
+            nullptr,
+            grad_final_pointer,
+            reinterpret_cast<__nv_bfloat16*>(
+                dx.data_ptr<at::BFloat16>()),
+            reinterpret_cast<__nv_bfloat16*>(
+                dweight.data_ptr<at::BFloat16>()),
+            dinitial_pointer,
+            batch,
+            length,
+            channels,
+            width,
+            dx_elements,
+            weight_elements,
+            state_elements,
+            total_elements);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
   }
   return {dx, dweight, dinitial_state};
