@@ -6306,3 +6306,98 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_090 \
   global-memory traffic in addition to the conversions; do not compose attempt
   90 into a baseline unless the larger fused axis independently clears the
   frozen gates.
+
+## 2026-08-09 [agent] accept persistent reverse group recurrence as development baseline
+
+**Context**
+
+- Attempt 91 starts from accepted attempt 84 and replaces the eight sequential
+  reverse-chunk launch chains inside each backward group. One 256-thread CTA
+  owns sixteen value columns for one recurrence, keeps the state adjoint in
+  shared memory across all eight reverse chunks, and evaluates both dependent
+  products with BF16 WMMA operands and FP32 accumulation.
+- The intervention replaces sixteen FP32 BMMs plus prepare/add/boundary/subtract/
+  finish launches per group with one persistent reverse kernel. A second
+  deterministic kernel reconstructs `dD` from the exact incoming-state history;
+  no atomics, full token-state history, wider group, runtime FLA code, or
+  rejected attempt-90 composition is used.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --config configs/research/kda_cuda_ownership.toml \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_091 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact seed-4101 B=2/H=3/T=4096 production comparison against attempt 84 and
+# one independent fresh-extension-cache repeat.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_084 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_091 \
+  runs/kda-cuda-development/attempt-00091-persistent-reverse-level1 \
+  --level2-order baseline-first
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_validation_091 \
+  --lane optimization --sanitizers <isolated artifact/cache arguments>
+# Executed the saved baseline-first Level-2 commands exactly once, followed by
+# one bounded two-iteration production Nsight Systems profile.
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_091 \
+  push -u origin kda-cuda/wy-persistent-reverse-group-091
+```
+
+**Artifacts**
+
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00091-persistent-reverse-protected-checker`, manifest `241fd8fad2720bf1dc2ae0de332a604748e2562f90fc964b9a4e7ba623292274`.
+- Production comparison/repeat: `runs/kda-cuda-development/diagnostics/attempt-00091-persistent-reverse-gradient`, manifest `03605d1c0318a32193346be7d506a9b188e065b205b1cd175705e9cc816f0ece`.
+- Level 1: `runs/kda-cuda-development/attempt-00091-persistent-reverse-level1`, manifest `f4f10a3f613da08cbc5d5e4da416f5425f47a83c6ac2d4ad5835f1ca90d7b2a2`.
+- Full sanitizer validation: `runs/kda-cuda-development/validations/validation-00023-persistent-reverse`, manifest `3d1293ea30db09e0c72b47106ab872425b54507dfd1175bb67e121de2726ea54`.
+- Level 2: `runs/kda-cuda-development/attempt-00091-persistent-reverse-level2`, manifest `a28971c24570062ded2fbd8586c8da9a20e15d55cc011e8605e8d219f9e26bbd`.
+- Production profile: `runs/kda-cuda-development/diagnostics/attempt-00091-production-profile`, manifest `d73306f82e09475076708b301decd767834ed2ec980276998e8e7e736480c341`.
+- Invalid pre-launch profile artifact: `runs/kda-cuda-development/diagnostics/attempt-00091-production-profile-invalid-cwd-001`, manifest `e35b7d60b249231be8630b8ecf0e5e0bdb138dc88c28f3962a441d7bf49750e9`.
+- Development-baseline manifest: `runs/kda-cuda-development/baseline/41858b66f7.json`, SHA-256 `9c0855dc8fa2c714439cc5dd2d1b57a05ca4d4a3eb9a26aaf1692b6998e43c85`.
+- Append-only attempt/reference index SHA-256: `9bf32f24181bf6719e71d39e67d1d152211bb975570fcbea2d5ac05f5e41e1a6`.
+
+**Result**
+
+- Pushed commit `41858b66f7cf982007bdf11918efa2b8d99113fe` passed ownership 1.0,
+  the full protected runtime/profile audit, runtime FLA freedom, and all four
+  sanitizers with zero errors or hazards. Output and `dq` are bitwise equal to
+  attempt 84; the maximum gradient delta is `3.638e-12`, all tensors pass the
+  frozen tolerance, and the independent repeat is bitwise exact.
+- Level 1 advanced decisively: T=4096 forward+backward improved
+  `15.0520 -> 13.5989 ms` (9.65%), T=1024 forward+backward improved 3.58%,
+  and T=256 forward+backward improved 0.85%. Candidate T=4096 peak allocation
+  is 202,770,944 versus 203,950,592 bytes (ratio 0.99422); every guard passed.
+- The single baseline-first Level-2 pair measured baseline
+  `[31833, 31904, 31680, 31672, 31912]` tok/s, median 31,833, and candidate
+  `[32994, 32949, 32827, 32682, 32914]` tok/s, median 32,914. The development
+  gain is 3.40%, peak memory is identical at 5,508.533 MiB, and candidate
+  throughput is 75.35% of the fixed 43,680 tok/s reference.
+- Across two profiled iterations, generic GEMM instances fell from 516 to 260,
+  exactly 128 removed per iteration. The new persistent reverse kernel costs
+  0.769 ms/iteration and deterministic `dD` costs 0.072 ms; the estimated net
+  targeted saving is 0.603 ms/iteration. Remaining named kernels are forward
+  WMMA at 2.187 ms, group-boundary WMMA at 1.310 ms, pair WMMA at 0.988 ms,
+  and ordered pair accumulation at 0.582 ms per iteration.
+- The first profile command used a candidate-relative `mkdir` with an absolute
+  coordinator log target and failed before profiler/GPU work with
+  `/bin/bash: .../profile.log: No such file or directory`. No raw log could be
+  created; the exact failure and limitation are preserved. The first offline
+  stats packaging chain later emitted valid `stats.log` but guessed the wrong
+  generated CSV name and ended with `cp: cannot stat ...trace_cuda_gpu_kern_sum.csv`.
+  A bounded offline stats rerun extracted the CSV from the same immutable trace;
+  it launched no GPU work and the failed output was not treated as evidence.
+- Attempt 91 is the new accepted development baseline only. The official
+  retained milestone remains `4d1a3b231da2c99882324efbda5306a1815e21c7`.
+  No confirmation or LM-quality evaluation ran, and this is not statistically
+  confirmed evidence.
+
+**Next**
+
+- Continue from attempt 91 while preserving the persistent reverse recurrence.
+  The largest measured opportunities are forward WMMA, group-boundary WMMA,
+  and the pair-WMMA/ordered-accumulation path. Favor another structural fusion
+  or producer/consumer layout that eliminates launches/global traffic; do not
+  replay isolated prepacking, barrier sharing, group widening, or copy-only
+  variants. The fixed reference remains 43,680 tok/s and the objective remains
+  at least 45,000 tok/s.
