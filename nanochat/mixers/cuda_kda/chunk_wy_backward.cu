@@ -173,7 +173,8 @@ __global__ void nanochat_kda_wy_backward_transform_pair_c64_kernel(
     const float* left_source,
     const float* khat,
     const float* prefix_g,
-    float* left,
+    float* q_left,
+    float* k_left,
     float* right,
     int target_start,
     int source_start) {
@@ -193,7 +194,9 @@ __global__ void nanochat_kda_wy_backward_transform_pair_c64_kernel(
   const float center = prefix_g[chunk_vector_index(n, center_row, d)];
   const int64_t target = chunk_vector_index(n, target_row, d);
   const int64_t source = chunk_vector_index(n, source_row, d);
-  left[index] = left_source[target] * expf(prefix_g[target] - center);
+  const float target_factor = expf(prefix_g[target] - center);
+  q_left[index] = left_source[target] * target_factor;
+  k_left[index] = khat[target] * target_factor;
   right[index] = khat[source] * expf(center - prefix_g[source]);
 }
 
@@ -861,9 +864,13 @@ nanochat_kda_chunk_wy_backward_c64(
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   constexpr int kTileElements = kChunkRows * kMatrixTile * kDim;
   at::Tensor P_flat = P.view({-1});
-  at::Tensor tile_left = P_flat.narrow(0, 0, kTileElements).view(
+  at::Tensor tile_q_left = P_flat.narrow(0, 0, kTileElements).view(
       {kChunkRows, kMatrixTile, kDim});
-  at::Tensor tile_right = P_flat.narrow(0, kTileElements, kTileElements).view(
+  at::Tensor tile_k_left = P_flat.narrow(
+      0, kTileElements, kTileElements).view(
+      {kChunkRows, kMatrixTile, kDim});
+  at::Tensor tile_right = P_flat.narrow(
+      0, 2 * kTileElements, kTileElements).view(
       {kChunkRows, kMatrixTile, kDim});
   for (int target_start = 0; target_start < kChunk;
        target_start += kMatrixTile) {
@@ -873,21 +880,16 @@ nanochat_kda_chunk_wy_backward_c64(
           (kTileElements + kThreads - 1) / kThreads,
           kThreads, 0, stream>>>(
           qbar.data_ptr<float>(), khat.data_ptr<float>(),
-          prefix_g.data_ptr<float>(), tile_left.data_ptr<float>(),
+          prefix_g.data_ptr<float>(), tile_q_left.data_ptr<float>(),
+          tile_k_left.data_ptr<float>(),
           tile_right.data_ptr<float>(), target_start, source_start);
       C10_CUDA_KERNEL_LAUNCH_CHECK();
       at::Tensor A_tile = A.narrow(1, target_start, kMatrixTile)
           .narrow(2, source_start, kMatrixTile);
-      at::bmm_out(A_tile, tile_left, tile_right.transpose(1, 2));
-      nanochat_kda_wy_backward_transform_left_k_c64_kernel<<<
-          (kTileElements + kThreads - 1) / kThreads,
-          kThreads, 0, stream>>>(
-          khat.data_ptr<float>(), prefix_g.data_ptr<float>(),
-          tile_left.data_ptr<float>(), target_start, source_start);
-      C10_CUDA_KERNEL_LAUNCH_CHECK();
+      at::bmm_out(A_tile, tile_q_left, tile_right.transpose(1, 2));
       at::Tensor M_tile = M.narrow(1, target_start, kMatrixTile)
           .narrow(2, source_start, kMatrixTile);
-      at::bmm_out(M_tile, tile_left, tile_right.transpose(1, 2));
+      at::bmm_out(M_tile, tile_k_left, tile_right.transpose(1, 2));
     }
   }
   constexpr int kAllMatrixElements = kChunkRows * kChunk * kChunk;
