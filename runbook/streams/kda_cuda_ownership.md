@@ -5409,3 +5409,53 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_077 \
   the remaining reverse-loop add/sub launches, pair pack/accumulate traffic,
   group-boundary WMMA, or forward WMMA. The campaign remains well below the
   fixed 43,680 tok/s reference and the >=45k objective.
+
+## 2026-08-09 [agent] preserve sub-threshold reverse arithmetic fusion
+
+**Context**
+
+- Attempt 78 starts from accepted attempt 77. It folds `dZ += temp_vector`
+  into the existing boundary-term kernel and folds `dstate -= temp_state` into
+  the reverse finish-transfer kernel. This removes two launches per reverse
+  chunk and one state-buffer read/write round trip without changing arithmetic
+  order, equations, BMM geometry, history, or allocation.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_078 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact production-shape gradient capture and fresh-cache deterministic repeat.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_077 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_078 \
+  runs/kda-cuda-development/attempt-00078-reverse-arithmetic-level1
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_078 \
+  push -u origin kda-cuda/wy-fused-reverse-arithmetic-078
+```
+
+**Artifacts**
+
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00078-reverse-arithmetic-protected-checker`, manifest `60fe7c30c80dd3e1d73c4d305b6cfd7a6959938599bdc6d87b304922ee48b516`.
+- Production comparison/repeat: `runs/kda-cuda-development/diagnostics/attempt-00078-reverse-arithmetic-gradient`, manifest `536273e66c2b77fb696ae0fdb7e037c22f58e6e17d22f66215d4cd7034544028`.
+- Level 1: `runs/kda-cuda-development/attempt-00078-reverse-arithmetic-level1`, manifest `19717d22d3473301d13757f0c531213f65e1f5d8dc2e47d9dcd0d719a26784f8`.
+- Append-only attempt/reference index SHA-256: `9f0b98e57af70297f3a57789eb44adc965881032b864b6481967e6c16434b708`.
+
+**Result**
+
+- Pushed commit `1d255e75088c3bbc435949dc3df8a1c4f9fdaf2f`
+  passed ownership 1.0, runtime/profile audit, runtime FLA freedom, bitwise
+  output/all-gradient correctness, and a bitwise fresh-cache repeat.
+- Level 1 measured a real but sub-threshold T=4096 forward+backward gain:
+  `17.509 -> 17.243 ms` (1.52%), below the frozen 3% advancement threshold.
+  Allocation is unchanged and every per-length regression guard passed.
+- No sanitizers, Level 2, profile, confirmation, or retest ran. Attempt 77
+  remains accepted; this is neither quality nor statistically confirmed
+  evidence.
+
+**Next**
+
+- Preserve attempt 78 unchanged. Continue from attempt 77; the arithmetic
+  fusion may be reconsidered only as part of a separately gated larger
+  reverse-loop fusion, not replayed alone.
