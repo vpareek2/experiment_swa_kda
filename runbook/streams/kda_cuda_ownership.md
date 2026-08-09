@@ -6163,3 +6163,80 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_088 \
   WMMA, while BF16 storage can halve its shared footprint and remove repeated
   state casts. Keep the frozen forward/gradient tolerances unchanged and reject
   immediately if the inter-chunk decay/update rounding exceeds them.
+
+## 2026-08-09 [agent] preserve correct BF16 state after sub-threshold Level 2
+
+**Context**
+
+- Attempt 89 starts from attempt 88 and changes only nine lines in
+  `nanochat/mixers/cuda_kda/chunk_wy_forward.cu`: the persistent scan stores
+  inter-chunk state in BF16, loads it directly for both state-consuming WMMAs,
+  and explicitly rounds the FP32 chunk-boundary update back to BF16.
+- This is the strongest directly transferable mechanism from the offline
+  FlashKDA forward path. It halves shared state storage while preserving FP32
+  WMMA accumulation and all frozen equations/tolerances.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_089 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact seed-4101 production comparison/repeat against attempt 84.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_084 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_089 \
+  runs/kda-cuda-development/attempt-00089-bf16-state-level1 \
+  --level2-order baseline-first
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_validation_089 \
+  --lane optimization --sanitizers <isolated artifact/cache arguments>
+# Executed the saved baseline-first Level-2 pair exactly once, then one bounded
+# two-iteration production profile.
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_089 \
+  push -u origin kda-cuda/wy-bf16-interchunk-state-089
+```
+
+**Artifacts**
+
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00089-bf16-state-protected-checker`, manifest `545d022af0f65c27e6904c6979392870d5a18efab5ad52cc28321f9a8ee3d6d7`.
+- Production comparison/repeat: `runs/kda-cuda-development/diagnostics/attempt-00089-bf16-state-gradient`, manifest `e8a9a950829ad4ce577e896cbb7a637013aca1768df71643e7b3929ae2dcd684`.
+- Level 1: `runs/kda-cuda-development/attempt-00089-bf16-state-level1`, manifest `a282e372a16aa35c80ea2468fc9ce35f163236b2e9a6ccd36a3bd5a6f998af03`.
+- Full sanitizer validation: `runs/kda-cuda-development/validations/validation-00022-bf16-state`, manifest `24b6e1e5f34ee9ecd27b8f5de8c6314d814e0d91811f14a61299e452eaf8a1e0`.
+- Level 2: `runs/kda-cuda-development/attempt-00089-bf16-state-level2`, manifest `a1642bb9a4fff9a52e5c1b683fb605bc071f25016ef977c5345966a169d4785f`.
+- Production profile: `runs/kda-cuda-development/diagnostics/attempt-00089-production-profile`, manifest `257e9657d9c19171aac6c3ece8a303c700f7310da5c1e7faae7bcc0fd8044b24`.
+- Append-only attempt/reference index SHA-256: `dcca263ccc22878fd5d98f75b3549dfef22aa0513c1f25de0d27a3d9e339072a`.
+
+**Result**
+
+- Pushed commit `5feae8573343c69d41bc7c2eeabb166244d414e6` passed ownership 1.0,
+  protected runtime/profile audit, runtime FLA freedom, and all four sanitizers
+  with zero errors/hazards. Production output and `dq` remain bitwise equal to
+  attempt 84; maximum gradient delta is `2.056e-9`, all tensors pass frozen
+  tolerances, and the fresh-cache repeat is bitwise exact.
+- Level 1 advanced: T=4096 forward+backward improved
+  `14.995 -> 14.421 ms` (3.82%) and forward improved 2.08%, with memory ratio
+  1.0 and every guard true. T=256 forward+backward regressed 4.25%, still
+  within the frozen 5% guard.
+- The single baseline-first Level-2 pair measured baseline
+  `[31696, 31697, 31656, 31480, 31621]` tok/s, median 31,656, and candidate
+  `[31856, 31862, 31918, 31591, 31798]` tok/s, median 31,856. The 0.63%
+  development improvement is sub-threshold; candidate peak is 5,507.033 MiB
+  versus 5,508.533 MiB, and candidate throughput is 72.93% of the fixed
+  43,680 tok/s external reference.
+- The profile measures the forward scan at 1.939 versus 2.410 ms/iteration,
+  direct packing at 0.312 ms, and build+solve at 0.704 versus 0.962 ms. Their
+  estimated targeted net saving is 0.417 ms/iteration. Remaining backward
+  targets are group-boundary WMMA at 1.417 ms and pair-WMMA plus ordered
+  accumulation at 1.530 ms.
+- Attempt 89 is preserved but does not replace attempt 84 as the development
+  baseline. The official retained milestone remains
+  `4d1a3b231da2c99882324efbda5306a1815e21c7`. No confirmation or LM-quality
+  evaluation ran, and this is not statistically confirmed evidence.
+
+**Next**
+
+- Keep attempt 89 as a correct equation/precision milestone, but continue
+  matched development from attempt 84. Re-read attempts 69–82 before changing
+  the group-boundary or pair-VJP paths; do not replay rejected group-width,
+  boundary-copy, recompute, or scheduling variants.
