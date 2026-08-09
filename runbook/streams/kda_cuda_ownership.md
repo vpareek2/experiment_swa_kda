@@ -7968,3 +7968,80 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_115 \
   asynchronous/global loads and register-resident MMA handoffs—or a backward
   fusion that removes major global dependency boundaries. Do not spend another
   attempt sweeping row count within this rejected preparation family.
+
+## 2026-08-09 [Codex] Attempt 116 complete dense-plus-colored VJP composition rejected
+
+**Context**
+
+- Attempt 116 starts directly from accepted attempt 100 and composes the
+  previously correct chunk-owned dense post-reverse VJP with attempt 100's
+  conflict-free colored stable-pair VJP. One 48-KiB CTA per chunk replaces ten
+  generic post-reverse GEMM/global handoffs for `dR/dA/dE/dW/dT/dP/dQ`; the
+  four color launches remain the deterministic pair-ownership boundary.
+- This is the complete composition identified after attempt 100, not a replay
+  of attempt 101's reverse-input fusion or attempts 105/106/113's partial
+  vector-consumer kernels. Forward, persistent reverse recurrence, C64
+  chunking, bounded state history, equations, and precision contracts remain
+  unchanged.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_116 \
+  --lane optimization <isolated artifact/cache arguments>
+# Seed-4101 production comparison and independent fresh-cache repeat.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_100 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_116 \
+  runs/kda-cuda-development/attempt-00116-complete-vjp-level1 \
+  --level2-order candidate-first
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_116 \
+  push -u origin kda-cuda/wy-complete-vjp-116
+```
+
+**Artifacts**
+
+- Pushed commit `615b181c12626991d426fa9ac1927e5ab0106b7e`;
+  backward source SHA-256
+  `7028b5c0fda1fefc3aaeea9aace200d50ec20030a985680db52db8caffdbfd13`.
+- Protected checker:
+  `runs/kda-cuda-development/diagnostics/attempt-00116-complete-vjp-protected-checker`,
+  manifest `1a0d31f6717bb8d948493678359c05709c1b5fc715ff6826ee829a15a894b6e4`.
+- Production comparison/repeat:
+  `runs/kda-cuda-development/diagnostics/attempt-00116-complete-vjp-gradient`,
+  manifest `2e54302f1500f828ace22b407a6f1d4012f0415d852692d558a6a8d6a7048c8d`.
+- Level 1: `runs/kda-cuda-development/attempt-00116-complete-vjp-level1`,
+  manifest `264c925c0a4ff841bc856babf17fd91b8678b821b430a31317c28f301c4cd89a`.
+- Append-only attempt/reference index SHA-256:
+  `fc5594ffd563c597a7dec35e1d1a307895b09e4c61320155ac29b044c71f3b17`.
+- The production tensor captures emitted only the standard local SM121
+  capability warning to the coordinator tool stream because redirection was
+  omitted. Their successful return status, exact cache identities, tensor
+  payloads, summaries, and comparisons are preserved; no run was repeated to
+  manufacture raw logs.
+
+**Result**
+
+- The committed candidate passes ownership 1.0, protected runtime/profile
+  audit, runtime FLA freedom, finite-gradient checks, and the frozen numerical
+  contract. Output is bitwise equal to attempt 100; maximum gradient delta is
+  `5.820766091346741e-11`, and the independent fresh-cache repeat is bitwise
+  exact for all eight tensors.
+- Level 1 rejects the composition. T=4096 forward+backward improves
+  `12.122736 -> 11.931472 ms` (1.578%), below the 3% gate. T=256 and T=1024
+  forward+backward regress 2.304% and 1.550%, within the 5% guard; peak
+  allocation is unchanged at 202,770,944 bytes.
+- The dense and colored VJP savings overlap rather than add. No sanitizer,
+  Level 2, confirmation, production profile, or LM-quality evaluation ran.
+  This is development evidence only and is not statistically confirmed.
+
+**Next**
+
+- Retain attempt 100 and close direct composition of the 48-KiB chunk-owned
+  post-reverse VJP with colored pair ownership. Do not advance attempt 116 or
+  run its saved Level-2 plan.
+- The target now requires a different dependency boundary: prioritize a
+  pipelined persistent forward recurrence with register-resident fragment
+  handoffs, or a lower-residency backward schedule that changes ownership
+  rather than serializing more products into the chunk CTA.
