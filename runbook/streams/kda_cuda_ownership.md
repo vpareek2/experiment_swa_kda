@@ -5872,3 +5872,62 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_084 \
   WMMA plus ordered accumulation (1.546 ms/iter). Prefer structural work that
   reduces operands, synchronization, or launches; do not replay prior tile,
   group-width, pair-batch, or fast-exponential variants.
+
+## 2026-08-09 [agent] preserve sub-threshold warp-owned output stores
+
+**Context**
+
+- Attempt 85 starts from accepted attempt 84 and changes only
+  `nanochat/mixers/cuda_kda/chunk_wy_forward.cu`. Each forward WMMA warp
+  converts and writes its disjoint 16x16 output tile immediately after storing
+  the FP32 accumulator, removing the leading block-wide barrier and separate
+  CTA output pass before H-next reuses the shared buffer.
+- Arithmetic, scan geometry, recurrence state, output layout, allocation, and
+  all experiment-defining configuration remain unchanged.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --config configs/research/kda_cuda_ownership.toml \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_085 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact seed-4101 production capture against the saved attempt-84 bundle and
+# one fresh-cache deterministic repeat.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_084 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_085 \
+  runs/kda-cuda-development/attempt-00085-warp-output-level1 \
+  --level2-order baseline-first
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_085 \
+  push -u origin kda-cuda/wy-warp-output-store-085
+```
+
+**Artifacts**
+
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00085-warp-output-protected-checker`, manifest `902d90eb7d1badbc00996f8393e9bb1fffb4d9fc87c376995a39af5749d89fcc`.
+- Production comparison/repeat: `runs/kda-cuda-development/diagnostics/attempt-00085-warp-output-gradient`, manifest `2517566da11a956fc000c8f38c02fc1f6ad0bfa7572ebfeb1e4dd7564f576ffd`.
+- Level 1: `runs/kda-cuda-development/attempt-00085-warp-output-level1`, manifest `ec0dfa686c44742fe6e21863fa7429b5266552f49c58d8417666885993c5c847`.
+- Append-only attempt/reference index SHA-256: `60f8fc56259299b01fa288ddd620f10bca82bdf8f07cb4152898dcd643a5b882`.
+
+**Result**
+
+- Pushed commit `f1c67f4a78ecca9f9cc4ad2fe56c3e00ab62c2d2`
+  passed ownership 1.0, the complete protected runtime/profile audit, runtime
+  FLA freedom, bitwise production output/all-gradient correctness against
+  attempt 84, and a bitwise fresh-cache repeat.
+- Level 1 did not advance: T=4096 forward+backward improved only
+  `15.124 -> 15.092 ms` (0.21%), below the frozen 3% gate, at memory ratio
+  1.0. Forward-only improved 0.76%. T=1024 forward+backward regressed 2.34%
+  but remained inside the declared guard; all memory and important-regression
+  guards passed.
+- No sanitizers, Level 2, profile, confirmation, or retest ran. Attempt 84
+  remains the accepted development baseline. This is neither quality nor
+  statistically confirmed evidence.
+
+**Next**
+
+- Preserve attempt 85 unchanged and continue from attempt 84. A single forward
+  barrier is too small to retain; target a larger structural reduction in the
+  persistent forward scan, group-boundary scan, or pair accumulation without
+  replaying prior scheduling variants.
