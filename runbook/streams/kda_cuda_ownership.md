@@ -2618,3 +2618,62 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_029 \
 - Re-run the exact production gradient comparison before the normal Level-1
   gate. Do not launch Level 2 unless Level 1 advances, and keep the next full
   sanitizer/confirmation boundary sparse as declared.
+
+## 2026-08-09 [agent] reject batched WY VJP on memory after speed breakthrough
+
+**Context**
+
+- Attempt 30 changes only the dispatch structure of attempt 29's validated
+  equations. Chunk-independent VJP products are batched over all 384 chunk
+  rows; the reverse loop retains only the two state-dependent products.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_030 \
+  --lane optimization <isolated artifact/cache arguments>
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_028 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_030 \
+  runs/kda-cuda-development/attempts/attempt-00030-level1
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_030 \
+  push -u origin kda-cuda/wy-batched-vjp-030
+```
+
+**Artifacts**
+
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00030-protected-checker`,
+  manifest SHA-256 `330e05d948b617021d6074addceebfb5607eb2906f55f871434bef47e89ac619`.
+- Bitwise production comparison:
+  `runs/kda-cuda-development/diagnostics/attempt-00030-batched-vjp-gradient-exact`,
+  manifest SHA-256 `517bda12eb207a299463f54981362f0d65f5b39f7949efde0100b9dc0d53629b`.
+- Draft timing/profile:
+  `runs/kda-cuda-development/diagnostics/attempt-00030-batched-vjp-draft`,
+  manifest SHA-256 `8bc6082392cefc494aeabdf7c7c1e087c96559dfaf285a1f468f1370dce52d14`.
+- Formal Level 1: `runs/kda-cuda-development/attempts/attempt-00030-level1`,
+  manifest SHA-256 `d2a9105f17c9a118dbbe38d80029574cc985563b0cf5742f786a9205f42b8387`.
+- Append-only index SHA-256:
+  `ec066a29b2d93c66795e3ba6257461b615a58f68dc7d6d0a9d69331e205899fc`.
+
+**Result**
+
+- Exact pushed commit `14d8c8d4532302fa2a792d2b7b17743cbe8e4d59`
+  passed the protected audit at ownership 1.0 with no runtime FLA. Output and
+  all seven B=2/H=3/T=4096 gradients are bitwise identical to attempt 29.
+- The operator profile fell from 1,284 to 528 BMM calls and BMM self CPU time
+  from 23.612 to 3.846 ms. Formal Level 1 improved T=4096 forward+backward
+  `58.693 -> 47.287 ms` (19.43%).
+- Level 1 nevertheless rejected the candidate: peak allocation increased
+  `201410048 -> 492151296` bytes (`2.4435x`), and T=256 forward+backward
+  regressed 7.18%, beyond the 5% limit. Level 2 was not launched.
+- This is a speed milestone and a validated optimization parent, not the
+  accepted development baseline, confirmation, quality evidence, or official
+  retention. Attempt 28 remains the accepted baseline.
+
+**Next**
+
+- Continue from attempt 30 only for memory-lifetime work: release dead forward
+  products before allocating adjoints, reuse dZ storage, and materialize the
+  independent VJP matrices in bounded groups. Re-run exact gradients and Level
+  1; do not relax either the memory or short-length regression gate.
