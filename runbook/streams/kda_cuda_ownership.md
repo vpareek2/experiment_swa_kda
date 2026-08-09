@@ -1842,3 +1842,67 @@ uv run --no-sync python -m pytest -q tests/test_kda_cuda_development.py
   replayed as a fresh child of `90e87cf...` before becoming the baseline.
 - Continue building the FP32 C=64 forward path as small independently testable
   stages; keep sparse confirmation reserved for the agreed cadence.
+
+## 2026-08-09 [agent] preserve four near-misses and advance two cumulative development baselines
+
+**Context**
+
+- Attempts 8-13 explored invariant preprocessing, workspace-free forward
+  caching, their evidence-motivated combination, and backward CTA size. All
+  compared only to the current fast development baseline. The expensive
+  confirmation suite and naive parent remained unused.
+
+**Artifacts**
+
+- Complete append-only artifacts:
+  `runs/kda-cuda-development/attempts/attempt-00008-level1` through
+  `attempt-00013-level1`; Level 2 exists only for attempts 11 and 13.
+- Append-only attempt index SHA-256 after attempt 13:
+  `bf26b8c5e376c956a86860747067cad5d9c533edf6f6aaf39a7294809c560aea`.
+- Development baseline `fe0411f...` manifest:
+  `runs/kda-cuda-development/baseline/fe0411f36.json`, SHA-256
+  `593991bd6a3c668d4d0b7f4b97171a35449e8a49fd3cbb686d9ee8dce0c1ba7c`.
+- Current development baseline `69a5ee6...` manifest:
+  `runs/kda-cuda-development/baseline/69a5ee68e.json`, SHA-256
+  `cbba2c8d2407502b655af5a3f5b4e4397d1b5567d870dd63a5ee32ab57c0a96d`.
+
+**Result**
+
+- Attempt 8 (`610cb318...`) globally materialized normalized q/k and gate/decay
+  invariants for forward and backward. It lowered T=4096 forward 8.90% and
+  forward+backward 6.42%, but forward-only allocation grew `2.590x`; the fixed
+  per-row 3% Level-1 memory guard rejected it. No Level 2 ran.
+- Attempt 9 (`897c843...`) restricted the same 48.375 MiB workspace to backward
+  and combined it with the accepted 256-thread parent. Memory passed (`1.029845x`)
+  and latency fell 2.896%, but this honestly missed the predeclared 3% threshold;
+  no retest or Level 2 was used.
+- Attempt 10 (`b393ea4...`) used only 1.5 KiB dynamic shared memory in a K=V=128
+  forward fast path while preserving the generic fallback. T=4096 forward fell
+  4.57%, but total forward+backward improved only 1.62%; it was preserved and
+  rejected without Level 2.
+- Attempt 11 deliberately combined those two related, independently measured
+  subthreshold mechanisms. Exact Level 1 passed: T=4096 forward+backward
+  `736.944 -> 703.009 ms` (4.60% lower), forward `243.176 -> 231.328 ms`, and
+  kernel peak `1.029845x`. Its exact baseline-first Level-2 pair observed
+  `1631 -> 1670 tok/s` (2.39% higher) with identical `5511.408 MiB` full-model
+  peak. Commit `fe0411f3685378ce51bb084a2741998cd418250f` became the development
+  baseline; the observation is neither statistical confirmation nor quality.
+- Attempt 12 (`eb17ed6...`) changed 256 to 512 threads. It improved T=4096
+  forward+backward 2.915%, narrowly below 3%, so Level 2 did not run.
+- Attempt 13 changed 256 to the hardware maximum 1024 threads. Level 1 passed:
+  `703.825 -> 682.268 ms` (3.06% lower), no memory change. Its candidate-first
+  Level-2 pair observed median `1716 tok/s` versus `1669 tok/s` (2.82% higher),
+  identical `5511.408 MiB` full-model peak. Exact pushed commit
+  `69a5ee6...` is the current development baseline, still unmerged/unconfirmed.
+- The fast funnel made six source experiments, two full-model pairs, and four
+  honest rejections in a fraction of the former single-evaluation time. Every
+  branch, source, sample, raw log, decision, and failed gate is preserved.
+
+**Next**
+
+- Stop spending major effort on scalar launch tuning. Profile/decompose the
+  remaining roughly `451 ms` backward portion, then split history replay from
+  reverse recurrence or begin the staged FP32 C=64 WY/UT forward path from the
+  preserved blueprint.
+- Continue Level 1/2 for development; invoke confirmation only at the agreed
+  plateau/time boundary.
