@@ -4361,3 +4361,52 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_059 \
 - Abandon stacked A/M plus in-place T. Return to exact attempt 53 and choose a
   distinct whole-forward structural path; do not recombine rejected WMMA,
   stacked-construction, or synchronization variants without new evidence.
+
+## 2026-08-09 [agent] reject fused scan state update
+
+**Context**
+
+- Attempt 60 computes the independent `E^T Z` product before state mutation,
+  then combines output writing, boundary decay, and delta addition in one
+  kernel. Explicit `__fmul_rn` and `__fadd_rn` preserve the two parent FP32
+  rounding points while removing 64 state-add launches and one state pass.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_060 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact seeded B=2/H=3/T=4096 saved-gradient comparison plus repeat.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_053 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_060 \
+  runs/kda-cuda-development/attempt-00060-state-update-level1
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_060 \
+  push -u origin kda-cuda/wy-scan-state-update-fused-060
+```
+
+**Artifacts**
+
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00060-protected-checker`, manifest `1da3fd67aa432649bd2bb4be713482061ea4857e63d3012cd557b631c7e28246`.
+- Production comparison/repeat: `runs/kda-cuda-development/diagnostics/attempt-00060-state-update-gradient`, manifest `338b9a0cb461727e64729e566eb252d912fe5428cd96547fa23258c6c3059773`.
+- Level 1: `runs/kda-cuda-development/attempt-00060-state-update-level1`, manifest `d38dcd12d335594bf665ebec6b11217f3dfe37f029846f881df74faadde1fd9b`.
+- Append-only attempt/reference index SHA-256: `145a79aa0d879a7463efa3bc4dc617562fe21582c063513686b04a1e789c54e5`.
+
+**Result**
+
+- Pushed commit `ad5d1087cbeaf9a18e83f1ac078de05e2e7173fc`
+  passed ownership/runtime gates. Output, all seven gradients, and repeat are
+  bitwise identical to attempt 53.
+- Level 1 rejected the intervention: T=4096 forward improved 1.09%, but
+  forward+backward changed only `21.575 -> 21.566 ms` (+0.04%). T=256
+  forward+backward regressed 5.42%, beyond the 5% guard. Memory ratio was 1.0.
+  No sanitizer, Level 2, profile, or retest ran.
+- Attempt 53 remains accepted. This is neither confirmation nor quality
+  evidence.
+
+**Next**
+
+- Preserve separate output-decay and state-add kernels. Return to exact attempt
+  53 and choose a new whole-forward structural axis rather than further
+  launch-only fusion.
