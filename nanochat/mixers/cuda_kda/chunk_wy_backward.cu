@@ -406,7 +406,8 @@ __global__ void nanochat_kda_chunk_backward_kernel(
     float* dprefix,
     int chunk_start,
     int group_chunks) {
-  const int local_n = blockIdx.x;
+  const int local_n = blockIdx.x / kChunk;
+  const int row = blockIdx.x - local_n * kChunk;
   const int d = threadIdx.x;
   if (local_n >= kRecurrences * group_chunks || d >= kDim) {
     return;
@@ -419,8 +420,7 @@ __global__ void nanochat_kda_chunk_backward_kernel(
   const int token_start = chunk_id * kChunk;
   const int64_t local_base = static_cast<int64_t>(local_n) * kChunk * kDim;
 
-  for (int row = 0; row < kChunk; ++row) {
-    const int64_t offset = chunk_vector_index(n, row, d);
+  const int64_t offset = chunk_vector_index(n, row, d);
     const int local = local_base + row * kDim + d;
     const float g = prefix_g[offset];
     const float exp_g = expf(g);
@@ -496,10 +496,8 @@ __global__ void nanochat_kda_chunk_backward_kernel(
     const int token = token_start + row;
     const int64_t input = input_vector_index(b, token, h, d);
     dv[input] = __float2bfloat16_rn(beta_row * dP[local]);
-  }
 
-  if (d < kChunk) {
-    const int row = d;
+  if (d == 0) {
     const float beta_row = beta[static_cast<int64_t>(n) * kChunk + row];
     float gradient = 0.0f;
     for (int value = 0; value < kDim; ++value) {
@@ -996,7 +994,8 @@ nanochat_kda_chunk_wy_backward_c64(
     at::Tensor dbeta_group = at::empty({kGroupRows, kChunk}, fp32);
     at::Tensor dprefix_group = at::empty_like(P_group);
     at::Tensor raw_gate_gradient_group = at::empty_like(P_group);
-    nanochat_kda_chunk_backward_kernel<<<kGroupRows, kDim, 0, stream>>>(
+    nanochat_kda_chunk_backward_kernel<<<
+        kGroupRows * kChunk, kDim, 0, stream>>>(
         reinterpret_cast<const __nv_bfloat16*>(v.data_ptr<at::BFloat16>()),
         qbar.data_ptr<float>(), khat.data_ptr<float>(),
         prefix_g.data_ptr<float>(), beta.data_ptr<float>(),
