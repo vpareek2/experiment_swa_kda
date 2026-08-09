@@ -4461,3 +4461,54 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_061 \
 - Preserve attempt 61 unchanged. Return to attempt 53 and target a structural
   reduction in the dominant generic BMM or backward pair-pack/accumulate work;
   do not pursue global TF32 permission further without new kernel evidence.
+
+## 2026-08-09 [agent] reject reverse-pass transform reuse
+
+**Context**
+
+- Attempt 62 computes each group's `U=T*P` and `W=T*Q` once during boundary
+  reconstruction, writes those results into the global P/Q storage after its
+  last original-value use, and reuses them in the reverse pass. Original P/Q
+  are rebuilt exactly into group-local buffers, removing 16 repeated BMMs
+  without increasing peak allocation.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_062 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact seeded B=2/H=3/T=4096 saved-gradient comparison plus repeat.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_053 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_062 \
+  runs/kda-cuda-development/attempt-00062-reuse-level1
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_062 \
+  push -u origin kda-cuda/wy-reuse-transforms-062
+```
+
+**Artifacts**
+
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00062-protected-checker`, manifest `22c16ef482c7990b76733b9e44470bf1d7fd6021e56e6c3d07483ed2d747587e`.
+- Production comparison/repeat: `runs/kda-cuda-development/diagnostics/attempt-00062-reuse-gradient`, manifest `013b4dc086f08f1436e3a43da78f9f29f441e5f22383146ca0f6483507c20b46`.
+- Level 1: `runs/kda-cuda-development/attempt-00062-reuse-level1`, manifest `a2bca532d208ef393ed1977192d63067cd07c4e2077add9839774e4d05ba9e21`.
+- Append-only attempt/reference index SHA-256: `5d69648aa85eaf520a100a827e421c3b27ad1a7765de563d1d7dd1be3ff4a8fc`.
+
+**Result**
+
+- Pushed commit `b9b35c202d12dcad6ee836a214c840b74791f24b`
+  passed protected ownership/runtime gates. Output, all seven gradients, and
+  the independent repeat are bitwise identical to attempt 53.
+- Level 1 rejected the intervention: T=4096 forward+backward changed only
+  `21.696 -> 21.688 ms` (+0.04%). The T=1024 row improved 3.30%, but the
+  production T=4096 gate did not. Peak allocation was unchanged. Exact P/Q
+  reconstruction and buffer-copy traffic consume the redundant-BMM saving.
+- No sanitizers, Level 2, profile, confirmation, or retest ran. Attempt 53
+  remains the accepted development baseline; this is not quality or
+  statistically confirmed evidence.
+
+**Next**
+
+- Preserve attempt 62 unchanged. Do not reuse U/W through global P/Q in this
+  form. Return to attempt 53 and target the dominant pair-pack/accumulate path
+  or a group-state formulation that removes work without replacement traffic.
