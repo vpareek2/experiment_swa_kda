@@ -3040,3 +3040,88 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_035 \
   kernel. Seek a candidate that preserves the parameter gain and clears the
   entire matched Level-1 gate without relying on a retest; only then reconsider
   Level 2 and sanitizer confirmation.
+
+## 2026-08-09 [agent] accept row-parallel exact pair VJP baseline
+
+**Context**
+
+- Attempt 36 retains attempt 35's exact parallel parameter reduction and maps
+  the pair VJP to one block per `(recurrence, chunk row)` instead of one block
+  per recurrence serially traversing all 64 rows. Each output lane preserves
+  its prior arithmetic order; only independent rows execute concurrently.
+- The formal comparison remained anchored to accepted attempt 34, not the
+  uncertain attempt-35 retest.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_036 \
+  --lane optimization <isolated artifact/cache arguments> --sanitizers
+# Exact seeded B=2/H=3/T=4096 saved-gradient comparison plus repeat.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_034 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_036 \
+  runs/kda-cuda-development/attempt-00036-row-parallel-level1
+# Executed the predeclared baseline-first Level-2 pair once after all gates.
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_036 \
+  push -u origin kda-cuda/wy-vjp-row-parallel-036
+```
+
+**Artifacts**
+
+- Initial protected checker:
+  `runs/kda-cuda-development/diagnostics/attempt-00036-protected-checker`,
+  manifest SHA-256
+  `48cbdcf72cb259101e97926bb0df029e7f3fd4d88d89fac5364807af13ba21a5`.
+- Exact production comparison, deterministic repeat, and both preserved invalid
+  setup invocations:
+  `runs/kda-cuda-development/diagnostics/attempt-00036-row-parallel-gradient-exact`,
+  manifest SHA-256
+  `bb683c793595354af1b7397e8dfd1347ca9468b9badb5cdd39cf51e93b6a523d`.
+- Full protected checker and all four sanitizers:
+  `runs/kda-cuda-development/validations/validation-00005-row-parallel`,
+  manifest SHA-256
+  `574f16f83771c656f3831fd6900678a3bca5cf227b6d5e8f997390a57c267f25`.
+- Matched Level 1:
+  `runs/kda-cuda-development/attempt-00036-row-parallel-level1`, manifest
+  SHA-256
+  `a0ba55b7bf76578bc0bdf61526cd18f3c82671ae4395650de23f9f3bd1b6749c`.
+- Baseline-first Level-2 pair:
+  `runs/kda-cuda-development/attempt-00036-row-parallel-level2`, manifest
+  SHA-256
+  `81d930f4e35315cc7fe655c11b32c8596c98bc2a2533d05e845db92dd26fb2c4`.
+- Development-baseline manifest:
+  `runs/kda-cuda-development/baseline/bb29a36f50.json`, SHA-256
+  `c445633ec39761766e63b0c735e1358454a3b8b44ac7bc1715bd4f34f08d815c`.
+- Append-only attempt/reference index SHA-256:
+  `b9a349a0a75fc31c1105d3ecb4bcb0a92fae4a23893572e5fd8109c2dd9e896d`.
+
+**Result**
+
+- Exact pushed commit `bb29a36f502cc8f11880c5391267657d06a3ba4a`
+  passed ownership 1.0, the protected runtime/profile audit, runtime FLA
+  freedom, and all four sanitizers with zero-error summaries. Output and all
+  seven production gradients are bitwise identical to attempt 35; the valid
+  deterministic repeat has the same tensor-bundle SHA-256.
+- Two setup failures are preserved and excluded from evidence: a worktree-local
+  `uv` environment lacked Torch, then a coordinator-project invocation imported
+  coordinator source before candidate `PYTHONPATH` was set. Neither emitted a
+  measurement; the corrected absolute invocation passed.
+- Level 1 advanced cleanly without a retest: T=4096 forward+backward improved
+  `43.466 -> 35.144 ms` (19.15%) at identical peak allocation. All other rows
+  stayed inside the 5% runtime guard; the largest regression was 2.32%.
+- The baseline-first Level-2 pair measured baseline
+  `[19045,19022,19031,18975,19001]`, median `19022 tok/s`, and candidate
+  `[21804,21847,21888,21869,21800]`, median `21847 tok/s`: a 14.85% point
+  improvement. Both reported `5508.533 MiB` peak. The candidate is 50.02% of
+  the fixed `43680 tok/s` external FLA reference.
+- Attempt 36 is the accepted development baseline. It is not statistical
+  confirmation, official retention, a quality result, merge, or default
+  change. The official milestone remains `4d1a3b231...`.
+
+**Next**
+
+- Profile exact production backward at attempt 36, attack the largest remaining
+  exact kernel or dispatch cost, and continue toward at least 45k without
+  relaxing correctness, ownership, provenance, or sanitizer gates.
