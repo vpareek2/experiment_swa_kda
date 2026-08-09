@@ -7511,3 +7511,79 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_109 \
   exact attempt-100 forward file and apply group-major zero-copy storage only
   in backward, preserving the observed allocation benefit without the measured
   forward locality penalty.
+
+## 2026-08-09 [Codex] Attempt 110 backward-only group-major layout rejected at Level 2
+
+**Context**
+
+- Attempt 110 applies attempt 109's group-major `P/Q/A/T` construction only to
+  the independently recomputed backward operator. Forward remains byte-for-byte
+  attempt 100, retaining recurrence-major locality. The backward group slices
+  are zero-copy views and remove 56 explicit `.contiguous()` packing copies.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_110 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact production comparison and independent fresh-cache repeat.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_100 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_110 \
+  runs/kda-cuda-development/attempt-00110-backward-group-major-level1 \
+  --level2-order candidate-first
+# Full protected sanitizer validation in validation worktree 110.
+# Execute the saved Level-2 candidate-first pair exactly once.
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_110 \
+  push -u origin kda-cuda/wy-backward-group-major-110
+```
+
+**Artifacts**
+
+- Pushed commit `ca9649df05edd43110349f523c43790518ec3903`;
+  backward source SHA-256 `384b918ab98c85acc3d3734ba02e019e79fb9445b69c5c96a37e92cbcb4432c6`.
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00110-backward-group-major-protected-checker`,
+  manifest `578d347a4cb89651ece028320f6a1734242fb93313c78a3f13743072da957977`.
+- Production comparison/repeat: `runs/kda-cuda-development/diagnostics/attempt-00110-backward-group-major-gradient`,
+  manifest `9aa2c764adfc6c3f859ed2eb3d45010e6b35ef9afeeaf585d78e9cf8dc35186a`.
+- Level 1: `runs/kda-cuda-development/attempt-00110-backward-group-major-level1`,
+  manifest `2d3bdead8ba13e8ec8f8a31203f737ad7b177c02fbe003cfa93d87ba30081b6d`.
+- Full sanitizer validation: `runs/kda-cuda-development/validations/validation-00028-backward-group-major`,
+  manifest `ddb3807e5bbd966bc3488471b0e718734b80d9b632173a12cafd74dc3e924240`.
+- Level 2: `runs/kda-cuda-development/attempt-00110-backward-group-major-level2`,
+  manifest `c5b8a2146137fff8d53eb3def7d94d425e9671393880e9f3a3cbbf24da5d1538`.
+- Append-only attempt/reference index SHA-256:
+  `9184f06d2d849a6262609bf8d58df80623191d34550706cf0da2c3af2b9d4a40`.
+- The candidate training completed exactly once, but its first `tee` target did
+  not exist because the parent directory had been created relative to the
+  candidate worktree. All seven structured step records and the final result
+  were recovered from the coordinator tool capture into `candidate.log`; the
+  candidate was not rerun. `capture-incident.txt` preserves the exact incident.
+
+**Result**
+
+- The candidate passes ownership 1.0, protected runtime/profile audit,
+  runtime FLA freedom, frozen numerical tolerance, finite gradients, and an
+  independent bitwise deterministic repeat. Output is bitwise equal to attempt
+  100; maximum gradient delta is `2.459273673593998e-09`.
+- The full validation passes memcheck, racecheck, initcheck, and synccheck with
+  zero errors. Level 1 advances: T=4096 forward+backward improves
+  `12.427744 -> 11.731472 ms` (5.603%), while peak allocation falls 2.327%.
+- The saved candidate-first Level-2 pair is valid but below the retention gate.
+  Candidate samples `[34316,27295,34210,34176,34252]` have median 34,210 tok/s;
+  baseline samples `[33777,33713,33776,33730,33635]` have median 33,730 tok/s.
+  The gain is 1.423%, peak memory is equal at 5508.533 MiB, and the candidate
+  reaches 78.320% of the 43,680 tok/s external FLA target.
+- This is development evidence only. It is not statistically confirmed and no
+  LM-quality evaluation ran.
+
+**Next**
+
+- Retain attempt 100 as the accepted development baseline; attempt 110 is a
+  preserved subthreshold result and must not be silently composed as accepted.
+- The zero-copy layout result confirms meaningful packing overhead, but closing
+  the remaining 9,470 tok/s gap requires a larger boundary: fuse repeated
+  group-local backward GEMMs and their consumers while keeping deterministic
+  ownership, or translate FlashKDA's token-parallel prepare plus head-persistent
+  recurrence schedule to the C64 training equations without importing it.
