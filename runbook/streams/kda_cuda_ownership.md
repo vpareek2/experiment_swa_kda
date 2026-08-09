@@ -2102,3 +2102,75 @@ nsys stats --report cuda_gpu_kern_sum,cuda_api_sum,osrt_sum <report>
   raw KDA-only Level-1 latency is not applicable to this intervention.
 - Reprofile after the convolution family plateaus, then proceed to the staged
   project-owned FP32 C=64 WY/UT path toward the overall 45k tok/s aim.
+
+## 2026-08-09 [agent] accept bounded convolution dependencies as development baseline
+
+**Context**
+
+- Whole-step attribution showed causal-convolution backward consumed 43.62% of
+  project GPU kernel time. Attempt 23 changed only the invalid O(T) dependency
+  search for `dx` and initial-state gradients; all valid contributing tokens
+  remain in the original ascending accumulation order.
+- The raw KDA-only Level-1 lane is blind to convolution and is explicitly not
+  applicable to this intervention. The human authorized a matched convolution
+  microgate and unchanged Level-2 pair instead, with intermediate targets used
+  as aims rather than automatic campaign stop conditions.
+
+**Commands**
+
+```bash
+# Preserved KDA-only audit/provenance run; timing decision not applicable.
+.venv/bin/python scripts/kda_cuda_development.py <6c847515 worktree>   <efd41da1 worktree> runs/kda-cuda-development/attempts/attempt-00023-level1-kda-not-applicable
+# Four-process A/B/B/A convolution microgate, then the exact planned Level-2 pair.
+# Reprofile exact candidate with the same seven-step nsys command as its parent.
+```
+
+**Artifacts**
+
+- KDA-only audit/provenance artifact:
+  `runs/kda-cuda-development/attempts/attempt-00023-level1-kda-not-applicable`.
+- Preserved invalid first microgate import:
+  `runs/kda-cuda-development/attempts/attempt-00023-convolution-microgate`.
+  Its ignored script imported coordinator `nanochat` and raised
+  `NotImplementedError`; it emitted no measurement and is unscored.
+- Valid fresh microgate:
+  `runs/kda-cuda-development/attempts/attempt-00023-convolution-microgate-rerun-001`,
+  final manifest SHA-256
+  `293c1191c6aebb76270fb202e816c4a525fb4862039f6d56bfb9afd011a37ed6`.
+- Candidate reprofile:
+  `runs/kda-cuda-development/profiles/whole-step-attribution-002-attempt23`,
+  final manifest SHA-256
+  `bdd7b92b6cb6481b3c40272f9bbb29efbb071a800c0e9d9086611edcf22d3494`.
+- Development-baseline manifest:
+  `runs/kda-cuda-development/baseline/efd41da1e.json`, SHA-256
+  `654070b19072b2d49219e80b9f24913aa869800d5ec080999a7eb712549ecc25`.
+- Append-only attempt/reference index SHA-256:
+  `9b4f3efe9ab53b7bbd4d61735f053ac6ca282eb6d213c5a2deac541665d3eb64`.
+
+**Result**
+
+- Exact commit `efd41da1e94cf5b1c7b3194231add04e73ba90a7`, source SHA-256
+  `0e05bf9b12a266a3e98c29f319e3e1f8544127db77e5bd9f3476d07fa5dd8727`,
+  passed the protected 21-check runtime audit, ownership 1.0, runtime FLA
+  freedom, focused build/test checks, and generic cache/final-state paths.
+- Across two processes per side, T=4096 convolution backward fell
+  `26.815 -> 6.502 ms` (`4.124x`); forward+backward fell
+  `27.657 -> 7.078 ms`. All output/dx/dweight hashes were bit-identical and
+  measured peak allocation was identical at every T=256/1024/4096 row.
+- The exact baseline-first six-layer pair observed `7356 -> 10957 tok/s`, a
+  48.95% development improvement, with identical `5511.408 MiB` peak. This is
+  25.08% of the 43,680 FLA target and is not a confidence interval or quality
+  result.
+- Reprofiling reconciled the end-to-end delta: convolution backward fell from
+  `1.9303` to `0.4873 s/step`, removing `1.4431 s`; total GPU kernel time fell
+  from `4.4249` to `2.9610 s/step` and still explained 98.99% of the warmed
+  step. KDA now dominates, but convolution has another factorizable stage.
+- Attempt 23 is pushed and becomes the next development comparison baseline. It
+  remains unmerged, non-default, and separate from official retention.
+
+**Next**
+
+- Evaluate attempt 24's single-axis FP32 preactivation-gradient factoring and
+  deterministic tiled weight reduction. Preserve the bounded generic fallback.
+- After the convolution family plateaus, run its full sanitizer boundary and
+  begin the staged project-owned FP32 C=64 WY/UT forward path.
