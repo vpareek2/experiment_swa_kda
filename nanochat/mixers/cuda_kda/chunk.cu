@@ -1035,7 +1035,7 @@ __global__ void nanochat_kda_chunk_backward_kernel(
   constexpr int64_t value_dim = 128;
   constexpr int64_t tile_count = 8;
   constexpr int64_t tile_values = 16;
-  constexpr int64_t chunk_capacity = 64;
+  constexpr int64_t chunk_capacity = 32;
   const int64_t tile = blockIdx.x % tile_count;
   const int64_t recurrence = blockIdx.x / tile_count;
   if (recurrence >= batch * heads) {
@@ -1226,7 +1226,7 @@ __global__ void nanochat_kda_chunk_backward_row_finalize_128_kernel(
     float scale) {
   constexpr int64_t key_dim = 128;
   constexpr int64_t tile_count = 8;
-  constexpr int64_t chunk_capacity = 64;
+  constexpr int64_t chunk_capacity = 32;
   const int64_t local_token = blockIdx.x % chunk_length;
   const int64_t recurrence = blockIdx.x / chunk_length;
   if (recurrence >= batch * heads) {
@@ -1656,7 +1656,7 @@ chunk_backward_cuda(
   at::Tensor beta_tile_partial;
   if (key_dim == 128 && value_dim == 128) {
     constexpr int64_t tile_count = 8;
-    constexpr int64_t chunk_capacity = 64;
+    constexpr int64_t chunk_capacity = 32;
     query_tile_partial = at::empty(
         {tile_count, batch, chunk_capacity, heads, key_dim}, A_log.options());
     key_tile_partial = at::empty(
@@ -1719,7 +1719,7 @@ chunk_backward_cuda(
       C10_CUDA_KERNEL_LAUNCH_CHECK();
 
       constexpr int64_t tile_count = 8;
-      constexpr int64_t chunk_capacity = 64;
+      constexpr int64_t chunk_capacity = 32;
       const int64_t chunk_count =
           (length + chunk_capacity - 1) / chunk_capacity;
       for (int64_t chunk = chunk_count; chunk-- > 0;) {
