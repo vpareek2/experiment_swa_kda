@@ -2964,3 +2964,79 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_034 \
   dominant parameter kernel removal, then attack the remaining pair VJP and
   BMM/dispatch cost without restoring full histories or changing reduction
   order. Continue toward at least 45k; do not treat 19k as a stopping point.
+
+## 2026-08-09 [agent] preserve parallel parameter reduction as uncertain speed milestone
+
+**Context**
+
+- Attempt 34's production profile left parameter reduction at 30.6% of kernel
+  time and the pair VJP at 25.6%. Attempt 35 replaces 768 single-thread
+  parameter blocks with six 128-thread recurrence blocks per group.
+- Key lanes load raw and biased gate values in parallel; lane zero still sums
+  `dA_log` in token-reverse/key-ascending order, while every lane accumulates
+  its `dt_bias` gradient in token-reverse order.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_035 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact B=2/H=3/T=4096 saved-gradient comparison.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_034 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_035 \
+  runs/kda-cuda-development/attempt-00035-parallel-params-level1
+# One bounded retest after the unchanged generic T=256 row crossed the guard.
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_035 \
+  push -u origin kda-cuda/wy-vjp-parallel-params-035
+```
+
+**Artifacts**
+
+- Attempt-34 production profile:
+  `runs/kda-cuda-development/diagnostics/attempt-00034-production-profile`,
+  manifest SHA-256
+  `f181526cfd4805ec5d1348f5572f12d8b1d930a263774c6bddcffa0f386f6ab7`.
+- Protected checker:
+  `runs/kda-cuda-development/diagnostics/attempt-00035-protected-checker`,
+  manifest SHA-256
+  `78e68e71ceee62dd9e120de9aae690201956ab2e5433ad8cfa87bde93e61a1ea`.
+- Exact production comparison:
+  `runs/kda-cuda-development/diagnostics/attempt-00035-parallel-parameter-gradient-exact`,
+  manifest SHA-256
+  `c95106d013cd67eff4fd9d887085db004a301212dd73d38a27c827023c235844`.
+- Initial matched Level 1:
+  `runs/kda-cuda-development/attempt-00035-parallel-params-level1`, manifest
+  SHA-256
+  `81d42137a4ebf8039919aa65edb43da021182189e96ef31b6be7158b09779402`.
+- Bounded Level-1 retest:
+  `runs/kda-cuda-development/attempt-00035-parallel-params-level1-retest-001`,
+  manifest SHA-256
+  `4e7b986586840a9b27d36d269d8a2fd0beeb50af93b91a0e9d419b667e069ced`.
+- Append-only attempt/reference index SHA-256:
+  `91368878549aea494b90b48d92406f82723477f0c0d6f0d03f0982cc98ce13ac`.
+
+**Result**
+
+- Exact pushed commit `6812002afd62848b5278dfbfb4465b3939b89f29`
+  passed the protected audit at ownership 1.0 with no runtime FLA. Output and
+  all seven production gradients are bitwise identical to attempt 34.
+- Initial Level 1 improved T=4096 forward+backward
+  `43.816 -> 34.313 ms` (21.69%) at identical peak allocation, but T=256
+  forward+backward regressed `4.128 -> 4.380 ms` (6.11%); the decision was
+  therefore `do_not_advance`.
+- One bounded retest reproduced the T=4096 gain (`43.661 -> 34.470 ms`, 21.05%)
+  and measured T=256 as a 1.67% improvement. Under the contract, this is
+  uncertainty rather than a win. Level 2 and sanitizer confirmation were not
+  launched, and attempt 34 remains the accepted baseline.
+- Attempt 35 is a bitwise-exact speed milestone and permissible optimization
+  parent, not an accepted baseline, confirmation, quality result, merge,
+  default change, or official retention.
+
+**Next**
+
+- Continue from attempt 35 for the pair VJP, now the largest known production
+  kernel. Seek a candidate that preserves the parameter gain and clears the
+  entire matched Level-1 gate without relying on a retest; only then reconsider
+  Level 2 and sanitizer confirmation.
