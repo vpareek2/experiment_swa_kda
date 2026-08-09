@@ -4312,3 +4312,52 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_058 \
 - Add a block barrier after every row's triangular reads and before its T
   writes in a separate child. Require bitwise production restoration and the
   normal ownership, sanitizer, determinism, and performance gates.
+
+## 2026-08-09 [agent] reject synchronized in-place T repair
+
+**Context**
+
+- Attempt 59 adds the required pre-write block barrier to both in-place lower
+  solves from attempt 58. It retains attempt 57's stacked FP32 A/M constructor
+  and removes the read/write dependency before any timing.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_059 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact seeded B=2/H=3/T=4096 saved-gradient comparison plus repeat.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_053 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_059 \
+  runs/kda-cuda-development/attempt-00059-inplace-t-sync-level1
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_059 \
+  push -u origin kda-cuda/wy-stacked-am-inplace-t-sync-059
+```
+
+**Artifacts**
+
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00059-protected-checker`, manifest `792aa271d6e0ed11f3d4bbaafac163b92f0aae449db4e2a656bb3d1c692bcc20`.
+- Production comparison/repeat: `runs/kda-cuda-development/diagnostics/attempt-00059-inplace-t-sync-gradient`, manifest `d533a7770a9f90c3305d432ad114b0480a2d72ba86cf257708d91966dfcf4ad3`.
+- Level 1: `runs/kda-cuda-development/attempt-00059-inplace-t-sync-level1`, manifest `e7c4e28f940fcb8f8f974a490038c0c52ebd89f838046e23db9888ae792c45c6`.
+- Append-only attempt/reference index SHA-256: `2ce8aa47d1c77bb03d05f09e6e6d2098e9626f9a2daa4c0abb399c109859d222`.
+
+**Result**
+
+- Pushed commit `f269c84d97c578080a0d68a36d31f83dab56e00a`
+  passed ownership/runtime gates. The pre-write barrier restored bitwise
+  equality against attempt 53 for output, all gradients, and repeat.
+- Level 1 rejected the repaired design: T=4096 forward+backward changed
+  `21.639 -> 21.899 ms` (-1.20%), forward-only regressed 0.68%, and peak
+  allocation ratio was 1.00449. The required row barriers erase the stacked
+  construction gain. No sanitizer, Level 2, profile, or retest ran.
+- Attempt 53 remains the accepted development baseline. Attempts 57-59 are a
+  fully preserved exact dispatch/lifetime/repair chain, not confirmation or
+  quality evidence.
+
+**Next**
+
+- Abandon stacked A/M plus in-place T. Return to exact attempt 53 and choose a
+  distinct whole-forward structural path; do not recombine rejected WMMA,
+  stacked-construction, or synchronization variants without new evidence.
