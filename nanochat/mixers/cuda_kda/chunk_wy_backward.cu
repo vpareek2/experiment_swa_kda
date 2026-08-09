@@ -474,12 +474,13 @@ __global__ void nanochat_kda_wy_backward_group_boundary_wmma_c64_kernel(
     }
     __syncthreads();
 
-    // Z = U - W H. Four warps own the four 16-row token tiles.
-    if (warp < kChunk / kMatrix) {
-      Accumulator accumulators[2];
-      wmma::fill_fragment(accumulators[0], 0.0f);
-      wmma::fill_fragment(accumulators[1], 0.0f);
-      const int row_start = warp * kMatrix;
+    // Z = U - W H. All eight resident warps own one
+    // (16-row, 16-value) product so both value halves run concurrently.
+    if (warp < kWarps) {
+      Accumulator accumulator;
+      wmma::fill_fragment(accumulator, 0.0f);
+      const int row_start = (warp / 2) * kMatrix;
+      const int value_half = warp % 2;
       for (int key_start = 0; key_start < kDim; key_start += kMatrix) {
         for (int element = lane; element < kTileElements;
              element += warpSize) {
@@ -495,31 +496,25 @@ __global__ void nanochat_kda_wy_backward_group_boundary_wmma_c64_kernel(
         MatrixA a_fragment;
         wmma::load_matrix_sync(
             a_fragment, operand_a + warp * kTileElements, kMatrix);
-        for (int value_half = 0; value_half < 2; ++value_half) {
-          for (int element = lane; element < kTileElements;
-               element += warpSize) {
-            const int row = element / kMatrix;
-            const int column = element - row * kMatrix;
-            operand_b[warp * kTileElements + element] =
-                __float2bfloat16_rn(local_state[
-                    (key_start + row) * kValueTile +
-                    value_half * kMatrix + column]);
-          }
-          __syncwarp();
-          MatrixB b_fragment;
-          wmma::load_matrix_sync(
-              b_fragment, operand_b + warp * kTileElements, kMatrix);
-          wmma::mma_sync(
-              accumulators[value_half], a_fragment, b_fragment,
-              accumulators[value_half]);
+        for (int element = lane; element < kTileElements;
+             element += warpSize) {
+          const int row = element / kMatrix;
+          const int column = element - row * kMatrix;
+          operand_b[warp * kTileElements + element] =
+              __float2bfloat16_rn(local_state[
+                  (key_start + row) * kValueTile +
+                  value_half * kMatrix + column]);
         }
+        __syncwarp();
+        MatrixB b_fragment;
+        wmma::load_matrix_sync(
+            b_fragment, operand_b + warp * kTileElements, kMatrix);
+        wmma::mma_sync(
+            accumulator, a_fragment, b_fragment, accumulator);
       }
       wmma::store_matrix_sync(
-          z + row_start * kValueTile,
-          accumulators[0], kValueTile, wmma::mem_row_major);
-      wmma::store_matrix_sync(
-          z + row_start * kValueTile + kMatrix,
-          accumulators[1], kValueTile, wmma::mem_row_major);
+          z + row_start * kValueTile + value_half * kMatrix,
+          accumulator, kValueTile, wmma::mem_row_major);
     }
     __syncthreads();
     for (int index = threadIdx.x; index < kChunk * kValueTile;
