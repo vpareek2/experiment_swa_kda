@@ -6462,3 +6462,90 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_092 \
   retry direct pair producer/consumer fusion. Target a larger ownership-aligned
   fusion, especially the post-pair accumulation/prefix/finalize chain or a
   custom producer that removes group `T@P/T@Q` materialization entirely.
+
+## 2026-08-09 [agent] reject fused group WY producer at Level 2
+
+**Context**
+
+- Attempt 93 starts from accepted attempt 91 and tests the ownership-aligned
+  producer suggested by the remaining backward profile. One CTA gathers one
+  strided recurrence chunk, stages `T/P/Q` once, and its eight warps compute
+  `T@P` and `T@Q` together with BF16 WMMA operands and FP32 accumulation.
+- The forward boundary traversal no longer materializes packed `P/Q/T`; the
+  reverse traversal writes the exact FP32 packed operands required by the full
+  VJP while producing both WY products. This replaces 32 grouped BMM calls and
+  56 framework contiguous copies per production forward/backward iteration
+  with 16 fused producer launches.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --config configs/research/kda_cuda_ownership.toml \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_093 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact seed-4101 B=2/H=3/T=4096 production comparison against attempt 91 and
+# one independent fresh-extension-cache repeat.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_091 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_093 \
+  runs/kda-cuda-development/attempt-00093-fused-group-producer-level1 \
+  --level2-order candidate-first
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_validation_093 \
+  --lane optimization --sanitizers <isolated artifact/cache arguments>
+# Executed the saved candidate-first Level-2 commands exactly once.
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_093 \
+  push -u origin kda-cuda/wy-fused-group-producer-093
+```
+
+**Artifacts**
+
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00093-fused-group-producer-protected-checker`, manifest `371d14a690679526d06a17cc728197f33f0dbff12871b79cdc660987cd5877bb`.
+- Production comparison/repeat: `runs/kda-cuda-development/diagnostics/attempt-00093-fused-group-producer-gradient`, manifest `8e2b1beaf0d8da964d38d51f227bb0cfbd66ce6b6af6d0656e3ff51511b4ee79`.
+- Invalid pre-launch capture: `runs/kda-cuda-development/diagnostics/attempt-00093-fused-group-producer-gradient-invalid-cwd-001`, manifest `890fd35ea631fa1a8fd909aa276b7ef814de4b58bdca327142539ef74afea875`.
+- Level 1: `runs/kda-cuda-development/attempt-00093-fused-group-producer-level1`, manifest `31cb1b19813d1f73e57c0e30ca0053155eef652cf2fbb6240e345c1624d54d1f`.
+- Full sanitizer validation: `runs/kda-cuda-development/validations/validation-00024-fused-group-producer`, manifest `ce38fab0798c01f5a22e48a6e510a76668cac307b5f4f224f06fb5b1077d1d97`.
+- Level 2: `runs/kda-cuda-development/attempt-00093-fused-group-producer-level2`, manifest `9d80acd487ea9c7f233eac5df29162f2d2e04689f0b4295cc9e5bc2d10c486a4`.
+- Append-only attempt/reference index SHA-256: `db2097273ae41150daa41960f7f17a3b8196854606408188c672620e5b643003`.
+
+**Result**
+
+- Pushed commit `3cc6ef841365dfd8411be964713ef5e90ff90077` passed ownership 1.0,
+  the complete protected runtime/profile audit, runtime FLA freedom, and all
+  four sanitizers with zero errors or hazards. Production output is bitwise
+  equal to attempt 91, maximum gradient delta is `1.467e-11`, every tensor is
+  within the frozen tolerance, and the fresh-cache repeat is bitwise exact.
+- Level 1 advanced: T=4096 forward+backward improved
+  `13.4197 -> 12.8541 ms` (4.21%) with identical 202,770,944-byte peak
+  allocation. T=256 and T=1024 regressed 4.59% and 3.43%, respectively, but
+  remained inside the frozen 5% important-row guard.
+- The single candidate-first Level-2 pair measured candidate
+  `[33280, 33246, 33182, 33226, 33212]` tok/s, median 33,226, and baseline
+  `[32867, 32932, 32907, 32876, 32954]` tok/s, median 32,907. The 0.97%
+  development gain is below the frozen 2% gate; peak memory is identical at
+  5,508.533 MiB, and candidate throughput is 76.07% of the fixed 43,680 tok/s
+  reference. No retest or production profile ran.
+- The first production-capture invocation resolved CUDA sources against the
+  coordinator cwd and failed before compilation/GPU work with
+  `FileNotFoundError: .../experiment_swa_kda/nanochat/mixers/cuda_kda/chunk.cu`.
+  Its empty output directory and exact failure are preserved. The successful
+  capture and repeat emitted only the standard local SM121 capability warning,
+  but console redirection was omitted; tensor payloads, comparisons, exact
+  invocation, return codes, and this raw-log limitation are preserved rather
+  than rerunning or manufacturing logs. A failed attempt to invoke `uv` from
+  the candidate also created a local environment stub and failed before GPU
+  work; it is preserved at `/tmp/kda093_accidental_venv_failed_launch_001`.
+- Attempt 93 is a correct rejected milestone. Attempt 91 remains the accepted
+  development baseline and the official retained milestone remains
+  `4d1a3b231da2c99882324efbda5306a1815e21c7`. No confirmation or LM-quality
+  evaluation ran, and this is not statistically confirmed evidence.
+
+**Next**
+
+- Continue from attempt 91. The fused producer proves that eliminating group
+  copies/BMM launches alone is not large enough at model level. Require a
+  larger end-to-end fusion: prioritize the forward WMMA/scan path or fuse the
+  post-pair ordered accumulation, prefix reverse, and finalization chain while
+  preserving deterministic ownership. Do not compose attempt 93 into the
+  baseline or retest its Level-2 pair.
