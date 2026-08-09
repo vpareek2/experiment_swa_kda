@@ -5459,3 +5459,62 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_078 \
 - Preserve attempt 78 unchanged. Continue from attempt 77; the arithmetic
   fusion may be reconsidered only as part of a separately gated larger
   reverse-loop fusion, not replayed alone.
+
+## 2026-08-09 [agent] reject warp-pair forward master-tile sharing
+
+**Context**
+
+- Attempt 79 starts from accepted attempt 77 and changes only
+  `nanochat/mixers/cuda_kda/chunk_wy_forward.cu`. In the forward WMMA Z and
+  output q/A phases, each adjacent warp pair forms a 64-thread cooperative
+  group. The even warp loads and converts the shared master A tile once, then
+  both value-half warps consume it after pair synchronization.
+- The candidate preserves WMMA geometry, equations, FP32 accumulation, BF16
+  casts, allocation, and output partitioning. It tests whether halving the
+  duplicated W/q/A master loads and exponent work outweighs the new pair
+  barriers.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_079 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact production-shape gradient capture and fresh-cache deterministic repeat.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_077 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_079 \
+  runs/kda-cuda-development/attempt-00079-warp-pair-master-level1
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_079 \
+  push -u origin kda-cuda/wy-warp-pair-master-079
+```
+
+**Artifacts**
+
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00079-warp-pair-master-protected-checker`, manifest `c54e5b4c12b8056a2bfa33e7f612bcc10d6c2ff6f07c6b1d8760247b098622cc`.
+- Production comparison/repeat: `runs/kda-cuda-development/diagnostics/attempt-00079-warp-pair-master-gradient`, manifest `14e51f3c6c5a8282cd2c248e177d6b389d8a0b7bcfea1fc71f2a3af8f3ddab86`.
+- Level 1: `runs/kda-cuda-development/attempt-00079-warp-pair-master-level1`, manifest `c0b5ffd9cfe97185e73c939a7262a36df73b0d9889bb9bf610806a303505ff6c`.
+- Append-only attempt/reference index SHA-256: `0d76016f12677c1131813018935a649eac559c12b5d18117a268aa8762227b3a`.
+
+**Result**
+
+- Pushed commit `2ea89549dc01eb725fe6d9f24245ed376d04e1ca`
+  passed ownership 1.0, protected runtime/profile audit, runtime FLA freedom,
+  bitwise output/all-gradient correctness against attempt 77, and a bitwise
+  fresh-cache repeat.
+- Level 1 rejected the candidate. T=4096 forward+backward regressed
+  `17.279 -> 18.500 ms` (7.07%), exceeding the frozen 5% important-regression
+  limit. T=4096 forward also regressed 0.12%; memory ratio remained 1.0.
+  Although shorter shapes improved by 0.05% to 1.48%, they do not override the
+  protected long-shape failure.
+- No sanitizer, Level 2, profile, confirmation, or retest ran. The evidence
+  indicates the 64-thread pair barriers cost more than the eliminated duplicate
+  master-tile work. Attempt 77 remains the accepted development baseline; this
+  is neither quality nor statistically confirmed evidence.
+
+**Next**
+
+- Preserve attempt 79 unchanged and continue from attempt 77. Do not replay
+  warp-pair barriers in the forward kernels. Prefer an axis that reduces
+  pair-pack/accumulate traffic or group-boundary WMMA work without adding
+  cross-warp synchronization.
