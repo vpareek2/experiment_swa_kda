@@ -5,11 +5,13 @@ from typing import Any
 
 _RECEIPT: dict[str, object] | None = None
 _CHUNK_SOURCE = "nanochat/mixers/cuda_kda/chunk.cu"
+_CHUNK_WY_FORWARD_SOURCE = "nanochat/mixers/cuda_kda/chunk_wy_forward.cu"
 _RECURRENT_SOURCE = "nanochat/mixers/cuda_kda/recurrent_decode.cu"
 _CONVOLUTION_FORWARD_SOURCE = "nanochat/mixers/cuda_kda/causal_convolution_forward.cu"
 _CONVOLUTION_BACKWARD_SOURCE = "nanochat/mixers/cuda_kda/causal_convolution_backward.cu"
 _SOURCES = (
     _CHUNK_SOURCE,
+    _CHUNK_WY_FORWARD_SOURCE,
     _RECURRENT_SOURCE,
     _CONVOLUTION_FORWARD_SOURCE,
     _CONVOLUTION_BACKWARD_SOURCE,
@@ -44,7 +46,9 @@ def provenance() -> dict[str, Any]:
     }
     components["chunk_forward"] = {
         "owner": "project",
-        "sources": [_CHUNK_SOURCE],
+        "sources": [_CHUNK_SOURCE, _CHUNK_WY_FORWARD_SOURCE],
+        # The canonical symbol remains the compatibility-path profile anchor;
+        # the exact-shape WY scan has its own descriptive CUDA symbol.
         "kernel_symbols": ["nanochat_kda_chunk_forward_kernel"],
         "torch_operator": "nanochat_kda::chunk_forward",
     }

@@ -4,6 +4,8 @@
 #include <c10/cuda/CUDAException.h>
 #include <torch/library.h>
 
+#include "chunk_wy_common.cuh"
+
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 
@@ -1579,6 +1581,23 @@ std::tuple<at::Tensor, c10::optional<at::Tensor>> chunk_forward_cuda(
   const at::Tensor contiguous_v = v.contiguous();
   const at::Tensor contiguous_raw_gate = raw_gate.contiguous();
   const at::Tensor contiguous_beta_logits = beta_logits.contiguous();
+
+  // The first WY/UT specialization is deliberately limited to the exact hot
+  // training call.  State-bearing, final-state, inference, and all other shape
+  // paths retain the checker-qualified token recurrence below.
+  const bool use_wy_c64 =
+      batch == 2 && length == 4096 && heads == 3 &&
+      key_dim == 128 && value_dim == 128 &&
+      lower_bound == -5.0 && scale == 0.08838834764831845 &&
+      !initial_state.has_value() && !output_final_state && q.requires_grad();
+  if (use_wy_c64) {
+    at::Tensor wy_output = nanochat_kda_chunk_wy_forward_c64(
+        contiguous_q, contiguous_k, contiguous_v, contiguous_raw_gate,
+        contiguous_beta_logits, A_log, dt_bias,
+        static_cast<float>(lower_bound), static_cast<float>(scale));
+    return {wy_output, c10::nullopt};
+  }
+
   at::Tensor output = at::empty({batch, length, heads, value_dim}, v.options());
   at::Tensor state = at::empty(
       {batch, heads, value_dim, key_dim}, q.options().dtype(at::kFloat));
