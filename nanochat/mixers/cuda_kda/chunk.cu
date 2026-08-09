@@ -761,7 +761,7 @@ __global__ void nanochat_kda_chunk_backward_generic_kernel(
   }
 }
 
-__global__ void nanochat_kda_chunk_backward_kernel(
+__global__ void nanochat_kda_chunk_backward_128_fallback_kernel(
     const __nv_bfloat16* v,
     const __nv_bfloat16* raw_gate,
     const __nv_bfloat16* beta_logits,
@@ -1004,6 +1004,397 @@ __global__ void nanochat_kda_chunk_backward_kernel(
   }
   if (lane == 0) {
     dA_log_partial[b * heads + h] = batch_A_gradient_shared;
+  }
+}
+
+// The active K=V=128 reverse is split into fixed 64-token chunks and eight
+// contiguous 16-value tiles.  Keeping the audited symbol on this tile kernel
+// makes the production bottleneck visible to the protected profiler.
+__global__ void nanochat_kda_chunk_backward_kernel(
+    const __nv_bfloat16* beta_logits,
+    const float* normalized_q,
+    const float* normalized_k,
+    const float* decay_exponential,
+    const __nv_bfloat16* grad_output,
+    __nv_bfloat16* dv,
+    const float* state_history,
+    const float* residual_history,
+    float* state_adjoint,
+    float* residual_adjoint,
+    float* query_tile_partial,
+    float* key_tile_partial,
+    float* decay_tile_partial,
+    float* beta_tile_partial,
+    int64_t batch,
+    int64_t length,
+    int64_t heads,
+    int64_t chunk_start,
+    int64_t chunk_end,
+    float scale) {
+  constexpr int64_t key_dim = 128;
+  constexpr int64_t value_dim = 128;
+  constexpr int64_t tile_count = 8;
+  constexpr int64_t tile_values = 16;
+  constexpr int64_t chunk_capacity = 64;
+  const int64_t tile = blockIdx.x % tile_count;
+  const int64_t recurrence = blockIdx.x / tile_count;
+  if (recurrence >= batch * heads) {
+    return;
+  }
+  const int64_t h = recurrence % heads;
+  const int64_t b = recurrence / heads;
+  const int64_t value_start = tile * tile_values;
+  const int64_t lane = threadIdx.x;
+  __shared__ float beta_shared;
+  __shared__ float beta_value_partial[tile_values];
+
+  for (int64_t token = chunk_end; token-- > chunk_start;) {
+    const int64_t local_token = token - chunk_start;
+    const int64_t q_base = q_index(
+        b, token, h, 0, length, heads, key_dim);
+    if (lane == 0) {
+      const int64_t beta_offset = (b * length + token) * heads + h;
+      beta_shared = chunk_sigmoid(
+          __bfloat162float(beta_logits[beta_offset]));
+    }
+    __syncthreads();
+
+    // Parent phase 1: output-query contribution to this tile's persistent
+    // state-adjoint rows.  The two iterations cover 16 * 128 entries.
+    for (int64_t linear = lane;
+         linear < tile_values * key_dim;
+         linear += blockDim.x) {
+      const int64_t local_value = linear / key_dim;
+      const int64_t key = linear - local_value * key_dim;
+      const int64_t value = value_start + local_value;
+      const int64_t state = state_index(
+          b, h, value, key, heads, value_dim, key_dim);
+      const int64_t value_offset = v_index(
+          b, token, h, value, length, heads, value_dim);
+      state_adjoint[state] += __bfloat162float(grad_output[value_offset]) *
+          (normalized_q[q_base + key] * scale);
+    }
+    __syncthreads();
+
+    // Parent phase 2: a deterministic ascending-value query partial.
+    if (lane < key_dim) {
+      const int64_t key = lane;
+      float partial = 0.0f;
+      for (int64_t local_value = 0;
+           local_value < tile_values;
+           ++local_value) {
+        const int64_t value = value_start + local_value;
+        const int64_t value_offset = v_index(
+            b, token, h, value, length, heads, value_dim);
+        const int64_t history = history_index(
+            b, h, token + 1, value, key,
+            heads, length, value_dim, key_dim);
+        partial += __bfloat162float(grad_output[value_offset]) *
+            state_history[history];
+      }
+      const int64_t partial_offset =
+          (((((tile * batch + b) * chunk_capacity + local_token) * heads + h) *
+             key_dim) + key);
+      query_tile_partial[partial_offset] = partial;
+    }
+    __syncthreads();
+
+    // Parent phase 3: each value is unique to this CTA, so dv and the
+    // residual adjoint need no cross-tile communication or atomics.
+    if (lane < tile_values) {
+      const int64_t value = value_start + lane;
+      float gradient = 0.0f;
+      float beta_partial = 0.0f;
+      const float residual = residual_history[v_index(
+          b, token, h, value, length, heads, value_dim)];
+      for (int64_t key = 0; key < key_dim; ++key) {
+        const int64_t state = state_index(
+            b, h, value, key, heads, value_dim, key_dim);
+        gradient += state_adjoint[state] * beta_shared *
+            normalized_k[q_base + key];
+        beta_partial += state_adjoint[state] *
+            normalized_k[q_base + key] * residual;
+      }
+      residual_adjoint[(b * heads + h) * value_dim + value] = gradient;
+      dv[v_index(b, token, h, value, length, heads, value_dim)] =
+          __float2bfloat16_rn(gradient);
+      beta_value_partial[lane] = beta_partial;
+    }
+    __syncthreads();
+    if (lane == 0) {
+      float partial = 0.0f;
+      for (int64_t local_value = 0;
+           local_value < tile_values;
+           ++local_value) {
+        partial += beta_value_partial[local_value];
+      }
+      const int64_t partial_offset =
+          (((tile * batch + b) * chunk_capacity + local_token) * heads + h);
+      beta_tile_partial[partial_offset] = partial;
+    }
+    __syncthreads();
+
+    // Parent phase 4: normalized-key gradient, before the state adjoint is
+    // advanced to the preceding token.
+    if (lane < key_dim) {
+      const int64_t key = lane;
+      const float decay_factor = decay_exponential[q_base + key];
+      float partial = 0.0f;
+      for (int64_t local_value = 0;
+           local_value < tile_values;
+           ++local_value) {
+        const int64_t value = value_start + local_value;
+        const int64_t state = state_index(
+            b, h, value, key, heads, value_dim, key_dim);
+        const float residual = residual_history[v_index(
+            b, token, h, value, length, heads, value_dim)];
+        const float residual_gradient = residual_adjoint[
+            (b * heads + h) * value_dim + value];
+        const float previous = state_history[history_index(
+            b, h, token, value, key,
+            heads, length, value_dim, key_dim)];
+        partial += state_adjoint[state] * beta_shared * residual -
+            residual_gradient * previous * decay_factor;
+      }
+      const int64_t partial_offset =
+          (((((tile * batch + b) * chunk_capacity + local_token) * heads + h) *
+             key_dim) + key);
+      key_tile_partial[partial_offset] = partial;
+    }
+    __syncthreads();
+
+    // Parent phase 5: decay gradient and the only update of the owned state
+    // adjoints.  Values remain in ascending contiguous order inside the tile.
+    if (lane < key_dim) {
+      const int64_t key = lane;
+      const float decay_factor = decay_exponential[q_base + key];
+      const float normalized_key = normalized_k[q_base + key];
+      float partial = 0.0f;
+      for (int64_t local_value = 0;
+           local_value < tile_values;
+           ++local_value) {
+        const int64_t value = value_start + local_value;
+        const int64_t state = state_index(
+            b, h, value, key, heads, value_dim, key_dim);
+        const float residual_gradient = residual_adjoint[
+            (b * heads + h) * value_dim + value];
+        const float previous = state_history[history_index(
+            b, h, token, value, key,
+            heads, length, value_dim, key_dim)];
+        const float decayed_state = previous * decay_factor;
+        const float decayed_gradient = state_adjoint[state] -
+            residual_gradient * normalized_key;
+        partial += decayed_gradient * decayed_state;
+        state_adjoint[state] = decayed_gradient * decay_factor;
+      }
+      const int64_t partial_offset =
+          (((((tile * batch + b) * chunk_capacity + local_token) * heads + h) *
+             key_dim) + key);
+      decay_tile_partial[partial_offset] = partial;
+    }
+    // No lane may enter the preceding token while another lane still owns
+    // an adjoint update for the current token.
+    __syncthreads();
+  }
+}
+
+__global__ void nanochat_kda_chunk_backward_row_finalize_128_kernel(
+    const __nv_bfloat16* beta_logits,
+    const float* A_log,
+    const float* q_square_sum,
+    const float* k_square_sum,
+    const float* q_inverse_norm,
+    const float* k_inverse_norm,
+    const float* normalized_q,
+    const float* normalized_k,
+    const float* gate_sigmoid,
+    const float* query_tile_partial,
+    const float* key_tile_partial,
+    const float* decay_tile_partial,
+    const float* beta_tile_partial,
+    __nv_bfloat16* dq,
+    __nv_bfloat16* dk,
+    __nv_bfloat16* draw_gate,
+    __nv_bfloat16* dbeta_logits,
+    float* raw_gate_gradient_history,
+    int64_t batch,
+    int64_t length,
+    int64_t heads,
+    int64_t chunk_start,
+    int64_t chunk_length,
+    float lower_bound,
+    float scale) {
+  constexpr int64_t key_dim = 128;
+  constexpr int64_t tile_count = 8;
+  constexpr int64_t chunk_capacity = 64;
+  const int64_t local_token = blockIdx.x % chunk_length;
+  const int64_t recurrence = blockIdx.x / chunk_length;
+  if (recurrence >= batch * heads) {
+    return;
+  }
+  const int64_t h = recurrence % heads;
+  const int64_t b = recurrence / heads;
+  const int64_t token = chunk_start + local_token;
+  const int64_t row = (b * length + token) * heads + h;
+  const int64_t q_base = q_index(
+      b, token, h, 0, length, heads, key_dim);
+  const int64_t key = threadIdx.x;
+  __shared__ float normalized_gradient[128];
+  __shared__ float dot_shared;
+
+  float partial = 0.0f;
+  for (int64_t tile = 0; tile < tile_count; ++tile) {
+    const int64_t partial_offset =
+        (((((tile * batch + b) * chunk_capacity + local_token) * heads + h) *
+           key_dim) + key);
+    partial += query_tile_partial[partial_offset];
+  }
+  normalized_gradient[key] = partial;
+  __syncthreads();
+  if (key == 0) {
+    float dot = 0.0f;
+    for (int64_t reduction_key = 0;
+         reduction_key < key_dim;
+         ++reduction_key) {
+      dot += normalized_gradient[reduction_key] *
+          normalized_q[q_base + reduction_key];
+    }
+    dot_shared = dot;
+  }
+  __syncthreads();
+  const float query_projection = q_square_sum[row] > 1.0e-24f
+      ? normalized_q[q_base + key] * dot_shared
+      : 0.0f;
+  dq[q_base + key] = __float2bfloat16_rn(
+      scale * q_inverse_norm[row] *
+      (normalized_gradient[key] - query_projection));
+  __syncthreads();
+
+  partial = 0.0f;
+  for (int64_t tile = 0; tile < tile_count; ++tile) {
+    const int64_t partial_offset =
+        (((((tile * batch + b) * chunk_capacity + local_token) * heads + h) *
+           key_dim) + key);
+    partial += key_tile_partial[partial_offset];
+  }
+  normalized_gradient[key] = partial;
+  __syncthreads();
+  if (key == 0) {
+    float dot = 0.0f;
+    for (int64_t reduction_key = 0;
+         reduction_key < key_dim;
+         ++reduction_key) {
+      dot += normalized_gradient[reduction_key] *
+          normalized_k[q_base + reduction_key];
+    }
+    dot_shared = dot;
+  }
+  __syncthreads();
+  const float key_projection = k_square_sum[row] > 1.0e-24f
+      ? normalized_k[q_base + key] * dot_shared
+      : 0.0f;
+  dk[q_base + key] = __float2bfloat16_rn(
+      k_inverse_norm[row] *
+      (normalized_gradient[key] - key_projection));
+  __syncthreads();
+
+  if (key == 0) {
+    float beta_gradient = 0.0f;
+    for (int64_t tile = 0; tile < tile_count; ++tile) {
+      const int64_t partial_offset =
+          (((tile * batch + b) * chunk_capacity + local_token) * heads + h);
+      beta_gradient += beta_tile_partial[partial_offset];
+    }
+    const float beta = chunk_sigmoid(
+        __bfloat162float(beta_logits[row]));
+    dbeta_logits[row] = __float2bfloat16_rn(
+        beta_gradient * beta * (1.0f - beta));
+  }
+
+  float decay_gradient = 0.0f;
+  for (int64_t tile = 0; tile < tile_count; ++tile) {
+    const int64_t partial_offset =
+        (((((tile * batch + b) * chunk_capacity + local_token) * heads + h) *
+           key_dim) + key);
+    decay_gradient += decay_tile_partial[partial_offset];
+  }
+  const float activated_gate = gate_sigmoid[q_base + key];
+  const float activated_gradient = decay_gradient * lower_bound *
+      activated_gate * (1.0f - activated_gate);
+  const float raw_gradient = activated_gradient * expf(A_log[h]);
+  draw_gate[q_base + key] = __float2bfloat16_rn(raw_gradient);
+  // q/k partials are dead after this row finalization.  The existing
+  // full-history normalized-adjoint allocation now records raw gate gradients
+  // for deterministic parameter reductions after all reverse chunks finish.
+  raw_gate_gradient_history[q_base + key] = raw_gradient;
+}
+
+__global__ void nanochat_kda_chunk_state_adjoint_init_128_kernel(
+    const float* grad_final_state,
+    float* state_adjoint,
+    int64_t count) {
+  const int64_t linear =
+      static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (linear < count) {
+    state_adjoint[linear] = grad_final_state == nullptr
+        ? 0.0f
+        : grad_final_state[linear];
+  }
+}
+
+__global__ void nanochat_kda_chunk_backward_parameter_finalize_128_kernel(
+    const __nv_bfloat16* raw_gate,
+    const float* dt_bias,
+    const float* raw_gate_gradient_history,
+    const float* state_adjoint,
+    float* dA_log_partial,
+    float* ddt_bias_partial,
+    float* dinitial_state,
+    int64_t batch,
+    int64_t length,
+    int64_t heads) {
+  constexpr int64_t key_dim = 128;
+  constexpr int64_t value_dim = 128;
+  const int64_t recurrence = blockIdx.x;
+  if (recurrence >= batch * heads) {
+    return;
+  }
+  const int64_t h = recurrence % heads;
+  const int64_t b = recurrence / heads;
+  const int64_t key = threadIdx.x;
+
+  float bias_gradient = 0.0f;
+  for (int64_t token = length; token-- > 0;) {
+    const int64_t q_base = q_index(
+        b, token, h, 0, length, heads, key_dim);
+    bias_gradient += raw_gate_gradient_history[q_base + key];
+  }
+  ddt_bias_partial[(b * heads + h) * key_dim + key] = bias_gradient;
+
+  if (dinitial_state != nullptr) {
+    for (int64_t value = 0; value < value_dim; ++value) {
+      const int64_t state = state_index(
+          b, h, value, key, heads, value_dim, key_dim);
+      dinitial_state[state] = state_adjoint[state];
+    }
+  }
+
+  if (key == 0) {
+    float A_gradient = 0.0f;
+    for (int64_t token = length; token-- > 0;) {
+      const int64_t q_base = q_index(
+          b, token, h, 0, length, heads, key_dim);
+      for (int64_t reduction_key = 0;
+           reduction_key < key_dim;
+           ++reduction_key) {
+        const float biased_gate =
+            __bfloat162float(raw_gate[q_base + reduction_key]) +
+            dt_bias[h * key_dim + reduction_key];
+        A_gradient += raw_gate_gradient_history[q_base + reduction_key] *
+            biased_gate;
+      }
+    }
+    dA_log_partial[b * heads + h] = A_gradient;
   }
 }
 
@@ -1257,6 +1648,24 @@ chunk_backward_cuda(
   at::Tensor normalized_adjoint = at::empty(q.sizes(), A_log.options());
   at::Tensor residual_adjoint = at::empty(
       {batch, heads, value_dim}, A_log.options());
+  // Fixed-capacity production reverse workspaces.  Their sizes are independent
+  // of T: three [G,B,Cmax,H,K] FP32 arrays plus one [G,B,Cmax,H].
+  at::Tensor query_tile_partial;
+  at::Tensor key_tile_partial;
+  at::Tensor decay_tile_partial;
+  at::Tensor beta_tile_partial;
+  if (key_dim == 128 && value_dim == 128) {
+    constexpr int64_t tile_count = 8;
+    constexpr int64_t chunk_capacity = 64;
+    query_tile_partial = at::empty(
+        {tile_count, batch, chunk_capacity, heads, key_dim}, A_log.options());
+    key_tile_partial = at::empty(
+        {tile_count, batch, chunk_capacity, heads, key_dim}, A_log.options());
+    decay_tile_partial = at::empty(
+        {tile_count, batch, chunk_capacity, heads, key_dim}, A_log.options());
+    beta_tile_partial = at::empty(
+        {tile_count, batch, chunk_capacity, heads}, A_log.options());
+  }
 
   const int threads = 1024;
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream(q.get_device());
@@ -1299,40 +1708,92 @@ chunk_backward_cuda(
           residual_history.data_ptr<float>(),
           batch, length, heads, value_dim);
       C10_CUDA_KERNEL_LAUNCH_CHECK();
-      nanochat_kda_chunk_backward_kernel<<<
-          static_cast<int>(recurrence_count), threads, shared_bytes, stream>>>(
-          reinterpret_cast<const __nv_bfloat16*>(contiguous_v.data_ptr<at::BFloat16>()),
-          reinterpret_cast<const __nv_bfloat16*>(contiguous_raw_gate.data_ptr<at::BFloat16>()),
-          reinterpret_cast<const __nv_bfloat16*>(contiguous_beta_logits.data_ptr<at::BFloat16>()),
-          A_log.data_ptr<float>(),
-          dt_bias.data_ptr<float>(),
-          q_square_sum.data_ptr<float>(),
-          k_square_sum.data_ptr<float>(),
-          q_inverse_norm.data_ptr<float>(),
-          k_inverse_norm.data_ptr<float>(),
-          normalized_q.data_ptr<float>(),
-          normalized_k.data_ptr<float>(),
-          gate_sigmoid.data_ptr<float>(),
-          decay_exponential.data_ptr<float>(),
-          initial_state.has_value() ? initial_state->data_ptr<float>() : nullptr,
-          reinterpret_cast<const __nv_bfloat16*>(
-              contiguous_grad_output.data_ptr<at::BFloat16>()),
+      const int64_t state_count = recurrence_count * value_dim * key_dim;
+      const int state_blocks = static_cast<int>(
+          (state_count + threads - 1) / threads);
+      nanochat_kda_chunk_state_adjoint_init_128_kernel<<<
+          state_blocks, threads, 0, stream>>>(
           grad_final_pointer,
-          reinterpret_cast<__nv_bfloat16*>(dq.data_ptr<at::BFloat16>()),
-          reinterpret_cast<__nv_bfloat16*>(dk.data_ptr<at::BFloat16>()),
-          reinterpret_cast<__nv_bfloat16*>(dv.data_ptr<at::BFloat16>()),
-          reinterpret_cast<__nv_bfloat16*>(draw_gate.data_ptr<at::BFloat16>()),
-          reinterpret_cast<__nv_bfloat16*>(dbeta_logits.data_ptr<at::BFloat16>()),
+          state_adjoint.data_ptr<float>(),
+          state_count);
+      C10_CUDA_KERNEL_LAUNCH_CHECK();
+
+      constexpr int64_t tile_count = 8;
+      constexpr int64_t chunk_capacity = 64;
+      const int64_t chunk_count =
+          (length + chunk_capacity - 1) / chunk_capacity;
+      for (int64_t chunk = chunk_count; chunk-- > 0;) {
+        const int64_t chunk_start = chunk * chunk_capacity;
+        const int64_t chunk_end =
+            (chunk_start + chunk_capacity < length)
+            ? chunk_start + chunk_capacity
+            : length;
+        const int64_t chunk_length = chunk_end - chunk_start;
+        nanochat_kda_chunk_backward_kernel<<<
+            static_cast<int>(recurrence_count * tile_count),
+            threads, 0, stream>>>(
+            reinterpret_cast<const __nv_bfloat16*>(
+                contiguous_beta_logits.data_ptr<at::BFloat16>()),
+            normalized_q.data_ptr<float>(),
+            normalized_k.data_ptr<float>(),
+            decay_exponential.data_ptr<float>(),
+            reinterpret_cast<const __nv_bfloat16*>(
+                contiguous_grad_output.data_ptr<at::BFloat16>()),
+            reinterpret_cast<__nv_bfloat16*>(dv.data_ptr<at::BFloat16>()),
+            state_history.data_ptr<float>(),
+            residual_history.data_ptr<float>(),
+            state_adjoint.data_ptr<float>(),
+            residual_adjoint.data_ptr<float>(),
+            query_tile_partial.data_ptr<float>(),
+            key_tile_partial.data_ptr<float>(),
+            decay_tile_partial.data_ptr<float>(),
+            beta_tile_partial.data_ptr<float>(),
+            batch, length, heads, chunk_start, chunk_end,
+            static_cast<float>(scale));
+        C10_CUDA_KERNEL_LAUNCH_CHECK();
+
+        constexpr int finalize_threads = 128;
+        nanochat_kda_chunk_backward_row_finalize_128_kernel<<<
+            static_cast<int>(recurrence_count * chunk_length),
+            finalize_threads, 0, stream>>>(
+            reinterpret_cast<const __nv_bfloat16*>(
+                contiguous_beta_logits.data_ptr<at::BFloat16>()),
+            A_log.data_ptr<float>(),
+            q_square_sum.data_ptr<float>(),
+            k_square_sum.data_ptr<float>(),
+            q_inverse_norm.data_ptr<float>(),
+            k_inverse_norm.data_ptr<float>(),
+            normalized_q.data_ptr<float>(),
+            normalized_k.data_ptr<float>(),
+            gate_sigmoid.data_ptr<float>(),
+            query_tile_partial.data_ptr<float>(),
+            key_tile_partial.data_ptr<float>(),
+            decay_tile_partial.data_ptr<float>(),
+            beta_tile_partial.data_ptr<float>(),
+            reinterpret_cast<__nv_bfloat16*>(dq.data_ptr<at::BFloat16>()),
+            reinterpret_cast<__nv_bfloat16*>(dk.data_ptr<at::BFloat16>()),
+            reinterpret_cast<__nv_bfloat16*>(draw_gate.data_ptr<at::BFloat16>()),
+            reinterpret_cast<__nv_bfloat16*>(
+                dbeta_logits.data_ptr<at::BFloat16>()),
+            normalized_adjoint.data_ptr<float>(),
+            batch, length, heads, chunk_start, chunk_length,
+            static_cast<float>(lower_bound), static_cast<float>(scale));
+        C10_CUDA_KERNEL_LAUNCH_CHECK();
+      }
+
+      constexpr int parameter_threads = 128;
+      nanochat_kda_chunk_backward_parameter_finalize_128_kernel<<<
+          static_cast<int>(recurrence_count),
+          parameter_threads, 0, stream>>>(
+          reinterpret_cast<const __nv_bfloat16*>(
+              contiguous_raw_gate.data_ptr<at::BFloat16>()),
+          dt_bias.data_ptr<float>(),
+          normalized_adjoint.data_ptr<float>(),
+          state_adjoint.data_ptr<float>(),
           dA_log_partial.data_ptr<float>(),
           ddt_bias_partial.data_ptr<float>(),
           dinitial_pointer,
-          state_history.data_ptr<float>(),
-          residual_history.data_ptr<float>(),
-          state_adjoint.data_ptr<float>(),
-          normalized_adjoint.data_ptr<float>(),
-          residual_adjoint.data_ptr<float>(),
-          batch, length, heads, key_dim, value_dim,
-          static_cast<float>(lower_bound), static_cast<float>(scale));
+          batch, length, heads);
       C10_CUDA_KERNEL_LAUNCH_CHECK();
     } else {
       nanochat_kda_chunk_backward_generic_kernel<<<
