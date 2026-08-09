@@ -5064,3 +5064,69 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_071 \
 
 - Preserve attempt 71 unchanged. Test any alternative value-tile geometry in a
   new child of attempt 70; do not exceed the static shared-memory ceiling.
+
+## 2026-08-09 [agent] accept 16-column persistent group state tiling
+
+**Context**
+
+- Attempt 72 starts from accepted attempt 70 and changes the persistent
+  backward group scan from one 32-value-column CTA to two 16-value-column CTAs.
+  Eight warps now compute all eight `E^T Z` products concurrently without the
+  shared-memory overflow of attempt 71. Equations, FP32 state/accumulators,
+  BF16 operand casts, histories, and chunk-boundary recomputation are unchanged.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_072 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact production-shape saved-gradient comparison plus repeat.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_070 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_072 \
+  runs/kda-cuda-development/attempt-00072-value-tile16-level1
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_validation_072 \
+  --lane optimization <isolated artifact/cache arguments> --sanitizers
+# Executed the saved baseline-first Level-2 plan exactly once, then one
+# production-shape Nsight Systems profile.
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_072 \
+  push -u origin kda-cuda/wy-value-tile16-group-state-072
+```
+
+**Artifacts**
+
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00072-value-tile16-protected-checker`, manifest `ed06e62b6ea2580704fb55489a7f6e2da8f91747e442df839181fdd1d6ad61ad`.
+- Production comparison/repeat: `runs/kda-cuda-development/diagnostics/attempt-00072-value-tile16-gradient`, manifest `c6d690ec808526ac5cea971c36ed966a8a54939a4f28ea80bb38ed6f8c96c7f1`.
+- Full sanitizer validation: `runs/kda-cuda-development/validations/validation-00017-value-tile16-group-state`, manifest `eb0efab08c268b3ab3c2694bb885fa3ed08f31841055a69acb6dcbb3d9b1d030`.
+- Level 1: `runs/kda-cuda-development/attempt-00072-value-tile16-level1`, manifest `66cd13b2e6c9fb83a7ff32efa77547153a9cf34eb8e49917f1fdbb25f800ae63`.
+- Level 2: `runs/kda-cuda-development/attempt-00072-value-tile16-level2`, manifest `e8ad96391ef7b55d29b8295333ac023f47fd2da4463c37390a39b026e754aeec`.
+- Production profile: `runs/kda-cuda-development/diagnostics/attempt-00072-production-profile`, manifest `9af73270c6e9070e3bc952a00d09f11f212c65a85477b9b903261bcf1c1bc71c`.
+- Baseline manifest: `runs/kda-cuda-development/baseline/66e432607e.json`, SHA-256 `f79cb593a52e305af3b3282682396a90b0c2d36f3b80e62165f19ff89b333311`.
+- Append-only attempt/reference index SHA-256: `055cc1b0f90241779356ee577c42d8cd4ecb998fb213702ec33836a448c48af9`.
+
+**Result**
+
+- Pushed commit `66e432607ed619ccbac36900e1d5c648e213beb2`
+  passed ownership 1.0, runtime/profile audit, runtime FLA freedom, bitwise
+  output and all-gradient equality against attempt 70, a bitwise repeat, and
+  all four sanitizers.
+- Level 1 advanced with every guard passing: T=4096 forward+backward improved
+  `18.838 -> 18.068 ms` (4.09%) with unchanged peak allocation.
+- The single baseline-first Level-2 pair measured baseline
+  `[29619,29477,29496,29436,29484]`, median `29484 tok/s`, and candidate
+  `[29896,29748,29868,29412,29891]`, median `29868 tok/s`: +1.30%, identical
+  `5508.533 MiB`, and 68.38% of the fixed 43,680 tok/s reference.
+- Profiling confirms the targeted persistent group kernel fell from
+  `1.695 -> 1.366 ms/iteration`, a 19.39% reduction. Attempt 72 is the accepted
+  development baseline. Official retention remains `4d1a3b231da2c99882324efbda5306a1815e21c7`;
+  no confirmation or quality evaluation ran, and the result is not
+  statistically confirmed.
+
+**Next**
+
+- Continue from exact attempt 72. The largest named path remains the forward
+  WMMA scan (`2.174 ms/iteration`), followed by pair pack/transforms and the
+  remaining generic FP32 BMM groups. Preserve 16-column group tiling and the
+  no-full-history reverse-recomputation design.
