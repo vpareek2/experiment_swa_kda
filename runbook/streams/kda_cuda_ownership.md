@@ -3264,3 +3264,90 @@ uv run --no-sync python scripts/kda_cuda_development.py \
 
 - Keep attempt 38 accepted. Do not sweep ratio-cache variants; target the
   parameter kernel or the paired forward/backward M/A construction instead.
+
+## 2026-08-09 [agent] reject direct parameter-gradient loads
+
+**Context**
+
+- Attempt 40 removed two per-token barriers and shared staging from the
+  parameter kernel. Lane zero directly read raw gradients and gate inputs in
+  the same token-reverse/key-ascending order, while all lanes retained their
+  independent reverse-token bias reductions.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_040 \
+  --lane optimization <isolated artifact/cache arguments>
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_038 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_040 \
+  runs/kda-cuda-development/attempt-00040-direct-params-level1
+```
+
+**Artifacts**
+
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00040-protected-checker`, manifest `e124977248c52cdd997f36ed01f59320942912b34583b3f512ec5a2ba40a9fc1`.
+- Exact gradients: `runs/kda-cuda-development/diagnostics/attempt-00040-direct-params-gradient-exact`, manifest `581d9cbba5353b93bbe814fc95208c9c996265ed212fd069e44d0f7fa9965bed`.
+- Level 1: `runs/kda-cuda-development/attempt-00040-direct-params-level1`, manifest `fa51874c4bda671d626aaf72c911f2f06d3705979147e0f760b55f38041bc98f`.
+
+**Result**
+
+- Pushed commit `c854eee0c751a9a2931b06fe9695895e6f21b8ae` passed
+  ownership/runtime gates and was bitwise identical to attempt 38.
+- Level 1 rejected it: T=4096 forward+backward regressed
+  `29.108 -> 38.046 ms` (30.71%) at identical memory. Removing barriers lost
+  coalesced staging and was decisively harmful. No retest, sanitizer, or Level
+  2 ran; no sanitizer-valid claim is made.
+
+**Next**
+
+- Retain the accepted staged parameter kernel; do not pursue direct-load forms.
+
+## 2026-08-09 [agent] reject 128-thread M/A builders
+
+**Context**
+
+- Attempt 41 changed both exact C64 M/A builder launches from 256 to 128
+  threads, matching the key width while preserving every pair's ascending-key
+  dot product. This tested the remaining exact launch-shape axis after the
+  attempt-38 profile attributed about `3.73 ms` per iteration to the two
+  forward/backward builders.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_041 \
+  --lane optimization <isolated artifact/cache arguments>
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_038 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_041 \
+  runs/kda-cuda-development/attempt-00041-ma128-level1
+```
+
+**Artifacts**
+
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00041-protected-checker`, manifest `9a749e3fd7f786a331eb5eb1e3c7065fbbc9b63b7ffe2f4c7a9b187b9574aac6`.
+- Exact gradients: `runs/kda-cuda-development/diagnostics/attempt-00041-ma128-gradient-exact`, manifest `fb6e113a59fef7fc215a59831c1d891ecab6a0ffccb87853d187d1729861f96b`.
+- Level 1: `runs/kda-cuda-development/attempt-00041-ma128-level1`, manifest `ade7c814644d352624e7ca4a34a0a56b26d04cf0e86ea0feb54e978de73554b0`.
+- Append-only attempt/reference index SHA-256: `7102a37423f36db3ec66a54edd6ba8d058a6bb3e77e66fd7e447decfe2c520d7`.
+
+**Result**
+
+- Pushed commit `26fb81c1692f12feef1fc5a60b52daa65335aa1d` passed
+  ownership/runtime gates and remained bitwise identical to attempt 38.
+- Level 1 did not advance: T=4096 forward+backward changed
+  `29.094 -> 29.483 ms` (-1.34%), T=256 regressed 4.89%, and memory was
+  unchanged. No retest, sanitizer, or Level 2 ran.
+- Attempt 38 remains the accepted development baseline. Attempts 39-41 form an
+  exact-optimization plateau, not confirmation, quality evidence, or official
+  retention.
+
+**Next**
+
+- Stop launch-shape and shared-cache sweeps. The next credible boundary is an
+  algebraic M/A construction redesign (for example, matched transformed BMMs)
+  with explicit recurrence-output/gradient tolerances, deterministic repeats,
+  and the full protected gates before any performance claim.
