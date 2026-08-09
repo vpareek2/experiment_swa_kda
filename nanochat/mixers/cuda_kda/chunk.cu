@@ -1398,6 +1398,74 @@ __global__ void nanochat_kda_chunk_backward_parameter_finalize_128_kernel(
   }
 }
 
+__global__ void nanochat_kda_chunk_backward_A_token_128_kernel(
+    const __nv_bfloat16* raw_gate,
+    const float* dt_bias,
+    const float* raw_gate_gradient_history,
+    float* A_token_partial,
+    int64_t heads,
+    int64_t row_count) {
+  constexpr int64_t key_dim = 128;
+  const int64_t row = blockIdx.x;
+  if (row >= row_count) {
+    return;
+  }
+  const int64_t h = row % heads;
+  const int64_t key = threadIdx.x;
+  const int64_t q_base = row * key_dim;
+  __shared__ float contribution[128];
+
+  contribution[key] = raw_gate_gradient_history[q_base + key] *
+      (__bfloat162float(raw_gate[q_base + key]) +
+       dt_bias[h * key_dim + key]);
+  __syncthreads();
+  if (key == 0) {
+    float sum = 0.0f;
+    for (int64_t reduction_key = 0;
+         reduction_key < key_dim;
+         ++reduction_key) {
+      sum += contribution[reduction_key];
+    }
+    A_token_partial[row] = sum;
+  }
+}
+
+__global__ void nanochat_kda_chunk_backward_parameter_reduce_128_kernel(
+    const float* raw_gate_gradient_history,
+    const float* A_token_partial,
+    float* dA_log_partial,
+    float* ddt_bias_partial,
+    int64_t batch,
+    int64_t length,
+    int64_t heads) {
+  constexpr int64_t key_dim = 128;
+  const int64_t owner = blockIdx.x;
+  if (owner >= batch * heads * key_dim || threadIdx.x != 0) {
+    return;
+  }
+  const int64_t key = owner % key_dim;
+  const int64_t recurrence = owner / key_dim;
+  const int64_t h = recurrence % heads;
+  const int64_t b = recurrence / heads;
+
+  float bias_gradient = 0.0f;
+  for (int64_t token = length; token-- > 0;) {
+    const int64_t q_base = q_index(
+        b, token, h, 0, length, heads, key_dim);
+    bias_gradient += raw_gate_gradient_history[q_base + key];
+  }
+  ddt_bias_partial[(b * heads + h) * key_dim + key] = bias_gradient;
+
+  if (key == 0) {
+    float A_gradient = 0.0f;
+    for (int64_t token = length; token-- > 0;) {
+      const int64_t row = (b * length + token) * heads + h;
+      A_gradient += A_token_partial[row];
+    }
+    dA_log_partial[b * heads + h] = A_gradient;
+  }
+}
+
 __global__ void nanochat_kda_reduce_A_log_gradient_kernel(
     const float* partial,
     float* gradient,
@@ -1781,20 +1849,40 @@ chunk_backward_cuda(
         C10_CUDA_KERNEL_LAUNCH_CHECK();
       }
 
-      constexpr int parameter_threads = 128;
-      nanochat_kda_chunk_backward_parameter_finalize_128_kernel<<<
-          static_cast<int>(recurrence_count),
+      if (row_count > 0) {
+        constexpr int A_token_threads = 128;
+        nanochat_kda_chunk_backward_A_token_128_kernel<<<
+            static_cast<int>(row_count),
+            A_token_threads, 0, stream>>>(
+            reinterpret_cast<const __nv_bfloat16*>(
+                contiguous_raw_gate.data_ptr<at::BFloat16>()),
+            dt_bias.data_ptr<float>(),
+            normalized_adjoint.data_ptr<float>(),
+            q_square_sum.data_ptr<float>(),
+            heads, row_count);
+        C10_CUDA_KERNEL_LAUNCH_CHECK();
+      }
+
+      constexpr int parameter_threads = 1;
+      const int64_t parameter_owner_count = recurrence_count * key_dim;
+      nanochat_kda_chunk_backward_parameter_reduce_128_kernel<<<
+          static_cast<int>(parameter_owner_count),
           parameter_threads, 0, stream>>>(
-          reinterpret_cast<const __nv_bfloat16*>(
-              contiguous_raw_gate.data_ptr<at::BFloat16>()),
-          dt_bias.data_ptr<float>(),
           normalized_adjoint.data_ptr<float>(),
-          state_adjoint.data_ptr<float>(),
+          q_square_sum.data_ptr<float>(),
           dA_log_partial.data_ptr<float>(),
           ddt_bias_partial.data_ptr<float>(),
-          dinitial_pointer,
           batch, length, heads);
       C10_CUDA_KERNEL_LAUNCH_CHECK();
+
+      if (dinitial_pointer != nullptr) {
+        nanochat_kda_chunk_state_adjoint_init_128_kernel<<<
+            state_blocks, threads, 0, stream>>>(
+            state_adjoint.data_ptr<float>(),
+            dinitial_pointer,
+            state_count);
+        C10_CUDA_KERNEL_LAUNCH_CHECK();
+      }
     } else {
       nanochat_kda_chunk_backward_generic_kernel<<<
           static_cast<int>(recurrence_count), threads, shared_bytes, stream>>>(
