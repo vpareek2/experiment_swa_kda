@@ -7894,3 +7894,77 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_114 \
   any follow-up must implement that complete scheduling unit. Otherwise move
   to a pipelined persistent recurrence or a backward launch/global-handoff
   boundary large enough to affect the remaining 30% throughput gap.
+
+## 2026-08-09 [Codex] Attempt 115 four-row preparation also rejected
+
+**Context**
+
+- Attempt 115 starts directly from accepted attempt 100 and tests the specific
+  scheduling weakness exposed by attempt 114. Four independent 128-thread row
+  groups share one 512-thread CTA, so four exact ascending norm reductions run
+  concurrently and CTA count falls from 24,576 to 6,144. The separate C64
+  channel-prefix/Q pass and all equations, precision, ownership, and allocation
+  remain unchanged.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_115 \
+  --lane optimization <isolated artifact/cache arguments>
+# Seed-4101 production comparison and independent fresh-cache repeat.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_100 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_115 \
+  runs/kda-cuda-development/attempt-00115-four-row-preprocess-level1 \
+  --level2-order baseline-first
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_115 \
+  push -u origin kda-cuda/wy-four-row-preprocess-115
+```
+
+**Artifacts**
+
+- Pushed commit `0e2ea2164fe34d321b0f12f3d37c4f444b3ef07e`;
+  forward/backward source SHA-256 values
+  `c89feffb928dca099346cc35de43a34b9973ffc2c2786c5578fb54a5477ed538`
+  and `1b3cde282848467f8c662ed369917de1c712c1ea616e85f6368e6c312e61a83c`.
+- Protected checker:
+  `runs/kda-cuda-development/diagnostics/attempt-00115-four-row-preprocess-protected-checker`,
+  manifest `8758b80d02024826a94a51c0053e51e4a93293dd4d0ee85815e58a6c62efc9cd`.
+- Production comparison/repeat:
+  `runs/kda-cuda-development/diagnostics/attempt-00115-four-row-preprocess-gradient`,
+  manifest `446b3ab64a51df152729043122af33e53a57fdb73430bea6b33f9ff21d7b14a3`.
+- Level 1:
+  `runs/kda-cuda-development/attempt-00115-four-row-preprocess-level1`,
+  manifest `025641f94b372628212cc2ccee027f9d2a65e0250879594487d33f9e6a36648b`.
+- Append-only attempt/reference index SHA-256:
+  `6a3adbafaed6b02f0bd95e6144896eb1dbad0a90b6ab6ac7c194d982a533bc5e`.
+- The first manifest/hash postprocessing command ran from the candidate cwd
+  and failed before GPU work because the relative coordinator checker path did
+  not exist. The branch push in that shell succeeded; no experiment reran.
+  `postprocess-incident.txt` preserves the exact error, and the candidate's
+  ignored tree preserves its partial duplicate logs/manifest.
+
+**Result**
+
+- Ownership 1.0, protected runtime/profile audit, runtime FLA freedom, frozen
+  numerical tolerance, and the independent bitwise repeat all pass. Maximum
+  output delta is `0.000244140625`; maximum gradient delta is
+  `8.519034366827327e-10`.
+- Four-row cooperation reduces attempt 114's long-sequence regression but does
+  not reverse it. T=4096 forward+backward regresses
+  `12.325888 -> 12.570688 ms` (1.986%), forward regresses 0.193%, and memory is
+  unchanged. T=256 forward+backward regresses 6.053%, violating the 5% guard;
+  T=1024 regresses 0.314%.
+- No sanitizer, Level 2, production profile, confirmation, or LM-quality
+  evaluation ran.
+
+**Next**
+
+- Retain attempt 100 and close split-preprocess CTA-granularity tuning. The
+  one-row and four-row results show that the separate decay materialization and
+  prefix launch are not competitive by themselves.
+- Catching FLA still requires the full recurrence pipeline mechanism—staged
+  asynchronous/global loads and register-resident MMA handoffs—or a backward
+  fusion that removes major global dependency boundaries. Do not spend another
+  attempt sweeping row count within this rejected preparation family.
