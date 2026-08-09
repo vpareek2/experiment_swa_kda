@@ -7306,3 +7306,73 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_106 \
   kernel plus persistent recurrence/output kernel with register-resident
   handoff between dependent MMAs, following FlashKDA's dataflow principles but
   independently implementing the training-compatible project equations.
+
+## 2026-08-09 [Codex] Attempt 107 fused forward preparation rejected at Level 1
+
+**Context**
+
+- Attempt 107 starts directly from accepted attempt 100 and tests the complete
+  forward preparation boundary suggested by the FlashKDA dataflow rather than
+  another backward micro-axis. One CTA per chunk stages `T` once, computes
+  `T@P` and `T@Q` with BF16 WMMA and FP32 accumulation, emits BF16 `U/W`, and
+  packs `qgamma`, restored keys, and `A` into storage whose FP32 contents are
+  dead before the persistent forward scan.
+- The persistent scan consumes those BF16 intermediates and BF16 inter-chunk
+  state. The candidate removes two generic forward `bmm_out` calls and releases
+  dead `qbar/khat/beta/A/T` storage before the scan. It is independently
+  implemented and never imports or links FlashKDA at runtime.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_107 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact seed-4101 production comparison and independent fresh-cache repeat.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_100 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_107 \
+  runs/kda-cuda-development/attempt-00107-fused-forward-prepare-level1 \
+  --level2-order baseline-first
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_107 \
+  push -u origin kda-cuda/wy-fused-forward-prepare-107
+```
+
+**Artifacts**
+
+- Pushed commit `76a789bfe59194b631c1bfd42a3f26dc902a08e3`;
+  source SHA-256 `0191c5644c2cac8dbdc9f967e471d6e3cd0af90ecf9ccef621821700a0fd853d`.
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00107-fused-forward-prepare-protected-checker`,
+  manifest `4bfdeb1c09044989d78ae1b681e94d671c972a4d7de7aa5ce1722b57f86f9a95`.
+- Production comparison/repeat: `runs/kda-cuda-development/diagnostics/attempt-00107-fused-forward-prepare-gradient`,
+  manifest `fbf65f668cc6bab414270583d5eae6d4b622529d3b2d7b03639c794294287b1a`.
+- Level 1: `runs/kda-cuda-development/attempt-00107-fused-forward-prepare-level1`,
+  manifest `74e0f5015fc9a944598148814d3198141cab0dc5661188070c10cff096f59037`.
+- Append-only attempt/reference index SHA-256:
+  `9ccce330ffd312ae124004bbdf568acdee67edfab892a67110ae182c23d0c5e4`.
+
+**Result**
+
+- The candidate passes ownership 1.0, the protected runtime/profile audit,
+  runtime FLA freedom, frozen numerical tolerance, finite-gradient checks, and
+  an independent bitwise deterministic repeat. Versus attempt 100, maximum
+  output delta is `0.00048828125` and maximum gradient delta is
+  `2.0568222680594772e-09`; both are within the established BF16-state envelope.
+- Level 1 rejects the candidate. T=4096 forward+backward improves only
+  `12.331136 -> 12.262608 ms` (0.556%), while forward alone improves 0.383%.
+  Peak allocation improves 3.943%, from 202,770,944 to 194,775,552 bytes.
+  T=256 forward+backward regresses 5.380%, violating the important-row guard;
+  T=1024 improves 1.619%.
+- No sanitizer, Level-2, profile, confirmation, or LM-quality evaluation ran.
+  This is development evidence only and is not statistically confirmed.
+
+**Next**
+
+- Retain attempt 100 as the accepted development baseline. Removing the two
+  isolated forward BMM launches and shortening workspace lifetimes materially
+  reduces memory but does not address the throughput bottleneck.
+- Return to the C64 backward transition: remove full token-history retention
+  through chunk-boundary recomputation/reverse scan, then compose the complete
+  WY/UT VJP across producer-consumer boundaries. FlashKDA remains useful for
+  scheduling ideas in the forward path, but the remaining gap is now more
+  strongly localized to training-only backward/recompute work.
