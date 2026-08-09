@@ -5693,3 +5693,90 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_082 \
 - Preserve attempt 82 unchanged. Continue from attempt 77 and seek a larger
   structural removal of pair/BMM or group-boundary work; the copy fusion alone
   is too small to retain.
+
+## 2026-08-09 [agent] accept fused pair-WMMA VJP as development baseline
+
+**Context**
+
+- Attempt 83 starts from accepted attempt 77 and changes only
+  `nanochat/mixers/cuda_kda/chunk_wy_backward.cu`. One 256-thread CTA per
+  stable tile pair packs the upstream, right, and left operands into shared
+  BF16 storage and computes three VJP products with BF16 WMMA and FP32
+  accumulation. The existing ordered accumulation kernel remains.
+- This removes three `at::bmm_out` calls per pair batch without changing the
+  recurrence, bounded eight-chunk scratch, forward path, or declared model
+  configuration. The fixed external FLA reference remains 43,680 tok/s and
+  the campaign target remains at least 45,000 tok/s.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_083 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact seed-4101 production capture and fresh-cache repeat against attempt 77.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_077 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_083 \
+  runs/kda-cuda-development/attempt-00083-pair-wmma-level1 \
+  --level2-order baseline-first
+# One invalid baseline-only Level-2 invocation was excluded, then one fresh,
+# fully logged baseline-first matched pair was run under a new namespace.
+# The candidate patch was staged in detached validation worktree 083 before:
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_validation_083 \
+  --lane optimization --sanitizers <isolated artifact/cache arguments>
+# One bounded two-iteration production Nsight Systems profile followed.
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_083 \
+  push -u origin kda-cuda/wy-pair-wmma-vjp-083
+```
+
+**Artifacts**
+
+- Protected checker: `runs/kda-cuda-development/diagnostics/attempt-00083-pair-wmma-protected-checker`, manifest `50dc85d44ed089bd686e0699a0da55d08fed0c0d41382378bf4049d5daffa7f8`.
+- Production comparison/repeat: `runs/kda-cuda-development/diagnostics/attempt-00083-pair-wmma-gradient`, manifest `7ec0697289cc86d7b5ecb465aad8bf10ad2ba282bc7a5e36ee3a37b926f6e77c`.
+- Level 1: `runs/kda-cuda-development/attempt-00083-pair-wmma-level1`, manifest `f6a04ee8f6cd2e195a2ec43e18f4d2d93007b8407186d6c68f16a3eef1bc0c83`.
+- Full sanitizer validation: `runs/kda-cuda-development/validations/validation-00019-pair-wmma`, manifest `3734607272d1a3f8b6e5a69cd1177360d4babd30dab4ac8fd0836b5492162806`.
+- Invalid first Level-2 baseline capture: `runs/kda-cuda-development/diagnostics/attempt-00083-level2-invalid-missing-log-001`, manifest `fcd964ebb291109c223d2293a0632c97b46678dc4998d3b0a13bf6a33ed9e07e`.
+- Valid fresh Level-2 pair: `runs/kda-cuda-development/attempt-00083-pair-wmma-level2-valid-001`, manifest `28122606f52e6f852807459bf07722220281362c2cc2d317bcfed6ac3c3ed003`.
+- Production profile: `runs/kda-cuda-development/diagnostics/attempt-00083-production-profile`, manifest `91a37ff76394f2dda839b8922c5f6a0b4396265436e767023740331d1d5b7999`.
+- Development-baseline manifest: `runs/kda-cuda-development/baseline/17dc8f662e.json`, SHA-256 `8522ac4b1fe477ad0ea4a251d127b4043c0b506b440a87114c12523dce853078`.
+- Append-only attempt/reference index SHA-256: `578ea0811bc8762973ed6050949671a1399320de5ec830154981b40fce1f7897`.
+
+**Result**
+
+- Pushed commit `17dc8f662e1fea264aa7a42423ebfc5353623361`
+  passed ownership 1.0, protected runtime/profile audit, runtime FLA freedom,
+  and all four sanitizers with zero errors. Output and `dv` are bitwise equal
+  to attempt 77. The maximum gradient delta is `5.090e-09`; every tensor
+  passes the frozen tolerance and the fresh-cache repeat is bitwise
+  deterministic.
+- Level 1 advanced: T=4096 forward+backward improved `17.543 -> 16.523 ms`
+  (5.82%) with memory ratio 1.0 and all guards true. T=4096 forward improved
+  0.70%; T=1024 forward+backward improved 0.47%; T=256 forward+backward
+  regressed 1.70%, within the declared limit.
+- The valid fresh Level-2 baseline-first pair measured baseline
+  `[30100, 30093, 30050, 29899, 29972]` tok/s, median 30,050, and candidate
+  `[30656, 30608, 30647, 30390, 30637]` tok/s, median 30,637. This is a 1.95%
+  matched development improvement with identical 5,508.533 MiB peak memory
+  and 70.14% of the fixed external FLA reference.
+- The first Level-2 baseline process completed, but relative artifact setup
+  occurred from the baseline worktree, so the absolute `tee` target did not
+  exist and no raw stdout log was saved. Its recovered payload and stderr are
+  preserved, but the measurement is invalid and excluded.
+- The two-iteration profile measured the new fused pair WMMA at 1.004 ms/iter
+  and ordered pair accumulation at 0.590 ms/iter. Relative to attempt 77, each
+  of three generic pair-BMM families lost 48 instances over two iterations.
+- Attempt 83 is accepted only as the new development baseline. The official
+  retained milestone remains `4d1a3b231da2c99882324efbda5306a1815e21c7`.
+  No confirmation or LM-quality evaluation ran, and this is not statistically
+  confirmed evidence.
+
+**Next**
+
+- Continue from attempt 83. Use the saved profile to target forward WMMA
+  (2.178 ms/iter), group-boundary WMMA (1.327 ms/iter), the forward/backward
+  pair transforms (0.727/0.720 ms/iter), and the combined fused-pair plus
+  ordered-accumulation path (1.594 ms/iter). Preserve all gates and use sparse
+  confirmation only at a major strategy boundary, plateau, checkpoint, or
+  final candidate.
