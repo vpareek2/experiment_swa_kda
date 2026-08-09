@@ -2737,3 +2737,65 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_031 \
   remaining peak. Replace them with bounded chunk-group boundary states,
   recompute each group, and consume its reverse/VJP products before moving to
   the previous group. Preserve exact ordering within each recurrence.
+
+## 2026-08-09 [agent] preserve four-chunk grouped WY VJP scaffold
+
+**Context**
+
+- Attempt 32 replaces full-sequence H/Z/dH-next/dZ and matrix-adjoint storage
+  with 16 four-chunk boundary groups. Each group is recomputed, reverse-scanned,
+  differentiated, and consumed before the previous group begins.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_032 \
+  --lane optimization <isolated artifact/cache arguments>
+compute-sanitizer --tool memcheck <exact production gradient helper>
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_028 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_032 \
+  runs/kda-cuda-development/attempts/attempt-00032-level1
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_032 \
+  push -u origin kda-cuda/wy-vjp-grouped-032
+```
+
+**Artifacts**
+
+- Final protected checker: `runs/kda-cuda-development/diagnostics/attempt-00032-protected-checker`,
+  manifest SHA-256 `4689033a9a67bb34c2012a53e61d34067da28c6d91d184441900f9ad6710f7f8`.
+- Production comparison plus every invalid pre-fix run and raw memcheck log:
+  `runs/kda-cuda-development/diagnostics/attempt-00032-grouped-gradient-exact`,
+  manifest SHA-256 `7404cf3f8a13e55d086e7f76e3390a5d9cfe8aeb4d71205ed629378fd77da027`.
+- Draft timing/memory:
+  `runs/kda-cuda-development/diagnostics/attempt-00032-grouped-draft`,
+  manifest SHA-256 `705af1fbac6189b0232949ae856b09c26a02757d94dbbb056f0c0be804580bbe`.
+- Formal Level 1: `runs/kda-cuda-development/attempts/attempt-00032-level1`,
+  manifest SHA-256 `e44614a555dd2401eee4cf9d5390f4041da41325bbf1ba104f607c3645c70da5`.
+- Append-only index SHA-256:
+  `436853935f74680fe54a17da2781555180e73305aa5081b41e7463e17d5f41ec`.
+
+**Result**
+
+- The first production launch was invalid. Synchronous rerun exposed an
+  illegal address, and memcheck reported 130 errors in the grouped pair kernel:
+  group-local dP/dQ were indexed with global `n`. Both indices were corrected
+  to `local_n`; all failed logs are preserved and are not measurements.
+- Exact pushed commit `941330842689a04a07dca14c6e2ce02686099337`
+  passed the final protected audit at ownership 1.0 with no runtime FLA. After
+  the fix, output and all seven production gradients are bitwise identical to
+  attempt 31.
+- Peak fell `319572992 -> 271764480` bytes, but candidate-only T=4096 rose to
+  `61.681 ms`. Formal Level 1 measured `60.706 -> 60.578 ms` (0.21%) and a
+  `1.3493x` memory ratio, so neither the 3% speed threshold nor memory gate
+  passed. Level 2 was not launched.
+- Attempt 32 is a correct grouped scaffold, not an accepted baseline,
+  confirmation, quality evidence, or official retention.
+
+**Next**
+
+- The full U/W/R/E tensors and global dqbar/dkhat/dprefix/dv scratch dominate
+  the remaining live set, while packing 16 groups dominates runtime. Recompute
+  U/W/R/E inside wider groups and finalize each group's normalized/input
+  gradients immediately so group-local adjoints do not accumulate globally.
