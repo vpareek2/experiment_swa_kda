@@ -12056,3 +12056,59 @@ uv run --no-sync python scripts/kda_cuda_development.py \
   reduction is parallelized without changing FP32 addition order.
 - The next candidate should reduce useful broad-VJP or colored-pair work, not
   merely move a reduction into an already long critical path.
+
+## 2026-08-10 [Codex] Cooperative inline dD preserves order but regresses
+
+**Context**
+
+- Attempt170 starts from accepted attempt168 and parallelizes attempt169's
+  inline `dD` reconstruction. All 256 threads stage the 16-by-128 BF16
+  state/dstate products into existing shared scratch; 16 threads then sum one
+  key each in the original value order. The eight-warp complete VJP and removal
+  of the separate `dD` buffer and eight reduction launches are otherwise the
+  same boundary as attempt169.
+
+**Commands**
+
+```bash
+# Compare the saved seed-4101 capture bitwise to attempt168, commit and push
+# the exact source, then run one matched baseline-first Level 1.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_168 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_170 \
+  runs/kda-cuda-development/attempt-00170-eight-warp-coop-dd-level1 \
+  --level2-order baseline-first
+```
+
+**Artifacts**
+
+- Branch `kda-cuda/eight-warp-coop-dd-170`, pushed commit
+  `d94eb51ff943f8ec47a428f38355c66ef715b3ee`; changed source SHA-256
+  `8985be840ca015d7de8f555fccfe35742647d2224990fa59743baaf031ce5097`.
+- Diagnostic manifest
+  `e120623a788d78a6d6720fb0b648566cfd796d97afe216bae0f780116f2c4f63`;
+  Level-1 manifest
+  `74447b4adcf4b47dcea7268e426ac28cd95c50e9458fd17dfb9a2b2a53cfb3b7`.
+- The append-only index now has 194 rows and hashes to
+  `3bc07425e04b326bb6209ca527c45bf653a516d1843466c1e45a84fa6b0d90db`.
+
+**Result**
+
+- Output and every gradient are bitwise equal to accepted attempt168 and all
+  tensors are finite. The committed runtime audit completes FLA-free.
+- T=4096 forward+backward regresses `9.522512 -> 9.703248 ms` (1.898%).
+  T=256 regresses 2.973% and T=1024 regresses 0.145%. Peak allocation remains
+  lower at `190,908,928` versus `191,105,536` bytes.
+- Parallel product staging removes the serial multiply path but adds two
+  block-wide barriers for each of eight key strips. Those synchronization costs
+  overwhelm the occupancy and launch savings. No profile, checker, sanitizers,
+  repeat, or Level 2 ran after the Level-1 rejection. This is not statistical
+  or LM-quality evidence.
+
+**Next**
+
+- Return to accepted attempt168 and close the inline-`dD` schedule: both serial
+  and cooperative exact-order variants are preserved and below the gate.
+- Pursue a structural reduction in the broad VJP or deterministic colored-pair
+  path, using the offline FLA schedule as equation and decomposition guidance
+  only. Avoid adding synchronization to the already-long complete-VJP CTA.
