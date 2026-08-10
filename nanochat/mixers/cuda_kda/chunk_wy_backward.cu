@@ -1510,17 +1510,99 @@ __global__ void nanochat_kda_wy_backward_reverse_group_wmma_c64_kernel(
   }
 }
 
+// Form the independent dZ base = A^T dO with one chunk-parallel CTA per
+// 32-value strip.  FLA keeps this product outside its sequential state scan;
+// doing the same restores product concurrency without recreating dstate_base.
+__global__ void nanochat_kda_wy_backward_group_dz_base_wmma_c64_kernel(
+    const float* A,
+    const __nv_bfloat16* grad_output,
+    float* dZ_base,
+    int chunk_start,
+    int group_chunks) {
+  namespace wmma = nvcuda::wmma;
+  constexpr int kTile = 16;
+  constexpr int kValueStrip = 32;
+  constexpr int kValueTiles = kValueStrip / kTile;
+  constexpr int kTileElements = kTile * kTile;
+  constexpr int kWarps = 4;
+
+  const int owner = blockIdx.x;
+  const int local_n = owner / (kDim / kValueStrip);
+  const int value_strip = owner - local_n * (kDim / kValueStrip);
+  if (local_n >= kRecurrences * group_chunks) {
+    return;
+  }
+  const int recurrence = local_n / group_chunks;
+  const int local_chunk = local_n - recurrence * group_chunks;
+  const int chunk_id = chunk_start + local_chunk;
+  const int h = recurrence % kHeads;
+  const int b = recurrence / kHeads;
+  const int token_start = chunk_id * kChunk;
+  const int value_start = value_strip * kValueStrip;
+  const int warp = threadIdx.x / warpSize;
+  const int lane = threadIdx.x % warpSize;
+  const int row_start = warp * kTile;
+
+  __shared__ __align__(16) __nv_bfloat16 operand_a[kWarps * kTileElements];
+  __shared__ __align__(16) __nv_bfloat16 operand_b[kWarps * kTileElements];
+
+  using MatrixA = wmma::fragment<
+      wmma::matrix_a, kTile, kTile, kTile,
+      __nv_bfloat16, wmma::row_major>;
+  using MatrixB = wmma::fragment<
+      wmma::matrix_b, kTile, kTile, kTile,
+      __nv_bfloat16, wmma::row_major>;
+  using Accumulator = wmma::fragment<
+      wmma::accumulator, kTile, kTile, kTile, float>;
+
+#pragma unroll
+  for (int value_tile = 0; value_tile < kValueTiles; ++value_tile) {
+    Accumulator accumulator;
+    wmma::fill_fragment(accumulator, 0.0f);
+    const int local_value_start = value_tile * kTile;
+    for (int source_start = 0; source_start < kChunk;
+         source_start += kTile) {
+      for (int element = lane; element < kTileElements;
+           element += warpSize) {
+        const int row = element / kTile;
+        const int column = element - row * kTile;
+        operand_a[warp * kTileElements + element] =
+            __float2bfloat16_rn(A[
+                (static_cast<int64_t>(local_n) * kChunk +
+                 source_start + column) * kChunk + row_start + row]);
+        operand_b[warp * kTileElements + element] = grad_output[
+            input_vector_index(
+                b, token_start + source_start + row, h,
+                value_start + local_value_start + column)];
+      }
+      __syncwarp();
+      MatrixA a_operand;
+      MatrixB do_operand;
+      wmma::load_matrix_sync(
+          a_operand, operand_a + warp * kTileElements, kTile);
+      wmma::load_matrix_sync(
+          do_operand, operand_b + warp * kTileElements, kTile);
+      wmma::mma_sync(accumulator, a_operand, do_operand, accumulator);
+    }
+    wmma::store_matrix_sync(
+        dZ_base +
+            (static_cast<int64_t>(local_n) * kChunk + row_start) * kDim +
+            value_start + local_value_start,
+        accumulator, kDim, wmma::mem_row_major);
+  }
+}
+
 // FLA's state-backward ownership keeps a 128x32 dh strip resident while it
-// walks chunks in reverse.  Two warps split the eight key tiles; each owns two
-// adjacent value tiles for every assigned key tile.  The completed per-token
+// walks chunks in reverse.  Four warps split the eight key tiles; each owns
+// two adjacent value tiles for every assigned key tile.  The completed token
 // dZ and incoming per-chunk dh are the only histories published.  In
-// particular, R/E, A^T dO, and R^T dO never become global workspaces.
+// particular, R/E, dstate_base, and R^T dO never become global workspaces.
 __global__ void nanochat_kda_wy_backward_register_dh_group_c64_kernel(
     const __nv_bfloat16* qg,
     const __nv_bfloat16* kg,
     const float* prefix_g,
     const float* W,
-    const float* A,
+    const float* dZ_base,
     const __nv_bfloat16* grad_output,
     __nv_bfloat16* dZ_history,
     float* dstate_next,
@@ -1531,9 +1613,8 @@ __global__ void nanochat_kda_wy_backward_register_dh_group_c64_kernel(
   constexpr int kTile = 16;
   constexpr int kValueStrip = 32;
   constexpr int kTileElements = kTile * kTile;
-  constexpr int kKeyTiles = kDim / kTile;
   constexpr int kValueTiles = kValueStrip / kTile;
-  constexpr int kWarps = 2;
+  constexpr int kWarps = 4;
 
   const int owner = blockIdx.x;
   if (owner >= kRecurrences * (kDim / kValueStrip)) {
@@ -1559,11 +1640,11 @@ __global__ void nanochat_kda_wy_backward_register_dh_group_c64_kernel(
   using Accumulator = wmma::fragment<
       wmma::accumulator, kTile, kTile, kTile, float>;
 
-  // Four key tiles per warp times two value tiles.  Keeping these fragments
+  // Two key tiles per warp times two value tiles.  Keeping these fragments
   // live is the essential difference from the shared-state eight-warp scan.
-  Accumulator dh_fragment[4][kValueTiles];
+  Accumulator dh_fragment[2][kValueTiles];
 #pragma unroll
-  for (int owned_key = 0; owned_key < 4; ++owned_key) {
+  for (int owned_key = 0; owned_key < 2; ++owned_key) {
     const int key_tile = warp + owned_key * kWarps;
 #pragma unroll
     for (int value_tile = 0; value_tile < kValueTiles; ++value_tile) {
@@ -1586,7 +1667,7 @@ __global__ void nanochat_kda_wy_backward_register_dh_group_c64_kernel(
 
     // Publish the incoming chunk dh and expose a BF16-rounded copy for kg*dh.
 #pragma unroll
-    for (int owned_key = 0; owned_key < 4; ++owned_key) {
+    for (int owned_key = 0; owned_key < 2; ++owned_key) {
       const int key_tile = warp + owned_key * kWarps;
 #pragma unroll
       for (int value_tile = 0; value_tile < kValueTiles; ++value_tile) {
@@ -1607,45 +1688,16 @@ __global__ void nanochat_kda_wy_backward_register_dh_group_c64_kernel(
     }
     __syncthreads();
 
-    // dZ = A^T dO + kg dh.  Each warp owns alternating token-row tiles and
-    // both value tiles; the two products retain independent FP32 sums until
-    // the same final elementwise addition used by the prior scan.
-    for (int row_tile = warp; row_tile < kChunk / kTile;
-         row_tile += kWarps) {
+    // dZ = dZ_base + kg dh.  Four warps own the four token-row tiles and both
+    // value tiles, matching the compiled FLA state-backward topology.
+    {
+      const int row_tile = warp;
 #pragma unroll
       for (int value_tile = 0; value_tile < kValueTiles; ++value_tile) {
-        Accumulator da_do;
         Accumulator kg_dh;
-        wmma::fill_fragment(da_do, 0.0f);
         wmma::fill_fragment(kg_dh, 0.0f);
         const int row_start = row_tile * kTile;
         const int local_value_start = value_tile * kTile;
-
-        for (int source_start = 0; source_start < kChunk;
-             source_start += kTile) {
-          for (int element = lane; element < kTileElements;
-               element += warpSize) {
-            const int row = element / kTile;
-            const int column = element - row * kTile;
-            operand_a[warp * kTileElements + element] =
-                __float2bfloat16_rn(A[
-                    (static_cast<int64_t>(group_n) * kChunk +
-                     source_start + column) * kChunk + row_start + row]);
-            operand_b[warp * kTileElements + element] = grad_output[
-                input_vector_index(
-                    b, token_start + source_start + row, h,
-                    value_start + local_value_start + column)];
-          }
-          __syncwarp();
-          MatrixA a_operand;
-          MatrixB do_operand;
-          wmma::load_matrix_sync(
-              a_operand, operand_a + warp * kTileElements, kTile);
-          wmma::load_matrix_sync(
-              do_operand, operand_b + warp * kTileElements, kTile);
-          wmma::mma_sync(da_do, a_operand, do_operand, da_do);
-        }
-
         for (int key_start = 0; key_start < kDim; key_start += kTile) {
           for (int element = lane; element < kTileElements;
                element += warpSize) {
@@ -1670,18 +1722,19 @@ __global__ void nanochat_kda_wy_backward_register_dh_group_c64_kernel(
         }
 
 #pragma unroll
-        for (int element = 0; element < da_do.num_elements; ++element) {
+        for (int element = 0; element < kg_dh.num_elements; ++element) {
           const int local_row = (lane >> 2) + ((element & 2) ? 8 : 0);
           const int local_value = ((lane & 3) << 1) + (element & 1) +
               ((element & 4) ? 8 : 0);
           const int row = row_start + local_row;
           const int value = local_value_start + local_value;
-          const __nv_bfloat16 rounded = __float2bfloat16_rn(
-              da_do.x[element] + kg_dh.x[element]);
-          dz_shared[row * kValueStrip + value] = rounded;
-          dZ_history[
+          const int64_t offset =
               (static_cast<int64_t>(group_n) * kChunk + row) * kDim +
-              value_start + value] = rounded;
+              value_start + value;
+          const __nv_bfloat16 rounded = __float2bfloat16_rn(
+              dZ_base[offset] + kg_dh.x[element]);
+          dz_shared[row * kValueStrip + value] = rounded;
+          dZ_history[offset] = rounded;
         }
       }
     }
@@ -1690,7 +1743,7 @@ __global__ void nanochat_kda_wy_backward_register_dh_group_c64_kernel(
     // dh = qg^T dO + D*dh - W^T dZ.  Every warp updates only the register
     // fragments it owns, so no state store/reload occurs between chunks.
 #pragma unroll
-    for (int owned_key = 0; owned_key < 4; ++owned_key) {
+    for (int owned_key = 0; owned_key < 2; ++owned_key) {
       const int key_tile = warp + owned_key * kWarps;
       const int key_start = key_tile * kTile;
 #pragma unroll
@@ -1761,7 +1814,7 @@ __global__ void nanochat_kda_wy_backward_register_dh_group_c64_kernel(
 
   // The prior group consumes this exact FP32 state boundary.
 #pragma unroll
-  for (int owned_key = 0; owned_key < 4; ++owned_key) {
+  for (int owned_key = 0; owned_key < 2; ++owned_key) {
     const int key_tile = warp + owned_key * kWarps;
 #pragma unroll
     for (int value_tile = 0; value_tile < kValueTiles; ++value_tile) {
@@ -3205,6 +3258,8 @@ nanochat_kda_chunk_wy_backward_c64(
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     at::Tensor dZ_group_bf16 = at::empty(
         {kGroupRows, kChunk, kDim}, q.options());
+    at::Tensor dZ_base = at::empty(
+        {kGroupRows, kChunk, kDim}, fp32);
     at::Tensor dstate_next_group_bf16 = at::empty(
         {kGroupRows, kDim, kDim}, q.options());
     at::Tensor qg_group_bf16 = at::empty(
@@ -3221,14 +3276,21 @@ nanochat_kda_chunk_wy_backward_c64(
             kg_group_bf16.data_ptr<at::BFloat16>()),
         chunk_start, kGroupChunks);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
+    nanochat_kda_wy_backward_group_dz_base_wmma_c64_kernel<<<
+        kGroupRows * (kDim / 32), 128, 0, stream>>>(
+        A_group.data_ptr<float>(),
+        reinterpret_cast<const __nv_bfloat16*>(
+            grad_output.data_ptr<at::BFloat16>()),
+        dZ_base.data_ptr<float>(), chunk_start, kGroupChunks);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
     nanochat_kda_wy_backward_register_dh_group_c64_kernel<<<
-        kRecurrences * (kDim / 32), 64, 0, stream>>>(
+        kRecurrences * (kDim / 32), 128, 0, stream>>>(
         reinterpret_cast<const __nv_bfloat16*>(
             qg_group_bf16.data_ptr<at::BFloat16>()),
         reinterpret_cast<const __nv_bfloat16*>(
             kg_group_bf16.data_ptr<at::BFloat16>()),
         prefix_g.data_ptr<float>(), W_group.data_ptr<float>(),
-        A_group.data_ptr<float>(),
+        dZ_base.data_ptr<float>(),
         reinterpret_cast<const __nv_bfloat16*>(
             grad_output.data_ptr<at::BFloat16>()),
         reinterpret_cast<__nv_bfloat16*>(
