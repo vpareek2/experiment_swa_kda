@@ -28,6 +28,8 @@ constexpr int kChunks = kLength / kChunk;
 constexpr int kRecurrences = kBatch * kHeads;
 constexpr int kChunkRows = kRecurrences * kChunks;
 constexpr int kTilePairs = 10;
+constexpr int kStorageGroupChunks = 8;
+constexpr int kStorageGroupRows = kRecurrences * kStorageGroupChunks;
 
 __device__ __forceinline__ void causal_tile_pair(
     int pair, int& target_tile, int& source_tile) {
@@ -88,6 +90,29 @@ __device__ __forceinline__ int64_t chunk_vector_index(
 __device__ __forceinline__ int64_t chunk_matrix_index(
     int n, int row, int column) {
   return ((static_cast<int64_t>(n) * kChunk + row) * kChunk + column);
+}
+
+// Backward consumes these workspaces exclusively in eight-chunk groups. Store
+// them in that order so each reverse group is already a contiguous BMM batch.
+__device__ __forceinline__ int grouped_chunk_index(int n) {
+  const int chunk_id = n % kChunks;
+  const int recurrence = n / kChunks;
+  const int group_id = chunk_id / kStorageGroupChunks;
+  const int local_chunk = chunk_id % kStorageGroupChunks;
+  return group_id * kStorageGroupRows +
+      recurrence * kStorageGroupChunks + local_chunk;
+}
+
+__device__ __forceinline__ int64_t grouped_vector_index(
+    int n, int row, int d) {
+  return ((static_cast<int64_t>(grouped_chunk_index(n)) * kChunk + row) *
+          kDim + d);
+}
+
+__device__ __forceinline__ int64_t grouped_matrix_index(
+    int n, int row, int column) {
+  return ((static_cast<int64_t>(grouped_chunk_index(n)) * kChunk + row) *
+          kChunk + column);
 }
 
 __global__ void nanochat_kda_wy_backward_preprocess_c64_kernel(
@@ -160,8 +185,9 @@ __global__ void nanochat_kda_wy_backward_preprocess_c64_kernel(
     qbar[destination] = normalized_q;
     khat[destination] = normalized_k;
     prefix_g[destination] = running_g;
-    P[destination] = beta_value * __bfloat162float(v[source]);
-    Q[destination] = beta_value * expf(running_g) * normalized_k;
+    const int64_t grouped_destination = grouped_vector_index(n, row, d);
+    P[grouped_destination] = beta_value * __bfloat162float(v[source]);
+    Q[grouped_destination] = beta_value * expf(running_g) * normalized_k;
     __syncthreads();
   }
 }
@@ -301,9 +327,10 @@ __global__ void nanochat_kda_wy_backward_build_pair_wmma_c64_kernel(
     const int local_source = index - local_row * kMatrixTile;
     const int row = target_start + local_row;
     const int source = source_start + local_source;
-    const int64_t destination = chunk_matrix_index(n, row, source);
-    A[destination] = source <= row ? product[index] : 0.0f;
-    M[destination] = source < row
+    const int64_t m_destination = chunk_matrix_index(n, row, source);
+    const int64_t a_destination = grouped_matrix_index(n, row, source);
+    A[a_destination] = source <= row ? product[index] : 0.0f;
+    M[m_destination] = source < row
         ? beta[static_cast<int64_t>(n) * kChunk + row] *
             product[kMatrixTile * kMatrixTile + index]
         : 0.0f;
@@ -393,11 +420,11 @@ __global__ void nanochat_kda_wy_backward_solve_c64_kernel(
       float sum = 0.0f;
       for (int inner = column; inner < row; ++inner) {
         sum += M[chunk_matrix_index(n, row, inner)] *
-            T[chunk_matrix_index(n, inner, column)];
+            T[grouped_matrix_index(n, inner, column)];
       }
       value = -sum;
     }
-    T[chunk_matrix_index(n, row, column)] = value;
+    T[grouped_matrix_index(n, row, column)] = value;
     __syncthreads();
   }
 }
@@ -510,7 +537,7 @@ __global__ void nanochat_kda_wy_backward_group_boundary_wmma_c64_kernel(
     const float* W,
     const float* E,
     float* state,
-    float* state_history,
+    __nv_bfloat16* state_history,
     float* z_history,
     int chunk_start,
     int group_chunks) {
@@ -567,7 +594,7 @@ __global__ void nanochat_kda_wy_backward_group_boundary_wmma_c64_kernel(
         const int value = index - key * kValueTile;
         state_history[
             (static_cast<int64_t>(group_n) * kDim + key) * kDim +
-            value_start + value] = local_state[index];
+            value_start + value] = __float2bfloat16_rn(local_state[index]);
       }
     }
     __syncthreads();
@@ -685,6 +712,106 @@ __global__ void nanochat_kda_wy_backward_group_boundary_wmma_c64_kernel(
     const int value = index - key * kValueTile;
     state[(static_cast<int64_t>(recurrence) * kDim + key) * kDim +
           value_start + value] = local_state[index];
+  }
+}
+
+// Rebuild only Z from saved incoming chunk states. Unlike the boundary sweep,
+// chunks are independent here: no E^T Z state update or inter-chunk barrier is
+// required. The saved BF16 state is expanded once into the FP32 H workspace
+// used by the dense VJP products.
+__global__ void nanochat_kda_wy_backward_z_from_history_wmma_c64_kernel(
+    const __nv_bfloat16* state_history,
+    const float* U,
+    const float* W,
+    float* H,
+    float* z_history,
+    int group_chunks) {
+  namespace wmma = nvcuda::wmma;
+  constexpr int kValueTile = 16;
+  constexpr int kMatrix = 16;
+  constexpr int kTileElements = kMatrix * kMatrix;
+
+  const int owner = blockIdx.x;
+  if (owner >= kRecurrences * (kDim / kValueTile)) {
+    return;
+  }
+  const int value_tile = owner % (kDim / kValueTile);
+  const int recurrence = owner / (kDim / kValueTile);
+  const int value_start = value_tile * kValueTile;
+  const int warp = threadIdx.x / warpSize;
+  const int lane = threadIdx.x % warpSize;
+
+  __shared__ float z[kChunk * kValueTile];
+  __shared__ __nv_bfloat16 operand_a[4 * kTileElements];
+  __shared__ __nv_bfloat16 operand_b[4 * kTileElements];
+
+  using MatrixA = wmma::fragment<
+      wmma::matrix_a, kMatrix, kMatrix, kMatrix,
+      __nv_bfloat16, wmma::row_major>;
+  using MatrixB = wmma::fragment<
+      wmma::matrix_b, kMatrix, kMatrix, kMatrix,
+      __nv_bfloat16, wmma::row_major>;
+  using Accumulator = wmma::fragment<
+      wmma::accumulator, kMatrix, kMatrix, kMatrix, float>;
+
+  for (int local_chunk = 0; local_chunk < group_chunks; ++local_chunk) {
+    const int group_n = recurrence * group_chunks + local_chunk;
+    for (int index = threadIdx.x; index < kDim * kValueTile;
+         index += blockDim.x) {
+      const int key = index / kValueTile;
+      const int value = index - key * kValueTile;
+      const int64_t offset =
+          (static_cast<int64_t>(group_n) * kDim + key) * kDim +
+          value_start + value;
+      H[offset] = __bfloat162float(state_history[offset]);
+    }
+    __syncthreads();
+
+    if (warp < kChunk / kMatrix) {
+      Accumulator accumulator;
+      wmma::fill_fragment(accumulator, 0.0f);
+      const int row_start = warp * kMatrix;
+      for (int key_start = 0; key_start < kDim; key_start += kMatrix) {
+        for (int element = lane; element < kTileElements;
+             element += warpSize) {
+          const int row = element / kMatrix;
+          const int column = element - row * kMatrix;
+          const int64_t vector_offset =
+              (static_cast<int64_t>(group_n) * kChunk + row_start + row) *
+              kDim + key_start + column;
+          const int64_t state_offset =
+              (static_cast<int64_t>(group_n) * kDim + key_start + row) *
+              kDim + value_start + column;
+          operand_a[warp * kTileElements + element] =
+              __float2bfloat16_rn(W[vector_offset]);
+          operand_b[warp * kTileElements + element] =
+              state_history[state_offset];
+        }
+        __syncwarp();
+        MatrixA a_fragment;
+        MatrixB b_fragment;
+        wmma::load_matrix_sync(
+            a_fragment, operand_a + warp * kTileElements, kMatrix);
+        wmma::load_matrix_sync(
+            b_fragment, operand_b + warp * kTileElements, kMatrix);
+        wmma::mma_sync(
+            accumulator, a_fragment, b_fragment, accumulator);
+      }
+      wmma::store_matrix_sync(
+          z + row_start * kValueTile,
+          accumulator, kValueTile, wmma::mem_row_major);
+    }
+    __syncthreads();
+    for (int index = threadIdx.x; index < kChunk * kValueTile;
+         index += blockDim.x) {
+      const int row = index / kValueTile;
+      const int value = index - row * kValueTile;
+      const int64_t offset =
+          (static_cast<int64_t>(group_n) * kChunk + row) * kDim +
+          value_start + value;
+      z_history[offset] = U[offset] - z[index];
+    }
+    __syncthreads();
   }
 }
 
@@ -854,6 +981,7 @@ __global__ void nanochat_kda_wy_backward_reverse_group_wmma_c64_kernel(
     float* dZ_group,
     float* dstate_next,
     float* dstate_next_group,
+    __nv_bfloat16* dstate_next_history,
     int chunk_start,
     int group_chunks) {
   namespace wmma = nvcuda::wmma;
@@ -910,6 +1038,9 @@ __global__ void nanochat_kda_wy_backward_reverse_group_wmma_c64_kernel(
       dstate_next_group[
           (static_cast<int64_t>(group_n) * kDim + key) * kDim +
           value_start + value] = local_state[index];
+      dstate_next_history[
+          (static_cast<int64_t>(group_n) * kDim + key) * kDim +
+          value_start + value] = __float2bfloat16_rn(local_state[index]);
     }
     __syncthreads();
 
@@ -1025,6 +1156,16 @@ __global__ void nanochat_kda_wy_backward_reverse_group_wmma_c64_kernel(
     dstate_next[
         (static_cast<int64_t>(recurrence) * kDim + key) * kDim +
         value_start + value] = local_state[index];
+  }
+}
+
+__global__ void nanochat_kda_wy_backward_expand_state_history_c64_kernel(
+    const __nv_bfloat16* source,
+    float* destination,
+    int elements) {
+  const int index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (index < elements) {
+    destination[index] = __bfloat162float(source[index]);
   }
 }
 
@@ -1720,22 +1861,19 @@ nanochat_kda_chunk_wy_backward_c64(
   M = at::Tensor();
 
   const auto pack_vectors = [&](const at::Tensor& tensor, int chunk_start) {
-    return tensor.view({kRecurrences, kChunks, kChunk, kDim})
-        .narrow(1, chunk_start, kGroupChunks).contiguous()
-        .view({kGroupRows, kChunk, kDim});
+    return tensor.view({kGroups, kGroupRows, kChunk, kDim})
+        .select(0, chunk_start / kGroupChunks);
   };
   const auto pack_matrices = [&](const at::Tensor& tensor, int chunk_start) {
-    return tensor.view({kRecurrences, kChunks, kChunk, kChunk})
-        .narrow(1, chunk_start, kGroupChunks).contiguous()
-        .view({kGroupRows, kChunk, kChunk});
+    return tensor.view({kGroups, kGroupRows, kChunk, kChunk})
+        .select(0, chunk_start / kGroupChunks);
   };
   at::Tensor state = at::zeros({kRecurrences, kDim, kDim}, fp32);
-  at::Tensor group_boundaries = at::empty(
-      {kRecurrences, kGroups, kDim, kDim}, fp32);
+  at::Tensor chunk_state_history = at::empty(
+      {kGroups, kGroupRows, kDim, kDim}, q.options());
 
   for (int group_id = 0; group_id < kGroups; ++group_id) {
     const int chunk_start = group_id * kGroupChunks;
-    group_boundaries.select(1, group_id).copy_(state);
     at::Tensor P_group = pack_vectors(P, chunk_start);
     at::Tensor Q_group = pack_vectors(Q, chunk_start);
     at::Tensor T_group = pack_matrices(T, chunk_start);
@@ -1755,7 +1893,11 @@ nanochat_kda_chunk_wy_backward_c64(
         kRecurrences * (kDim / 16), 256, 0, stream>>>(
         prefix_g.data_ptr<float>(), U_group.data_ptr<float>(),
         W_group.data_ptr<float>(), E_group.data_ptr<float>(),
-        state.data_ptr<float>(), nullptr, nullptr,
+        state.data_ptr<float>(),
+        reinterpret_cast<__nv_bfloat16*>(
+            chunk_state_history.select(0, group_id)
+                .data_ptr<at::BFloat16>()),
+        nullptr,
         chunk_start, kGroupChunks);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
   }
@@ -1770,6 +1912,59 @@ nanochat_kda_chunk_wy_backward_c64(
   at::Tensor ddt_partial = at::zeros({kRecurrences, kDim}, fp32);
   at::Tensor dD = at::empty({kChunkRows, kDim}, fp32);
   at::Tensor dstate_next = at::zeros({kRecurrences, kDim, kDim}, fp32);
+  at::Tensor dstate_next_history = at::empty(
+      {kGroups, kGroupRows, kDim, kDim}, q.options());
+  at::Tensor dZ_history = at::empty(
+      {kGroups, kGroupRows, kChunk, kDim}, fp32);
+
+  // Finish the compact reverse state scan before any local VJP. This makes
+  // every incoming chunk adjoint independently addressable by a later broad
+  // chunk-by-head launch.
+  for (int group_id = kGroups; group_id-- > 0;) {
+    const int chunk_start = group_id * kGroupChunks;
+    at::Tensor P_group = pack_vectors(P, chunk_start);
+    at::Tensor Q_group = pack_vectors(Q, chunk_start);
+    at::Tensor A_group = pack_matrices(A, chunk_start);
+    at::Tensor T_group = pack_matrices(T, chunk_start);
+    at::Tensor U_group = at::empty_like(P_group);
+    at::Tensor W_group = at::empty_like(Q_group);
+    at::bmm_out(U_group, T_group, P_group);
+    at::bmm_out(W_group, T_group, Q_group);
+    at::Tensor R_group = at::empty_like(P_group);
+    at::Tensor E_group = at::empty_like(Q_group);
+    nanochat_kda_wy_backward_pack_group_c64_kernel<<<
+        (kGroupVectorElements + kThreads - 1) / kThreads,
+        kThreads, 0, stream>>>(qbar.data_ptr<float>(), khat.data_ptr<float>(),
+        prefix_g.data_ptr<float>(), R_group.data_ptr<float>(),
+        E_group.data_ptr<float>(), chunk_start, kGroupChunks);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    at::Tensor dO_group = at::empty_like(P_group);
+    nanochat_kda_wy_backward_pack_group_grad_output_c64_kernel<<<
+        (kGroupVectorElements + kThreads - 1) / kThreads,
+        kThreads, 0, stream>>>(
+        reinterpret_cast<const __nv_bfloat16*>(
+            grad_output.data_ptr<at::BFloat16>()),
+        dO_group.data_ptr<float>(), chunk_start, kGroupChunks);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    at::Tensor dstate_base = at::empty({kGroupRows, kDim, kDim}, fp32);
+    at::Tensor dZ_group_flat = dZ_history.select(0, group_id);
+    at::bmm_out(dstate_base, R_group.transpose(1, 2), dO_group);
+    at::bmm_out(dZ_group_flat, A_group.transpose(1, 2), dO_group);
+    at::Tensor dstate_next_group_flat = at::empty(
+        {kGroupRows, kDim, kDim}, fp32);
+    nanochat_kda_wy_backward_reverse_group_wmma_c64_kernel<<<
+        kRecurrences * (kDim / 16), 256, 0, stream>>>(
+        prefix_g.data_ptr<float>(), W_group.data_ptr<float>(),
+        E_group.data_ptr<float>(), dstate_base.data_ptr<float>(),
+        dZ_group_flat.data_ptr<float>(), dstate_next.data_ptr<float>(),
+        dstate_next_group_flat.data_ptr<float>(),
+        reinterpret_cast<__nv_bfloat16*>(
+            dstate_next_history.select(0, group_id)
+                .data_ptr<at::BFloat16>()),
+        chunk_start, kGroupChunks);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+  }
+  dstate_next = at::Tensor();
 
   for (int group_id = kGroups; group_id-- > 0;) {
     const int chunk_start = group_id * kGroupChunks;
@@ -1797,31 +1992,29 @@ nanochat_kda_chunk_wy_backward_c64(
             grad_output.data_ptr<at::BFloat16>()),
         dO_group.data_ptr<float>(), chunk_start, kGroupChunks);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
-    at::Tensor group_state = group_boundaries.select(1, group_id).contiguous();
     at::Tensor H_group_flat = at::empty({kGroupRows, kDim, kDim}, fp32);
-    at::Tensor H_group = H_group_flat.view(
-        {kRecurrences, kGroupChunks, kDim, kDim});
     at::Tensor z_group_flat = at::empty({kGroupRows, kChunk, kDim}, fp32);
-    nanochat_kda_wy_backward_group_boundary_wmma_c64_kernel<<<
+    nanochat_kda_wy_backward_z_from_history_wmma_c64_kernel<<<
         kRecurrences * (kDim / 16), 256, 0, stream>>>(
-        prefix_g.data_ptr<float>(), U_group.data_ptr<float>(),
-        W_group.data_ptr<float>(), E_group.data_ptr<float>(),
-        group_state.data_ptr<float>(), H_group_flat.data_ptr<float>(),
-        z_group_flat.data_ptr<float>(), chunk_start, kGroupChunks);
+        reinterpret_cast<const __nv_bfloat16*>(
+            chunk_state_history.select(0, group_id)
+                .data_ptr<at::BFloat16>()),
+        U_group.data_ptr<float>(), W_group.data_ptr<float>(),
+        H_group_flat.data_ptr<float>(), z_group_flat.data_ptr<float>(),
+        kGroupChunks);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 
-    at::Tensor dstate_base = at::empty({kGroupRows, kDim, kDim}, fp32);
-    at::Tensor dZ_group_flat = at::empty_like(dO_group);
-    at::bmm_out(dstate_base, R_group.transpose(1, 2), dO_group);
-    at::bmm_out(dZ_group_flat, A_group.transpose(1, 2), dO_group);
+    at::Tensor dZ_group_flat = dZ_history.select(0, group_id);
     at::Tensor dstate_next_group_flat = at::empty(
         {kGroupRows, kDim, kDim}, fp32);
-    nanochat_kda_wy_backward_reverse_group_wmma_c64_kernel<<<
-        kRecurrences * (kDim / 16), 256, 0, stream>>>(
-        prefix_g.data_ptr<float>(), W_group.data_ptr<float>(),
-        E_group.data_ptr<float>(), dstate_base.data_ptr<float>(),
-        dZ_group_flat.data_ptr<float>(), dstate_next.data_ptr<float>(),
-        dstate_next_group_flat.data_ptr<float>(), chunk_start, kGroupChunks);
+    nanochat_kda_wy_backward_expand_state_history_c64_kernel<<<
+        (kGroupRows * kDim * kDim + kThreads - 1) / kThreads,
+        kThreads, 0, stream>>>(
+        reinterpret_cast<const __nv_bfloat16*>(
+            dstate_next_history.select(0, group_id)
+                .data_ptr<at::BFloat16>()),
+        dstate_next_group_flat.data_ptr<float>(),
+        kGroupRows * kDim * kDim);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     nanochat_kda_wy_backward_group_dD_c64_kernel<<<
         kGroupRows * kDim, kDim, 0, stream>>>(
@@ -1944,9 +2137,11 @@ nanochat_kda_chunk_wy_backward_c64(
   Q = at::Tensor();
   A = at::Tensor();
   T = at::Tensor();
-  group_boundaries = at::Tensor();
+  chunk_state_history = at::Tensor();
   dD = at::Tensor();
   dstate_next = at::Tensor();
+  dstate_next_history = at::Tensor();
+  dZ_history = at::Tensor();
   at::Tensor dA_log = at::empty_like(A_log);
   at::Tensor ddt_bias = at::empty_like(dt_bias);
   nanochat_kda_wy_backward_reduce_parameters_c64_kernel<<<
