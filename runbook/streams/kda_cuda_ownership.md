@@ -11118,3 +11118,60 @@ uv run --no-sync python scripts/kda_cuda_development.py \
   register-resident C64 forward/reverse program that removes most pack,
   history, pair-color, and library boundaries together; require a multi-ms
   operator win before another Level 2.
+
+## 2026-08-10 [Codex] Attempt 156 profile closes MAGMA but leaves the coherent-pipeline gap
+
+**Context**
+
+- One bounded correlated operator profile was taken after attempt156 removed
+  the paired `U/W`, `dstate_base`, and `dZ` FP32 MAGMA product families. This
+  is attribution at a rejected strategy boundary, not a new performance run.
+
+**Commands**
+
+```bash
+env PYTHONPATH=/home/veer/Master/projects/experiment_swa_kda_cuda_attempt_156 \
+  TORCH_EXTENSIONS_DIR=/tmp/kda156-profile-ext-001 \
+  CUDA_CACHE_PATH=/tmp/kda156-profile-cuda-001 \
+  FLA_FLASH_KDA=0 FLA_TILELANG=0 \
+  nsys profile --trace=cuda,nvtx --sample=none --cpuctxsw=none \
+  --output=runs/kda-cuda-development/profiles/attempt-00156-fla-fused-bf16-reverse-products-operator/trace \
+  .venv/bin/python <bounded-runner>
+# Export to SQLite and correlate runtime launches initiated inside the named
+# NVTX range with kernels by correlationId.
+```
+
+**Artifacts**
+
+- Profile
+  `runs/kda-cuda-development/profiles/attempt-00156-fla-fused-bf16-reverse-products-operator`;
+  manifest `ddc1ca9b4e8af652e264feeff1e5fe2e0a3835647b0991a3e51b424cc1fbf5f0`.
+- The append-only index now contains 175 rows and hashes to
+  `6da6c04fc8a8579abb500a3e8dca8d59f4646d4a6805e0e9300f4514f570e34f`.
+
+**Result**
+
+- Attempt156 executes 209 correlated launches, 10.471296 ms summed kernel
+  time, and a 10.985984-ms GPU span. This improves attempt148's 233 launches,
+  11.142656 ms summed time, and 11.743104-ms span, but remains far from FLA's
+  preserved 37 launches, 4.185632 ms summed time, and 4.987712-ms span.
+- Only two MAGMA SGEMMs remain, costing 0.254816 ms. The new fused `U/W` and
+  reverse-product kernels cost 0.468608 and 0.330848 ms, respectively. The
+  FP32 library boundary is therefore no longer the dominant difference.
+- The broad local VJP remains largest at 2.135840 ms versus FLA's preserved
+  0.797600-ms broad kernel. The forward recurrence costs 1.049760 ms, while
+  group-boundary, reverse-group, and z-recompute kernels cost 0.592896,
+  0.626176, and 0.620096 ms. Those four state programs total 2.888928 ms.
+  Pair coloring, group packing, preprocessing, and pair construction remain
+  another distributed launch/materialization tail.
+
+**Next**
+
+- Keep accepted127. Do not target the last two MAGMA calls or another isolated
+  pack kernel; their maximum payoff cannot satisfy the end-to-end retention
+  gate.
+- The next viable strategy is a coherent compiler-generated or register-
+  resident C64 pipeline: retain a compact sequential state scan, but combine
+  state reconstruction with a chunk-parallel broad VJP and eliminate the
+  repeated pack/pair boundaries. It must save multiple operator milliseconds
+  before Level 2 is warranted.
