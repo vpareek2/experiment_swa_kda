@@ -12817,3 +12817,67 @@ uv run --no-sync python scripts/kda_cuda_development.py \
 - If specialization remains below Level 1, close the inverse-transform axis;
   the remaining FLA gap is then dominated by the rest of the broad/state
   decomposition rather than zero-tile MMA work.
+
+## 2026-08-10 [Codex] Row specialization restores registers but loses runtime
+
+**Context**
+
+- Attempt182 starts from correct attempt181 and replaces runtime triangular
+  loop bounds with four compile-time row-specialized device paths. All warps
+  retain common CTA barriers between transforms. The useful 40-WMMA schedule,
+  equations, buffers, precision, launch shape, and ABI are unchanged.
+- This is the final narrow test of whether attempt181's 138-register result
+  hid a material inverse-transform gain.
+
+**Commands**
+
+```bash
+# Staged protected audit/resource inspection, commit/push, one candidate
+# seed-4101 production capture, and clean baseline-first Level 1 versus176.
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_182 \
+  --lane optimization <isolated artifact/cache arguments>
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_176 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_182 \
+  runs/kda-cuda-development/attempt-00182-fla-specialized-triangular-adjoint-level1 \
+  --level2-order baseline-first
+```
+
+**Artifacts**
+
+- Branch `kda-cuda/fla-specialized-triangular-adjoint-182`, pushed commit
+  `72f6d0a163c59d6e6a2aec8c053a31e234c054d8`; changed source SHA-256
+  `3d3e5b934ea8e8fad4c77535b652bf8b77b8c23fac47bba2af0b86768b5e89f6`.
+- Checker summary
+  `5b68009d50a86fd908bd3db15d4c2c56fd85423eb2f78eff1d999972093c4b62`;
+  production-gradient manifest
+  `9679d2a51ac2aad6cfe89ba5e9c96532bb07776b6f2c27ca9d3d6e5883fbe2e5`;
+  Level-1 manifest
+  `cf3af4c40823ca86b5c94ca216d815956f29defc64f4a47f4863f2e7b3132b31`.
+- The append-only index now has 205 rows and hashes to
+  `2e75114c89f4fdd25aaa09257032f5af6d5f4a87340b566cc15dbad6e2fc93e3`.
+
+**Result**
+
+- Candidate output and all seven gradients are bitwise equal to attempt176 and
+  finite. The protected audit passes ownership 1.0 and runtime/profile FLA
+  freedom. Static allocation reaches 128 registers/thread, 25,600 shared
+  bytes, and zero local/stack spill without a launch bound.
+- Level 1 rejects the schedule. T=4096 forward+backward regresses
+  `9.577776 -> 9.613488 ms` (0.373%) with equal memory. T=1024 regresses
+  3.230%; T=256 regresses 5.955%, violating the important-shape guard.
+  Compile-time specialization removes register pressure but its expanded
+  predicated/control path costs more than it saves.
+- No Level 2, sanitizer run, statistical confirmation, or LM-quality
+  evaluation ran. Attempt176 remains the development parent; attempt175 is
+  still the latest full matched baseline at 36,719.5 tok/s, 84.06% of FLA.
+
+**Next**
+
+- Close the inverse-adjoint zero-tile axis. Attempts180-182 prove the
+  triangular algebra and exactness, but neither parallel materialization nor
+  in-place dynamic/static scheduling produces a Level-1 advance.
+- Return to FLA's larger compact state decomposition. Attribute and redesign
+  the forward boundary plus reverse state programs as one strategy boundary;
+  do not move existing `R/E`, reverse-base, or full-history work unchanged.
