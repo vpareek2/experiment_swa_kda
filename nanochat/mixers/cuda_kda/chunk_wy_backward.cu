@@ -1381,6 +1381,441 @@ __global__ void nanochat_kda_wy_backward_two_warp_state_products_c64_kernel(
   }
 }
 
+// FLA's useful scheduling boundary is broader than the state products above:
+// the same two-warp chunk program retains the local 64x64 adjoint while key
+// and value strips are live, consumes dW immediately, applies the inverse VJP,
+// and emits dP/dQ-dependent vector gradients without global intermediates.
+__global__ void nanochat_kda_wy_backward_complete_two_warp_vjp_c64_kernel(
+    const __nv_bfloat16* v,
+    const float* qbar,
+    const float* khat,
+    const float* prefix_g,
+    const float* beta,
+    const float* P,
+    const float* Q,
+    const float* T,
+    const float* dO,
+    const float* z,
+    const float* dZ,
+    const __nv_bfloat16* state_history,
+    const __nv_bfloat16* dstate_history,
+    const float* dD,
+    float* dM,
+    float* dqbar,
+    float* dkhat,
+    __nv_bfloat16* dv,
+    float* dbeta,
+    float* dprefix,
+    int chunk_start,
+    int group_chunks) {
+  namespace wmma = nvcuda::wmma;
+  const int local_n = blockIdx.x;
+  if (local_n >= kRecurrences * group_chunks) {
+    return;
+  }
+  const int recurrence = local_n / group_chunks;
+  const int local_chunk = local_n - recurrence * group_chunks;
+  const int chunk_id = chunk_start + local_chunk;
+  const int n = recurrence * kChunks + chunk_id;
+  const int h = recurrence % kHeads;
+  const int b = recurrence / kHeads;
+  const int warp = threadIdx.x / warpSize;
+
+  constexpr int kStrip = kMatrixTile;
+  constexpr int kStripElements = kChunk * kStrip;
+  constexpr int kMatrixElements = kChunk * kChunk;
+  __shared__ __align__(16) __nv_bfloat16 left[kMatrixElements];
+  __shared__ __align__(16) __nv_bfloat16 inverse[kMatrixElements];
+  __shared__ __align__(16) __nv_bfloat16 state_right[2 * kStrip * kStrip];
+  __shared__ float result[kMatrixElements];
+
+  using MatrixARow = wmma::fragment<
+      wmma::matrix_a, kStrip, kStrip, kStrip,
+      __nv_bfloat16, wmma::row_major>;
+  using MatrixACol = wmma::fragment<
+      wmma::matrix_a, kStrip, kStrip, kStrip,
+      __nv_bfloat16, wmma::col_major>;
+  using MatrixBRow = wmma::fragment<
+      wmma::matrix_b, kStrip, kStrip, kStrip,
+      __nv_bfloat16, wmma::row_major>;
+  using MatrixBCol = wmma::fragment<
+      wmma::matrix_b, kStrip, kStrip, kStrip,
+      __nv_bfloat16, wmma::col_major>;
+  using Accumulator = wmma::fragment<
+      wmma::accumulator, kStrip, kStrip, kStrip, float>;
+
+  const int64_t matrix_base = static_cast<int64_t>(local_n) * kMatrixElements;
+  for (int index = threadIdx.x; index < kMatrixElements;
+       index += blockDim.x) {
+    inverse[index] = __float2bfloat16_rn(T[matrix_base + index]);
+  }
+  __syncthreads();
+
+  // Each warp owns two 16-row tiles and all four column tiles of the local
+  // adjoint. Eight fragments stay live across every value and key strip.
+  Accumulator local_adjoint[8];
+#pragma unroll
+  for (int tile = 0; tile < 8; ++tile) {
+    wmma::fill_fragment(local_adjoint[tile], 0.0f);
+  }
+
+  // Value strips contribute dZ P^T to the inverse adjoint. They also produce
+  // dP = T^T dZ, which is consumed immediately by dv and dbeta.
+  for (int value_start = 0; value_start < kDim; value_start += kStrip) {
+    for (int index = threadIdx.x; index < 2 * kStripElements;
+         index += blockDim.x) {
+      const int matrix = index / kStripElements;
+      const int within = index - matrix * kStripElements;
+      const int row = within / kStrip;
+      const int value = value_start + within % kStrip;
+      const int64_t local =
+          (static_cast<int64_t>(local_n) * kChunk + row) * kDim + value;
+      left[index] = __float2bfloat16_rn(matrix == 0 ? dZ[local] : P[local]);
+    }
+    __syncthreads();
+
+#pragma unroll
+    for (int owned_row = 0; owned_row < 2; ++owned_row) {
+      const int row_start = (warp * 2 + owned_row) * kStrip;
+      MatrixARow dz_fragment;
+      wmma::load_matrix_sync(
+          dz_fragment, left + row_start * kStrip, kStrip);
+#pragma unroll
+      for (int column_tile = 0; column_tile < 4; ++column_tile) {
+        MatrixBCol p_fragment;
+        wmma::load_matrix_sync(
+            p_fragment,
+            left + kStripElements + column_tile * kStrip * kStrip,
+            kStrip);
+        wmma::mma_sync(
+            local_adjoint[owned_row * 4 + column_tile],
+            dz_fragment, p_fragment,
+            local_adjoint[owned_row * 4 + column_tile]);
+      }
+    }
+
+    Accumulator dP_fragment[2];
+#pragma unroll
+    for (int owned_row = 0; owned_row < 2; ++owned_row) {
+      wmma::fill_fragment(dP_fragment[owned_row], 0.0f);
+      const int row_start = (warp * 2 + owned_row) * kStrip;
+      for (int inner_start = 0; inner_start < kChunk;
+           inner_start += kStrip) {
+        MatrixACol t_fragment;
+        MatrixBRow dz_fragment;
+        wmma::load_matrix_sync(
+            t_fragment, inverse + inner_start * kChunk + row_start, kChunk);
+        wmma::load_matrix_sync(
+            dz_fragment, left + inner_start * kStrip, kStrip);
+        wmma::mma_sync(
+            dP_fragment[owned_row], t_fragment, dz_fragment,
+            dP_fragment[owned_row]);
+      }
+      wmma::store_matrix_sync(
+          result + row_start * kStrip, dP_fragment[owned_row], kStrip,
+          wmma::mem_row_major);
+    }
+    __syncthreads();
+
+    const int row = threadIdx.x;
+    float beta_contribution = 0.0f;
+    const float beta_row = beta[static_cast<int64_t>(n) * kChunk + row];
+    const int token = chunk_id * kChunk + row;
+    for (int local_value = 0; local_value < kStrip; ++local_value) {
+      const int value = value_start + local_value;
+      const float dP_value = result[row * kStrip + local_value];
+      const int64_t input = input_vector_index(b, token, h, value);
+      dv[input] = __float2bfloat16_rn(beta_row * dP_value);
+      beta_contribution += dP_value * __bfloat162float(v[input]);
+    }
+    if (value_start == 0) {
+      dbeta[static_cast<int64_t>(local_n) * kChunk + row] =
+          beta_contribution;
+    } else {
+      dbeta[static_cast<int64_t>(local_n) * kChunk + row] +=
+          beta_contribution;
+    }
+    __syncthreads();
+  }
+
+  // Key strips form all boundary-state products. dW is negated into BF16
+  // scratch, contributes dW Q^T to the retained adjoint, and feeds
+  // dQ = T^T dW without ever reaching global memory.
+  for (int key_start = 0; key_start < kDim; key_start += kStrip) {
+    Accumulator dR_fragment[2];
+    Accumulator dE_fragment[2];
+    Accumulator dW_fragment[2];
+#pragma unroll
+    for (int owned_row = 0; owned_row < 2; ++owned_row) {
+      wmma::fill_fragment(dR_fragment[owned_row], 0.0f);
+      wmma::fill_fragment(dE_fragment[owned_row], 0.0f);
+      wmma::fill_fragment(dW_fragment[owned_row], 0.0f);
+    }
+
+    for (int value_start = 0; value_start < kDim; value_start += kStrip) {
+      for (int index = threadIdx.x; index < 3 * kStripElements;
+           index += blockDim.x) {
+        const int matrix = index / kStripElements;
+        const int within = index - matrix * kStripElements;
+        const int row = within / kStrip;
+        const int value = value_start + within % kStrip;
+        const int64_t offset =
+            (static_cast<int64_t>(local_n) * kChunk + row) * kDim + value;
+        const float value_to_store = matrix == 0
+            ? dO[offset]
+            : (matrix == 1 ? z[offset] : dZ[offset]);
+        left[index] = __float2bfloat16_rn(value_to_store);
+      }
+      for (int index = threadIdx.x; index < kStrip * kStrip;
+           index += blockDim.x) {
+        const int key = key_start + index / kStrip;
+        const int value = value_start + index % kStrip;
+        const int64_t state_offset =
+            (static_cast<int64_t>(local_n) * kDim + key) * kDim + value;
+        state_right[index] = state_history[state_offset];
+        state_right[kStrip * kStrip + index] =
+            dstate_history[state_offset];
+      }
+      __syncthreads();
+
+#pragma unroll
+      for (int owned_row = 0; owned_row < 2; ++owned_row) {
+        const int row_start = (warp * 2 + owned_row) * kStrip;
+        MatrixARow do_operand;
+        MatrixARow z_operand;
+        MatrixARow dz_operand;
+        MatrixBCol h_operand;
+        MatrixBCol dh_operand;
+        wmma::load_matrix_sync(
+            do_operand, left + row_start * kStrip, kStrip);
+        wmma::load_matrix_sync(
+            z_operand, left + kStripElements + row_start * kStrip, kStrip);
+        wmma::load_matrix_sync(
+            dz_operand, left + 2 * kStripElements + row_start * kStrip,
+            kStrip);
+        wmma::load_matrix_sync(h_operand, state_right, kStrip);
+        wmma::load_matrix_sync(
+            dh_operand, state_right + kStrip * kStrip, kStrip);
+        wmma::mma_sync(
+            dR_fragment[owned_row], do_operand, h_operand,
+            dR_fragment[owned_row]);
+        wmma::mma_sync(
+            dE_fragment[owned_row], z_operand, dh_operand,
+            dE_fragment[owned_row]);
+        wmma::mma_sync(
+            dW_fragment[owned_row], dz_operand, h_operand,
+            dW_fragment[owned_row]);
+      }
+      __syncthreads();
+    }
+
+#pragma unroll
+    for (int owned_row = 0; owned_row < 2; ++owned_row) {
+      const int row_start = (warp * 2 + owned_row) * kStrip;
+      wmma::store_matrix_sync(
+          result + row_start * kStrip, dR_fragment[owned_row], kStrip,
+          wmma::mem_row_major);
+      wmma::store_matrix_sync(
+          result + kStripElements + row_start * kStrip,
+          dE_fragment[owned_row], kStrip, wmma::mem_row_major);
+      wmma::store_matrix_sync(
+          result + 2 * kStripElements + row_start * kStrip,
+          dW_fragment[owned_row], kStrip, wmma::mem_row_major);
+    }
+    __syncthreads();
+
+    for (int index = threadIdx.x; index < kStripElements;
+         index += blockDim.x) {
+      const int row = index / kStrip;
+      const int key = key_start + index % kStrip;
+      const int64_t local =
+          (static_cast<int64_t>(local_n) * kChunk + row) * kDim + key;
+      const int64_t source = chunk_vector_index(n, row, key);
+      const float g = prefix_g[source];
+      const float end_g =
+          prefix_g[chunk_vector_index(n, kChunk - 1, key)];
+      const float dR_value = result[index];
+      const float dE_value = result[kStripElements + index];
+      const float R_value = qbar[source] * expf(g);
+      const float E_value = khat[source] * expf(end_g - g);
+      dqbar[local] = dR_value * expf(g);
+      dkhat[local] = dE_value * expf(end_g - g);
+      dprefix[local] =
+          dR_value * R_value - dE_value * E_value;
+      left[index] = __float2bfloat16_rn(
+          -result[2 * kStripElements + index]);
+      left[kStripElements + index] = __float2bfloat16_rn(Q[local]);
+    }
+    __syncthreads();
+
+#pragma unroll
+    for (int owned_row = 0; owned_row < 2; ++owned_row) {
+      const int row_start = (warp * 2 + owned_row) * kStrip;
+      MatrixARow dw_operand;
+      wmma::load_matrix_sync(
+          dw_operand, left + row_start * kStrip, kStrip);
+#pragma unroll
+      for (int column_tile = 0; column_tile < 4; ++column_tile) {
+        MatrixBCol q_operand;
+        wmma::load_matrix_sync(
+            q_operand,
+            left + kStripElements + column_tile * kStrip * kStrip,
+            kStrip);
+        wmma::mma_sync(
+            local_adjoint[owned_row * 4 + column_tile],
+            dw_operand, q_operand,
+            local_adjoint[owned_row * 4 + column_tile]);
+      }
+    }
+
+    Accumulator dQ_fragment[2];
+#pragma unroll
+    for (int owned_row = 0; owned_row < 2; ++owned_row) {
+      wmma::fill_fragment(dQ_fragment[owned_row], 0.0f);
+      const int row_start = (warp * 2 + owned_row) * kStrip;
+      for (int inner_start = 0; inner_start < kChunk;
+           inner_start += kStrip) {
+        MatrixACol t_fragment;
+        MatrixBRow dw_fragment;
+        wmma::load_matrix_sync(
+            t_fragment, inverse + inner_start * kChunk + row_start, kChunk);
+        wmma::load_matrix_sync(
+            dw_fragment, left + inner_start * kStrip, kStrip);
+        wmma::mma_sync(
+            dQ_fragment[owned_row], t_fragment, dw_fragment,
+            dQ_fragment[owned_row]);
+      }
+      wmma::store_matrix_sync(
+          result + row_start * kStrip, dQ_fragment[owned_row], kStrip,
+          wmma::mem_row_major);
+    }
+    __syncthreads();
+
+    const int row = threadIdx.x;
+    float beta_contribution = 0.0f;
+    const float beta_row = beta[static_cast<int64_t>(n) * kChunk + row];
+    for (int local_key = 0; local_key < kStrip; ++local_key) {
+      const int key = key_start + local_key;
+      const float dQ_value = result[row * kStrip + local_key];
+      const int64_t local =
+          (static_cast<int64_t>(local_n) * kChunk + row) * kDim + key;
+      const int64_t source = chunk_vector_index(n, row, key);
+      const float exp_g = expf(prefix_g[source]);
+      dkhat[local] += dQ_value * beta_row * exp_g;
+      dprefix[local] += dQ_value * beta_row * exp_g * khat[source];
+      beta_contribution += dQ_value * exp_g * khat[source];
+    }
+    dbeta[static_cast<int64_t>(local_n) * kChunk + row] +=
+        beta_contribution;
+    __syncthreads();
+
+    if (threadIdx.x < kStrip) {
+      const int key = key_start + threadIdx.x;
+      float end_contribution =
+          dD[static_cast<int64_t>(n) * kDim + key] *
+          expf(prefix_g[chunk_vector_index(n, kChunk - 1, key)]);
+      for (int row_index = 0; row_index < kChunk; ++row_index) {
+        const int index = row_index * kStrip + threadIdx.x;
+        const int64_t source = chunk_vector_index(n, row_index, key);
+        const float end_g =
+            prefix_g[chunk_vector_index(n, kChunk - 1, key)];
+        const float E_value =
+            khat[source] * expf(end_g - prefix_g[source]);
+        end_contribution += result[kStripElements + index] * E_value;
+      }
+      const int64_t end_local =
+          (static_cast<int64_t>(local_n) * kChunk + kChunk - 1) *
+          kDim + key;
+      dprefix[end_local] += end_contribution;
+    }
+    __syncthreads();
+  }
+
+  // Complete dM = -T^T (dZ P^T + dW Q^T) T^T. The required dM output is
+  // used as the deterministic phase boundary between the two products, so no
+  // additional matrix workspace or library GEMM is needed.
+#pragma unroll
+  for (int owned_row = 0; owned_row < 2; ++owned_row) {
+    const int row_start = (warp * 2 + owned_row) * kStrip;
+#pragma unroll
+    for (int column_tile = 0; column_tile < 4; ++column_tile) {
+      wmma::store_matrix_sync(
+          result + row_start * kChunk + column_tile * kStrip,
+          local_adjoint[owned_row * 4 + column_tile], kChunk,
+          wmma::mem_row_major);
+    }
+  }
+  __syncthreads();
+  for (int index = threadIdx.x; index < kMatrixElements;
+       index += blockDim.x) {
+    left[index] = __float2bfloat16_rn(result[index]);
+  }
+  __syncthreads();
+
+#pragma unroll
+  for (int owned_row = 0; owned_row < 2; ++owned_row) {
+    const int row_start = (warp * 2 + owned_row) * kStrip;
+#pragma unroll
+    for (int column_tile = 0; column_tile < 4; ++column_tile) {
+      Accumulator transformed;
+      wmma::fill_fragment(transformed, 0.0f);
+      for (int inner_start = 0; inner_start < kChunk;
+           inner_start += kStrip) {
+        MatrixACol t_fragment;
+        MatrixBRow adjoint_fragment;
+        wmma::load_matrix_sync(
+            t_fragment, inverse + inner_start * kChunk + row_start, kChunk);
+        wmma::load_matrix_sync(
+            adjoint_fragment,
+            left + inner_start * kChunk + column_tile * kStrip, kChunk);
+        wmma::mma_sync(
+            transformed, t_fragment, adjoint_fragment, transformed);
+      }
+      wmma::store_matrix_sync(
+          dM + matrix_base + row_start * kChunk + column_tile * kStrip,
+          transformed, kChunk, wmma::mem_row_major);
+    }
+  }
+  __syncthreads();
+  for (int index = threadIdx.x; index < kMatrixElements;
+       index += blockDim.x) {
+    left[index] = __float2bfloat16_rn(dM[matrix_base + index]);
+  }
+  __syncthreads();
+
+#pragma unroll
+  for (int owned_row = 0; owned_row < 2; ++owned_row) {
+    const int row_start = (warp * 2 + owned_row) * kStrip;
+#pragma unroll
+    for (int column_tile = 0; column_tile < 4; ++column_tile) {
+      Accumulator transformed;
+      wmma::fill_fragment(transformed, 0.0f);
+      for (int inner_start = 0; inner_start < kChunk;
+           inner_start += kStrip) {
+        MatrixARow adjoint_fragment;
+        MatrixBCol t_fragment;
+        wmma::load_matrix_sync(
+            adjoint_fragment, left + row_start * kChunk + inner_start,
+            kChunk);
+        wmma::load_matrix_sync(
+            t_fragment,
+            inverse + column_tile * kStrip * kChunk + inner_start,
+            kChunk);
+        wmma::mma_sync(
+            transformed, adjoint_fragment, t_fragment, transformed);
+      }
+      wmma::store_matrix_sync(
+          result + row_start * kChunk + column_tile * kStrip,
+          transformed, kChunk, wmma::mem_row_major);
+    }
+  }
+  __syncthreads();
+  for (int index = threadIdx.x; index < kMatrixElements;
+       index += blockDim.x) {
+    dM[matrix_base + index] = -result[index];
+  }
+}
+
 // Evaluate one conflict-free stable A/M tile pair and apply its complete
 // vector VJP in the producer CTA. The color launch is the deterministic
 // ordering boundary; shared FP32 WMMA results never round-trip through global
@@ -2236,19 +2671,19 @@ nanochat_kda_chunk_wy_backward_c64(
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 
     at::Tensor dA_group = at::empty_like(A_group);
-    at::Tensor dW_group = at::empty_like(W_group);
     at::Tensor dT_group = at::empty_like(T_group);
-    at::Tensor dP_group = at::empty_like(P_group);
-    at::Tensor dQ_group = at::empty_like(Q_group);
-    at::Tensor temp_matrix = at::empty_like(T_group);
     at::bmm_out(dA_group, dO_group, z_group_flat.transpose(1, 2));
     at::Tensor dqbar_group = at::empty_like(P_group);
     at::Tensor dkhat_group = at::empty_like(Q_group);
     at::Tensor dprefix_group = at::empty_like(P_group);
-    nanochat_kda_wy_backward_two_warp_state_products_c64_kernel<<<
+    at::Tensor dbeta_group = at::empty({kGroupRows, kChunk}, fp32);
+    nanochat_kda_wy_backward_complete_two_warp_vjp_c64_kernel<<<
         kGroupRows, 64, 0, stream>>>(
+        reinterpret_cast<const __nv_bfloat16*>(v.data_ptr<at::BFloat16>()),
         qbar.data_ptr<float>(), khat.data_ptr<float>(),
-        prefix_g.data_ptr<float>(), dO_group.data_ptr<float>(),
+        prefix_g.data_ptr<float>(), beta.data_ptr<float>(),
+        P_group.data_ptr<float>(), Q_group.data_ptr<float>(),
+        T_group.data_ptr<float>(), dO_group.data_ptr<float>(),
         z_group_flat.data_ptr<float>(), dZ_group_flat.data_ptr<float>(),
         reinterpret_cast<const __nv_bfloat16*>(
             chunk_state_history.select(0, group_id)
@@ -2256,41 +2691,14 @@ nanochat_kda_chunk_wy_backward_c64(
         reinterpret_cast<const __nv_bfloat16*>(
             dstate_next_history.select(0, group_id)
                 .data_ptr<at::BFloat16>()),
-        dD.data_ptr<float>(), dW_group.data_ptr<float>(),
+        dD.data_ptr<float>(), dT_group.data_ptr<float>(),
         dqbar_group.data_ptr<float>(), dkhat_group.data_ptr<float>(),
+        reinterpret_cast<__nv_bfloat16*>(dv.data_ptr<at::BFloat16>()),
+        dbeta_group.data_ptr<float>(),
         dprefix_group.data_ptr<float>(), chunk_start, kGroupChunks);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
-    at::bmm_out(dT_group, dZ_group_flat, P_group.transpose(1, 2));
-    at::bmm_out(temp_matrix, dW_group, Q_group.transpose(1, 2));
-    nanochat_kda_wy_backward_add_c64_kernel<<<
-        (kGroupMatrixElements + kThreads - 1) / kThreads,
-        kThreads, 0, stream>>>(dT_group.data_ptr<float>(),
-        temp_matrix.data_ptr<float>(), kGroupMatrixElements);
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
-    at::bmm_out(dP_group, T_group.transpose(1, 2), dZ_group_flat);
-    at::bmm_out(dQ_group, T_group.transpose(1, 2), dW_group);
-    at::bmm_out(temp_matrix, T_group.transpose(1, 2), dT_group);
-    at::bmm_out(dT_group, temp_matrix, T_group.transpose(1, 2));
-    nanochat_kda_wy_backward_negate_c64_kernel<<<
-        (kGroupMatrixElements + kThreads - 1) / kThreads,
-        kThreads, 0, stream>>>(dT_group.data_ptr<float>(),
-        kGroupMatrixElements);
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
-
-    at::Tensor dbeta_group = at::empty({kGroupRows, kChunk}, fp32);
     at::Tensor parameter_chunk_partials = at::empty(
         {kGroupRows, 2, kDim}, fp32);
-
-    nanochat_kda_chunk_backward_finish_two_warp_c64_kernel<<<
-        kGroupRows * kChunk, kDim, 0, stream>>>(
-        reinterpret_cast<const __nv_bfloat16*>(v.data_ptr<at::BFloat16>()),
-        khat.data_ptr<float>(), prefix_g.data_ptr<float>(),
-        beta.data_ptr<float>(), dP_group.data_ptr<float>(),
-        dQ_group.data_ptr<float>(), dkhat_group.data_ptr<float>(),
-        reinterpret_cast<__nv_bfloat16*>(dv.data_ptr<at::BFloat16>()),
-        dbeta_group.data_ptr<float>(), dprefix_group.data_ptr<float>(),
-        chunk_start, kGroupChunks);
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
     for (int color = 0; color < 4; ++color) {
       const int pair_count = color == 0 ? 4 : 2;
       nanochat_kda_wy_backward_colored_pair_wmma_c64_kernel<<<
