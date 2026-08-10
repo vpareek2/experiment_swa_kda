@@ -828,6 +828,25 @@ __global__ void nanochat_kda_wy_backward_fp32_to_bf16_c64_kernel(
   }
 }
 
+__global__ void nanochat_kda_wy_backward_pack_bf16_pqt_c64_kernel(
+    const float* P,
+    const float* Q,
+    const float* T,
+    __nv_bfloat16* P_bf16,
+    __nv_bfloat16* Q_bf16,
+    __nv_bfloat16* T_bf16,
+    int vector_elements,
+    int matrix_elements) {
+  const int index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (index < vector_elements) {
+    P_bf16[index] = __float2bfloat16_rn(P[index]);
+    Q_bf16[index] = __float2bfloat16_rn(Q[index]);
+  }
+  if (index < matrix_elements) {
+    T_bf16[index] = __float2bfloat16_rn(T[index]);
+  }
+}
+
 __global__ void nanochat_kda_wy_backward_sub_c64_kernel(
     float* destination, const float* source, int elements) {
   const int index = blockIdx.x * blockDim.x + threadIdx.x;
@@ -1404,9 +1423,9 @@ __global__ void nanochat_kda_wy_backward_complete_two_warp_vjp_c64_kernel(
     const float* khat,
     const float* prefix_g,
     const float* beta,
-    const float* P,
-    const float* Q,
-    const float* T,
+    const __nv_bfloat16* P,
+    const __nv_bfloat16* Q,
+    const __nv_bfloat16* T,
     const float* dO,
     const __nv_bfloat16* z,
     const __nv_bfloat16* dZ,
@@ -1438,7 +1457,6 @@ __global__ void nanochat_kda_wy_backward_complete_two_warp_vjp_c64_kernel(
   constexpr int kStripElements = kChunk * kStrip;
   constexpr int kMatrixElements = kChunk * kChunk;
   __shared__ __align__(16) __nv_bfloat16 left[kMatrixElements];
-  __shared__ __align__(16) __nv_bfloat16 inverse[kMatrixElements];
   __shared__ __align__(16) __nv_bfloat16 state_right[2 * kStrip * kStrip];
   __shared__ float result[kMatrixElements];
 
@@ -1458,12 +1476,6 @@ __global__ void nanochat_kda_wy_backward_complete_two_warp_vjp_c64_kernel(
       wmma::accumulator, kStrip, kStrip, kStrip, float>;
 
   const int64_t matrix_base = static_cast<int64_t>(local_n) * kMatrixElements;
-  for (int index = threadIdx.x; index < kMatrixElements;
-       index += blockDim.x) {
-    inverse[index] = __float2bfloat16_rn(T[matrix_base + index]);
-  }
-  __syncthreads();
-
   // Each warp owns two 16-row tiles and all four column tiles of the local
   // adjoint. Eight fragments stay live across every value and key strip.
   Accumulator local_adjoint[8];
@@ -1475,16 +1487,6 @@ __global__ void nanochat_kda_wy_backward_complete_two_warp_vjp_c64_kernel(
   // Value strips contribute dZ P^T to the inverse adjoint. They also produce
   // dP = T^T dZ, which is consumed immediately by dv and dbeta.
   for (int value_start = 0; value_start < kDim; value_start += kStrip) {
-    for (int index = threadIdx.x; index < kStripElements;
-         index += blockDim.x) {
-      const int row = index / kStrip;
-      const int value = value_start + index % kStrip;
-      const int64_t local =
-          (static_cast<int64_t>(local_n) * kChunk + row) * kDim + value;
-      left[kStripElements + index] = __float2bfloat16_rn(P[local]);
-    }
-    __syncthreads();
-
 #pragma unroll
     for (int owned_row = 0; owned_row < 2; ++owned_row) {
       const int row_start = (warp * 2 + owned_row) * kStrip;
@@ -1499,8 +1501,9 @@ __global__ void nanochat_kda_wy_backward_complete_two_warp_vjp_c64_kernel(
         MatrixBCol p_fragment;
         wmma::load_matrix_sync(
             p_fragment,
-            left + kStripElements + column_tile * kStrip * kStrip,
-            kStrip);
+            P + (static_cast<int64_t>(local_n) * kChunk +
+                 column_tile * kStrip) * kDim + value_start,
+            kDim);
         wmma::mma_sync(
             local_adjoint[owned_row * 4 + column_tile],
             dz_fragment, p_fragment,
@@ -1518,7 +1521,8 @@ __global__ void nanochat_kda_wy_backward_complete_two_warp_vjp_c64_kernel(
         MatrixACol t_fragment;
         MatrixBRow dz_fragment;
         wmma::load_matrix_sync(
-            t_fragment, inverse + inner_start * kChunk + row_start, kChunk);
+            t_fragment, T + matrix_base + inner_start * kChunk + row_start,
+            kChunk);
         wmma::load_matrix_sync(
             dz_fragment,
             dZ + (static_cast<int64_t>(local_n) * kChunk + inner_start) *
@@ -1661,7 +1665,6 @@ __global__ void nanochat_kda_wy_backward_complete_two_warp_vjp_c64_kernel(
           dR_value * R_value - dE_value * E_value;
       left[index] = __float2bfloat16_rn(
           -result[2 * kStripElements + index]);
-      left[kStripElements + index] = __float2bfloat16_rn(Q[local]);
     }
     __syncthreads();
 
@@ -1676,8 +1679,9 @@ __global__ void nanochat_kda_wy_backward_complete_two_warp_vjp_c64_kernel(
         MatrixBCol q_operand;
         wmma::load_matrix_sync(
             q_operand,
-            left + kStripElements + column_tile * kStrip * kStrip,
-            kStrip);
+            Q + (static_cast<int64_t>(local_n) * kChunk +
+                 column_tile * kStrip) * kDim + key_start,
+            kDim);
         wmma::mma_sync(
             local_adjoint[owned_row * 4 + column_tile],
             dw_operand, q_operand,
@@ -1695,7 +1699,8 @@ __global__ void nanochat_kda_wy_backward_complete_two_warp_vjp_c64_kernel(
         MatrixACol t_fragment;
         MatrixBRow dw_fragment;
         wmma::load_matrix_sync(
-            t_fragment, inverse + inner_start * kChunk + row_start, kChunk);
+            t_fragment, T + matrix_base + inner_start * kChunk + row_start,
+            kChunk);
         wmma::load_matrix_sync(
             dw_fragment, left + inner_start * kStrip, kStrip);
         wmma::mma_sync(
@@ -1781,7 +1786,8 @@ __global__ void nanochat_kda_wy_backward_complete_two_warp_vjp_c64_kernel(
         MatrixACol t_fragment;
         MatrixBRow adjoint_fragment;
         wmma::load_matrix_sync(
-            t_fragment, inverse + inner_start * kChunk + row_start, kChunk);
+            t_fragment, T + matrix_base + inner_start * kChunk + row_start,
+            kChunk);
         wmma::load_matrix_sync(
             adjoint_fragment,
             left + inner_start * kChunk + column_tile * kStrip, kChunk);
@@ -1816,7 +1822,7 @@ __global__ void nanochat_kda_wy_backward_complete_two_warp_vjp_c64_kernel(
             kChunk);
         wmma::load_matrix_sync(
             t_fragment,
-            inverse + column_tile * kStrip * kChunk + inner_start,
+            T + matrix_base + column_tile * kStrip * kChunk + inner_start,
             kChunk);
         wmma::mma_sync(
             transformed, adjoint_fragment, t_fragment, transformed);
@@ -2697,6 +2703,24 @@ nanochat_kda_chunk_wy_backward_c64(
     at::Tensor dA_group = at::empty_like(A_group);
     at::Tensor dT_group = at::empty_like(T_group);
     at::bmm_out(dA_group, dO_group, z_group_flat.transpose(1, 2));
+    at::Tensor P_group_bf16 = at::empty(
+        {kGroupRows, kChunk, kDim}, q.options());
+    at::Tensor Q_group_bf16 = at::empty_like(P_group_bf16);
+    at::Tensor T_group_bf16 = at::empty(
+        {kGroupRows, kChunk, kChunk}, q.options());
+    nanochat_kda_wy_backward_pack_bf16_pqt_c64_kernel<<<
+        (kGroupVectorElements + kThreads - 1) / kThreads,
+        kThreads, 0, stream>>>(
+        P_group.data_ptr<float>(), Q_group.data_ptr<float>(),
+        T_group.data_ptr<float>(),
+        reinterpret_cast<__nv_bfloat16*>(
+            P_group_bf16.data_ptr<at::BFloat16>()),
+        reinterpret_cast<__nv_bfloat16*>(
+            Q_group_bf16.data_ptr<at::BFloat16>()),
+        reinterpret_cast<__nv_bfloat16*>(
+            T_group_bf16.data_ptr<at::BFloat16>()),
+        kGroupVectorElements, kGroupMatrixElements);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
     at::Tensor dqbar_group = at::empty_like(P_group);
     at::Tensor dkhat_group = at::empty_like(Q_group);
     at::Tensor dprefix_group = at::empty_like(P_group);
@@ -2706,8 +2730,13 @@ nanochat_kda_chunk_wy_backward_c64(
         reinterpret_cast<const __nv_bfloat16*>(v.data_ptr<at::BFloat16>()),
         qbar.data_ptr<float>(), khat.data_ptr<float>(),
         prefix_g.data_ptr<float>(), beta.data_ptr<float>(),
-        P_group.data_ptr<float>(), Q_group.data_ptr<float>(),
-        T_group.data_ptr<float>(), dO_group.data_ptr<float>(),
+        reinterpret_cast<const __nv_bfloat16*>(
+            P_group_bf16.data_ptr<at::BFloat16>()),
+        reinterpret_cast<const __nv_bfloat16*>(
+            Q_group_bf16.data_ptr<at::BFloat16>()),
+        reinterpret_cast<const __nv_bfloat16*>(
+            T_group_bf16.data_ptr<at::BFloat16>()),
+        dO_group.data_ptr<float>(),
         reinterpret_cast<const __nv_bfloat16*>(
             z_group_bf16.data_ptr<at::BFloat16>()),
         reinterpret_cast<const __nv_bfloat16*>(
