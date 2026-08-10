@@ -11688,3 +11688,104 @@ uv run --no-sync python scripts/kda_cuda_development.py \
   so whole global histories or launch groups disappear. A multi-kernel
   lifetime change is now more likely to close the 7,696 tok/s observed gap than
   further tuning one already-improved VJP.
+
+## 2026-08-10 [Codex] Fused U/W producer packing passes all gates but misses Level 2
+
+**Context**
+
+- Attempt165 starts from the faster, non-retained attempt162 scaffold and
+  removes an adjacent backward launch family. The existing group U/W WMMA
+  producer already loads and rounds every P/Q/T tile, so it now optionally
+  emits the BF16 P/Q/T histories directly from those live operands. The
+  reverse path consumes those histories and no longer launches the separate
+  group-local P/Q/T pack kernel. Forward passes null destinations. Equations,
+  rounding, allocation sizes, public ABI, and all other kernels are unchanged.
+- A first independent-repeat launch from the coordinator directory was invalid
+  before build or model execution because the build helper resolved candidate
+  sources from the launch cwd. That exact failure is preserved as repeat-002;
+  repeat-003 uses the same script from the candidate worktree with new caches.
+
+**Commands**
+
+```bash
+# Existing seed-4101 production capture and incremental Level 1 versus 162.
+# Exact staged optimization checker with all four sanitizers, then one
+# independent fresh-cache repeat from the candidate worktree.
+uv run --no-sync research cuda-candidate-check \
+  --config configs/research/kda_cuda_ownership.toml \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_validation_165 \
+  --lane optimization --sanitizers \
+  --artifact-dir runs/kda-cuda-development/diagnostics/attempt-00165-fused-uw-pqt-pack-protected-checker \
+  --extension-cache /tmp/kda165-checker-ext-002 \
+  --cuda-cache /tmp/kda165-checker-cuda-002
+
+# Direct Level 1 against accepted attempt161, followed exactly once by its
+# saved baseline-first seven-step Level-2 pair.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_161 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_165 \
+  runs/kda-cuda-development/attempt-00165-fused-uw-pqt-pack-vs-accepted-level1 \
+  --level2-order baseline-first
+uv run --no-sync python \
+  runs/kda-cuda-development/attempt-00165-fused-uw-pqt-pack-vs-accepted-level2/run_level2.py
+```
+
+**Artifacts**
+
+- Branch `kda-cuda/fused-uw-pqt-pack-165`, pushed commit
+  `08dd15b847472579b4bf3f75f903b92de3a0684a`; changed source SHA-256
+  `9745f4b9c9cc9ae765e1dbb0c11a82cae032f335f0c9d310deb96daf2b02f0db`.
+- Diagnostic manifest
+  `9406fdc80b0b4c472e63826256f9b5d63bf0e29c2cdf109a55fbfb284c8cc108`;
+  invalid-repeat manifest
+  `2406d10f6fd847bd41e8aa2a22cbc709488cb5acce2b2efb7e36036d8b4e333a`;
+  valid-repeat manifest
+  `37f12204c8f385a4323275dd60a9cd6fb3bf5127be2936f1d4c5fab7234bce64`;
+  checker manifest
+  `c7ed43c3059329c0427a2f759b882311ac8d944095fff73a25396ba691fd8f8f`.
+- Incremental Level-1 manifest
+  `2a711f4cb6fbddc047e5510a4afeaf85f6bca4108ec0872888b6349d9de2d932`;
+  direct accepted-baseline Level-1 manifest
+  `8fb65edae86c39ef046e3725c9cd9ab714d56922c632f189089b39f59b019aa3`;
+  profile manifest
+  `2df41075aebe1228eb0da5b15db6be51113259c1843d8a469f37a9c6033bdad9`;
+  Level-2 manifest
+  `575b2a9dc9f6e1dc9b99ccfad26ce9f40e7bd1fbfa91b627522d10412eb32779`.
+- The append-only index now has 188 rows and hashes to
+  `7675e4d53a46b3cad992d128f7111bd0fa2d5438d766068b6b0e8488001f4f9c`.
+
+**Result**
+
+- Output and all seven gradients are bitwise equal to attempt162; the
+  independent repeat is bitwise equal for every tensor and all values are
+  finite. The exact staged tree equals the candidate commit tree. The protected
+  checker reports ownership 1.0, runtime/profile FLA freedom, and zero-error
+  memcheck, racecheck, synccheck, and initcheck.
+- Incrementally versus attempt162, T=4096 forward+backward improves 3.942%
+  with unchanged allocation. Directly versus accepted attempt161 it improves
+  `10.206096 -> 9.765424 ms` (4.318%); T=256 improves 10.132%, T=1024
+  regresses 1.125% within the guard, and memory remains identical.
+- The operator profile has 185 launches versus attempt162's 193. Summed kernel
+  time falls `9.121344 -> 9.000256 ms`, span falls
+  `9.611456 -> 9.478336 ms`, and broad VJP falls
+  `1.574304 -> 1.538432 ms`. The P/Q/T pack is absent, while the expanded U/W
+  producer costs 0.589312 ms. This is attribution, not statistical evidence.
+- The direct baseline-first Level-2 pair is valid but below the two-percent
+  gate. Candidate measured `[35843,35743,35717,35715,35770]`, median 35,743
+  tok/s; matched attempt161 measured `[35742,35513,35338,35333,35354]`,
+  median 35,354 tok/s. The gain is 1.100%, with identical 5,507.908 MiB peak
+  memory. The current candidate observation is 81.83% of FLA's preserved
+  43,680 tok/s and 7,937 tok/s short.
+- Attempt161 remains the accepted development baseline at its preserved 35,521
+  tok/s pair. Attempt165 is a useful cumulative scaffold, not an accepted
+  result. No statistical confirmation or LM-quality evaluation ran.
+
+**Next**
+
+- Continue from attempt165 as a cumulative implementation scaffold while
+  keeping attempt161 accepted. Fuse R/E production into the same group U/W
+  producer: it already spans each group/value tile and can perform the exact
+  qbar/khat/prefix transformation while writing R/E, eliminating the remaining
+  16 group-pack launches and roughly 0.458 ms of profiled work.
+- Run narrow bitwise correctness and Level 1 first. Do not run another Level 2
+  unless that broader fusion clears the declared gate and shape guards.
