@@ -8549,3 +8549,94 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_122 \\
 - Continue from attempt 100 at a genuinely larger boundary that fuses compute
   or removes a dependency/materialization boundary. Do not compose attempt 122
   into the accepted baseline and do not revisit the invalid host-pointer form.
+
+## 2026-08-09 [Codex] Attempt 123 compressed chunk-state history rejected at Level 2
+
+**Context**
+
+- Attempt 123 starts directly from accepted attempt 100 and replaces reverse
+  group state recomputation with a compressed full chunk-boundary history.
+  During the unavoidable forward boundary sweep, every incoming C64 state is
+  saved in BF16. Reverse groups expand those saved states into their FP32 VJP
+  workspace and compute only `Z = U - W H`, removing the second sequential
+  `E^T Z` state update across all 64 chunks.
+- Backward-only group-major `P/Q/A/T` storage removes gather copies and offsets
+  the history allocation. This is one coherent strategy boundary: spend bounded
+  compressed history to remove recomputation while retaining the complete
+  deterministic WY/UT VJP.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \\
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_123 \\
+  --lane optimization <isolated artifact/cache arguments>
+# Seed-4101 production comparison and independent fresh-cache repeat.
+uv run --no-sync python scripts/kda_cuda_development.py \\
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_100 \\
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_123 \\
+  runs/kda-cuda-development/attempt-00123-bf16-chunk-state-history-level1 \\
+  --level2-order candidate-first
+# Exact staged source copied to validation worktree 123; run all sanitizers.
+# Execute the saved Level-2 candidate-first pair exactly once.
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_123 \\
+  push -u origin kda-cuda/wy-bf16-chunk-state-history-123
+```
+
+**Artifacts**
+
+- Pushed commit `ab872bd17b0b56f0185ccb1662073ab6cd2e1088`;
+  backward source SHA-256
+  `599048f3b17b25aaa22f169a6cc113af21946030bda0cbfb730cd837dedf2916`.
+- Protected checker:
+  `runs/kda-cuda-development/diagnostics/attempt-00123-bf16-chunk-state-history-protected-checker`,
+  manifest `a51aa3578fd3ec5149ffae533ca506cc967cbe62db04ee33b8745781823ede56`.
+- Production comparison/repeat:
+  `runs/kda-cuda-development/diagnostics/attempt-00123-bf16-chunk-state-history-gradient`,
+  manifest `e277ba94a3e70375603d1ec61bd35dc2a0cf2fd51e132506370901fa5759d75c`.
+- Full sanitizer validation:
+  `runs/kda-cuda-development/validations/validation-00029-bf16-chunk-state-history`,
+  manifest `6d34c39fc42da428e794c3060d5610668e6783057edd7ee45e412d311b2eb99d`.
+- Level 1:
+  `runs/kda-cuda-development/attempt-00123-bf16-chunk-state-history-level1`,
+  manifest `ae5b98816092acdd2f081e6cf6f8ad5ff2fe76c39ebcf5d080dd9cc93e27861a`.
+- Level 2:
+  `runs/kda-cuda-development/attempt-00123-bf16-chunk-state-history-level2`,
+  manifest `415398e5d0e7cb1e0eb49602cb5af98a84bf79898391b36ddbfd62657bb97e7b`.
+- Invalid coordinator-relative staging wrapper:
+  `runs/kda-cuda-development/diagnostics/attempt-00123-bf16-chunk-state-history-invalid-stage-001`,
+  manifest `6f2b7f3a432eff13fffe618c189f94b4e96ebf5c6e0c76f1af0292cae6de0010`.
+- Append-only attempt/reference index has 127 valid JSONL entries, SHA-256
+  `961953d2a44aab29bd753c720af4f24571bf41399d0d8b1df00b88ff92b27a19`.
+
+**Result**
+
+- The candidate passes ownership 1.0, protected runtime/profile audit, runtime
+  FLA freedom, finite gradients, and frozen numerical tolerance. Output is
+  bitwise equal to attempt 100; maximum gradient delta is
+  `2.459273673593998e-09`, and the independent fresh-cache repeat is bitwise
+  exact for all eight tensors.
+- Memcheck, racecheck, initcheck, and synccheck all pass with zero errors.
+  Level 1 advances: T=4096 forward+backward improves
+  `12.333376 -> 11.660480 ms` (5.456%), while peak allocation rises 2.133%,
+  inside the 3% cap. T=256 improves 1.693%; T=1024 regresses 2.307%, within
+  the frozen 5% guard.
+- The exact candidate-first Level-2 pair rejects the candidate. Candidate
+  samples `[28992,19276,29354,34124,34334]` have median 29,354 tok/s;
+  baseline `[33743,33663,33758,33830,33761]` has median 33,758 tok/s. The
+  candidate regresses 13.046%, both peak at 5508.533 MiB, and the candidate
+  reaches 67.202% of the fixed 43,680 tok/s external FLA target.
+- The first production capture resolved the build root from the coordinator cwd
+  and stopped before candidate build; its empty directory and traceback are in
+  the gradient artifact. A separate staging wrapper stopped before checker,
+  build, or GPU work. Both are invalid and excluded. No confirmation or
+  LM-quality evaluation ran; this result is not statistically confirmed.
+
+**Next**
+
+- Retain attempt 100. Do not advance, retest, or compose attempt 123. Its strong
+  isolated backward gain does not survive the full training schedule, and the
+  exact matched pair is authoritative.
+- Close compressed full chunk-state history as a strategy. The next candidate
+  must reduce end-to-end scheduling variance or remove work visible in the full
+  training block; do not optimize further against attempt 123's Level-1 result.
