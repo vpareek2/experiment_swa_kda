@@ -8820,3 +8820,59 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_125 \
   specialization or remove the separate packing pass while preserving the
   proven CTA alias barriers. The independent alternative remains a backward
   dependency/ownership redesign that removes generic GEMM/global handoffs.
+
+## 2026-08-09 [Codex] Attribute corrected attempt-125 forward pipeline
+
+**Context**
+
+- After closing the matched attempt-125 pair, captured one bounded production
+  forward+backward profile to distinguish the asynchronous scan gain from the
+  cost of its BF16 operand producer. This was attribution only: it did not
+  rerun Level 1/Level 2, change retention, or evaluate quality.
+
+**Commands**
+
+```bash
+PYTHONPATH=/home/veer/Master/projects/experiment_swa_kda_cuda_attempt_125 \
+TORCH_EXTENSIONS_DIR=/tmp/kda125-profile-ext-001 \
+CUDA_CACHE_PATH=/tmp/kda125-profile-cuda-001 \
+nsys profile --trace=cuda,nvtx,osrt --sample=none --cpuctxsw=none \
+  --output=<artifact>/trace \
+  /home/veer/Master/projects/experiment_swa_kda/.venv/bin/python \
+  /tmp/kda033_nsys.py
+nsys stats --report cuda_gpu_kern_sum --format csv <trace>
+```
+
+**Artifacts**
+
+- Production profile:
+  `runs/kda-cuda-development/diagnostics/attempt-00125-production-profile`,
+  manifest `f198b811c53e3bd16298d9fa95b54a1d0e9612b27bee6c12eb96d03b49b7bd20`.
+- Invalid pre-launch wrapper:
+  `runs/kda-cuda-development/diagnostics/attempt-00125-production-profile-invalid-cwd-001`,
+  manifest `3300ba8d11765ff8510b2a7be8dd06ef11df1ccb78471a07068fad52551dd805`.
+- Append-only attempt/reference index has 130 valid JSONL entries, SHA-256
+  `69b298bc55957620afbdd899d4130f588ececb16fc85b4a44bc134d6ccdbe92f`.
+
+**Result**
+
+- The corrected async forward scan averages 1.14224 ms versus attempt 100's
+  saved 2.1328 ms, a 46.444% reduction in the largest forward kernel.
+- The vector producer averages 0.403488 ms and the matrix producer 0.033376 ms,
+  totaling 0.436864 ms. Scan plus preparation is therefore 1.579104 ms, a net
+  25.961% improvement over attempt 100's scan boundary. Preparation consumes
+  44.10% of the gross 0.99056-ms scan saving.
+- The first wrapper created a relative empty directory in the candidate
+  worktree and then stopped at its missing coordinator-absolute log path before
+  `nsys`, Python, build, or GPU work. It is invalid and excluded.
+
+**Next**
+
+- The next direct attempt-100 forward strategy should eliminate or absorb the
+  0.437-ms BF16 pack producer while retaining the proven double-buffered async
+  scan and CTA-wide alias barriers. This is higher leverage than adding more
+  scan lookahead: the scan itself is no longer the dominant forward cost.
+- Do not retest attempt 125 unchanged. A valid follow-up must change the
+  producer-consumer boundary, for example by emitting scan-ready BF16 operands
+  from an existing forward preparation phase or by using dedicated load/store
+  warps that remove the materialized pack handoff.
