@@ -14393,3 +14393,114 @@ nsys profile <bounded production chunk-forward/backward runner>
   further persistent-scan candidate must retain coalesced publication or
   implement a demonstrably lower-cost FLA-equivalent operand/staging pipeline;
   reducing shared bytes or barriers alone is not sufficient.
+
+
+## 2026-08-10 [Codex] Paired FLA diagnostic and accepted forward-boundary checkpoints
+
+**Context**
+
+- The retained FLA target remains 43,680 tok/s. A new one-process alternating
+  CUDA-event diagnostic compared attempt201 directly with FLA 0.5.2 over 30
+  pairs at B=2, T=4096, H=3, K=V=128. This resolves the direction of the old
+  cross-capture profile disagreement without treating a single trace as trainer
+  throughput.
+- Attempt204 starts from pushed attempt201 and tests a new coherent lifetime:
+  forward stores only seven inter-group FP32 recurrent-state boundaries in the
+  visible output tensor's otherwise-hidden backing allocation. Backward uses
+  each saved boundary to reconstruct that group's H/Z histories inside the
+  reverse loop, where U/W/E are already live. This removes the duplicate
+  forward group-U/W and R/E producer sweep without changing the public tensor
+  shape, operator schema, defaults, or runtime ownership.
+
+**Commands**
+
+```bash
+# 30 alternating one-process project201/FLA CUDA-event pairs after five warmups.
+<coordinator interpreter> \
+  runs/kda-cuda-development/reference-benchmarks/paired-operator-project201-vs-fla-002/runner.py
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_204 \
+  --lane optimization --artifact-dir /tmp/kda-check-204 \
+  --extension-cache /tmp/kda-ext-204 --cuda-cache /tmp/kda-cuda-204
+# Exact seed-4101 production-gradient capture and fresh-cache repeat.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_201 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_204 \
+  runs/kda-cuda-development/attempt-00204-fla-forward-group-checkpoints-level1 \
+  --level2-order baseline-first
+# One ordered matched trainer execution per side, followed by finalize.py.
+nsys profile <bounded production chunk-forward/backward runner>
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_204_sanitizer \
+  --lane optimization --sanitizers <exact staged attempt204 source snapshot>
+```
+
+**Artifacts**
+
+- Paired reference manifest
+  `cd01560411039350c91ef267fb8b850a02d62aa535d6ff6f0d4afb9e8a487a5a`.
+- Branch `kda-cuda/fla-forward-group-checkpoints-204`, pushed commit
+  `35da9331090ee030d8d6b89a44b5f0174e416f91`.
+- Changed-source SHA-256 values: `chunk.cu`
+  `c1d8b6c7cfc0fcef96f542280582a2e278d283374d9025add9ef250d09c4d515`,
+  `chunk_wy_common.cuh`
+  `cbc1eaa4e9755ba6c5769d42688586f2f823065bfe60e999294abf0d0fae0976`,
+  `chunk_wy_forward.cu`
+  `90c0800de94075ba6662cf68a66f3fa854e892864988d9fa471c1018a4035b14`,
+  and `chunk_wy_backward.cu`
+  `9f8629739c527c8d792bd30640be19cfb53ed641e75d51a7319c089516bcda14`.
+- Checker summary
+  `a43f451d0568f81b841ccbae444747e0fe1fa5df24ca9137a6c7a32fdec46617`;
+  gradient manifest
+  `140fcc6cf4639b7aeb929180dbd99a3e9b84893e3dfa9f0b334bff5e232a2ced`;
+  Level-1 manifest
+  `4e7e2169e4c16c817a519f3881a0f09671ba9852879d5f71959d1b2ed442b1ee`;
+  Level-2 manifest
+  `0027b07b3688aace3f09c89263c8caba1fce6dd189819a49202abc6f5c91e457`;
+  operator-profile manifest
+  `4d57c179f1f72422bd7f1030a5489763a1848df248676f8af4bbcaeb4a512bb3`;
+  exact-source sanitizer summary
+  `9c735eb44be631a73aaefb6cd1afee75b1c4a55e52045cfc89396b5f353d4802`.
+- Append-only development index SHA-256 after the paired reference and
+  attempt204: `19f57152e254601688d5b2238efc5f125c9cca91ce1509b09021178c437bc31a`.
+
+**Result**
+
+- In the paired operator diagnostic, attempt201 measures median 8.759872 ms
+  versus FLA 5.264576 ms. The project path is 1.66393x FLA and requires a
+  39.901% operator reduction in this scope. This is reference-only CUDA-event
+  evidence, not trainer throughput or statistical confirmation.
+- Attempt204 output is bitwise equal to attempt190. All gradients are finite;
+  their maximum absolute delta is `1.7253114492632449e-09`, inside the frozen
+  tolerance, and an independent fresh-cache repeat is bitwise deterministic.
+  Ownership remains 1.0 and runtime FLA-free. Memcheck, racecheck, synccheck,
+  and initcheck all pass with zero-error summaries on the exact source hashes.
+- Level 1 advances: T=4096 forward+backward improves
+  `8.763952 -> 8.248896 ms` (5.877%). Peak allocation rises
+  `187,173,376 -> 190,319,104` bytes (1.681%), within the 3% guard. T=256 and
+  T=1024 combined regress 2.391% and 1.207%, both inside the 5% guard.
+- The profile records 150 launches, 7.644896 ms summed kernels, and an
+  8.048416 ms span. Relative to the independent attempt201 trace this removes
+  17 launches and lowers summed/span time 14.011%/13.732%. Seven checkpoints
+  consume 2,752,512 bytes; the forward kernel remains approximately flat while
+  eight duplicate U/W and eight duplicate R/E producer launches disappear.
+- Sparse matched Level 2 also advances. Attempt201 samples
+  `[37771,37887,37887,37752,37803]` have median 37,803 tok/s; attempt204 samples
+  `[38803,38869,38699,38647,38835]` have median **38,803 tok/s**, a matched
+  2.645% gain. Peak memory is `5507.908 -> 5525.408 MiB` (1.00318x). This is a
+  new raw project high and clears the declared 2% development gate, but is one
+  sparse execution per side and is not statistical confirmation.
+- Attempt204 reaches 88.835% of FLA and remains **4,877 tok/s below** the
+  43,680 target. No LM-quality evaluation, merge, default change, or completion
+  claim occurred.
+
+**Next**
+
+- Use attempt204 as the accepted development baseline and next scaffold. Its
+  lifetime result validates producer reuse across the protected forward/backward
+  ABI without exceeding the memory guard.
+- Continue with the operator-scale FLA-equivalent reverse WY/state-to-intra
+  boundary: phase-separated full-sequence operand preparation, compact reverse
+  state, broad VJP, and direct intra consumer. Do not return to scan-only,
+  fragment-lane publication, convolution, or per-group micro-fusions. Require
+  a multi-millisecond operator reduction before spending another Level 2.
