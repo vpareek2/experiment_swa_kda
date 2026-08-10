@@ -12309,3 +12309,61 @@ uv run --no-sync research cuda-candidate-check \
 - Do not compose forced register capping. The next FLA-matching change must
   lower live storage through a real layout/useful-work reduction rather than
   asking the compiler to compress the same program.
+
+## 2026-08-10 [Codex] Shared inverse handoff reaches 128 registers but rejects
+
+**Context**
+
+- Attempt174 returns to accepted attempt168 and removes one real materialization
+  boundary. The first `T^T X` inverse-adjoint transform writes the existing
+  shared FP32 `result` buffer instead of global `dM`; threads round that shared
+  result to the existing BF16 `left` buffer, and global `dM` is written only
+  after the final transform. WMMA order, equations, buffers, precision, shared
+  footprint, and ABI are unchanged.
+- This is independent owned CUDA. FLA/FlashKDA remain offline references only.
+
+**Commands**
+
+```bash
+# One seed-4101 production capture, commit/push, and matched candidate-first
+# Level 1 versus accepted attempt168.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_168 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_174 \
+  runs/kda-cuda-development/attempt-00174-fla-shared-inverse-handoff-level1 \
+  --level2-order candidate-first
+```
+
+**Artifacts**
+
+- Branch `kda-cuda/fla-shared-inverse-handoff-174`, pushed commit
+  `e5c8c59ea426aad8a0090e6b74bfc9d7c16119cb`; changed source SHA-256
+  `87540795e8d0c7713ea0728b78f54d340775f8a10188cf772ffc61a6bdd870c3`.
+- Diagnostic manifest
+  `4c76f24acef9f752d1ccba5c1aaa106b7fa3f3c483ffb18c29e1a65862a763df`;
+  Level-1 manifest
+  `19c192f8bae4dca54d93c65c3200c58169d3329938be940d84459cc51e8fee35`.
+- The append-only index now has 198 rows and hashes to
+  `bc7375fcf33c64443ab8e9562497b42d23e0511a640b91e3ad62ea677201056b`.
+
+**Result**
+
+- Output and all gradients are bitwise equal to attempt168 and every tensor is
+  finite. The committed runtime audit completes FLA-free. Static resources
+  improve naturally from 130 to 128 registers/thread with zero stack/local
+  spill and unchanged 25,600-byte shared allocation.
+- Level 1 rejects the candidate. T=4096 forward+backward regresses
+  `9.568752 -> 9.600816 ms` (0.335%) at identical memory; T=1024 regresses
+  1.366%, and T=256 regresses 6.909%, violating the important-shape guard.
+- The removed global round trip is replaced by another full handoff through
+  the already-hot shared alias, likely increasing shared traffic/bank pressure.
+  No profile, checker, sanitizers, repeat, or Level 2 ran after rejection. This
+  is not statistical or LM-quality evidence.
+
+**Next**
+
+- Return to exact accepted attempt168. Both forced and natural routes to the
+  128-register/four-CTA threshold are preserved and rejected.
+- A competitive FLA-style layout must keep the inverse handoff genuinely in
+  registers or reduce useful work; moving it between global and shared storage
+  is not enough.
