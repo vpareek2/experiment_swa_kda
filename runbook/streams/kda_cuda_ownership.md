@@ -8302,3 +8302,82 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_119 \
   or stage one operand ahead while streaming the other. A follow-up must start
   directly from attempt 100 and must continue protecting T=256; do not compose
   attempt 119 as an accepted baseline.
+
+## 2026-08-09 [Codex] Attempt 120 packed A-only four-phase pipeline rejected
+
+**Context**
+
+- Attempt 120 starts directly from accepted attempt 100 and tests whether the
+  complete four-phase overlap can survive with only the expensive/global A
+  operand in flight. `W`, `qgamma`, `A`, and `E^T` tiles are prefetched while
+  state/Z B operands retain the accepted streaming schedule.
+- The initial FP32 A-only source still compiled to 128 registers, showing that
+  removing `next_b` alone did not reduce the compiler's physical live range.
+  Before commit, the exact source/checker artifact was preserved and each lane's
+  eight prefetched FP32 values were replaced by four explicitly rounded
+  BF16x2 register pairs. The committed packed source compiles to 96 registers,
+  50,176 bytes shared, no stack, and no local spill.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_120 \
+  --lane optimization <fresh artifact/cache arguments>
+# Repeat after packing the A-side lookahead in BF16x2 registers.
+# Seed-4101 production comparison and independent fresh-cache repeat.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_100 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_120 \
+  runs/kda-cuda-development/attempt-00120-forward-packed-a-pipeline-level1 \
+  --level2-order candidate-first
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_120 \
+  push -u origin kda-cuda/wy-forward-a-pipeline-120
+```
+
+**Artifacts**
+
+- Pushed commit `0a8f8d5ee31758f65e048f12a1095c66241ff4c7`;
+  committed forward source SHA-256
+  `d31815e41355af11d119b52d7b2f172dc6c54633b60a4c3cfc97cf8195dd9f0d`.
+- Preserved initial 128-register A-only checker, source SHA-256
+  `98724906cd64297fedcb2b064dc86792e79d77131dc59ca96ec1d78f28da84f4`:
+  `runs/kda-cuda-development/diagnostics/attempt-00120-forward-a-pipeline-protected-checker`,
+  manifest `b4bdba1085a6feb833b086985ef53da8bff1df3524ec734a65bc9bc6f0c34fdf`.
+- Committed packed-source checker:
+  `runs/kda-cuda-development/diagnostics/attempt-00120-forward-packed-a-pipeline-protected-checker-002`,
+  manifest `5a32e0f994ab00856db59f8e68668aba3ffbc888b11979ced84aac86a80673f0`.
+- Production comparison/repeat:
+  `runs/kda-cuda-development/diagnostics/attempt-00120-forward-packed-a-pipeline-gradient`,
+  manifest `607d20a35c849dd84520541d0a0b6d523f494c3ad4336856fa41a2196b26061d`.
+- Level 1:
+  `runs/kda-cuda-development/attempt-00120-forward-packed-a-pipeline-level1`,
+  manifest `fe8bcf417f38227e04959c987874cda61cf34d35f164796c27f42a07a749656c`.
+- Append-only attempt/reference index has 124 valid JSONL entries, SHA-256
+  `75a21dd44487223095651a6e75d55c16d216d1fc96434b0c49995e817bc12729`.
+
+**Result**
+
+- Both staged sources pass ownership 1.0, the protected runtime/profile audit,
+  and runtime FLA freedom. The committed packed candidate is bitwise equal to
+  attempt 100 for output and all seven gradients; its independent fresh-cache
+  repeat is also bitwise exact for every tensor.
+- Packing reduces the persistent kernel from 128 to 96 registers while
+  preserving equations and WMMA accumulation order. T=256 forward+backward
+  regresses `3.982112 -> 4.167760 ms` (4.662%), inside the frozen 5% guard;
+  T=1024 improves 1.215%, and memory is unchanged.
+- The long-sequence gate rejects the candidate: T=4096 forward-only improves
+  0.464%, but forward+backward regresses `12.284736 -> 12.347072 ms` (0.507%)
+  instead of meeting the 3% advance threshold. No sanitizer, Level 2,
+  confirmation, or LM-quality evaluation ran.
+
+**Next**
+
+- Retain attempt 100 and close A-only lookahead. Reducing the live state to 96
+  registers restores the T256 guard but loses attempt 119's long-sequence
+  signal, indicating that overlap of both operands—not global A alone—was the
+  useful part of the complete pipeline.
+- The next coherent candidate is packed dual-operand lookahead across all four
+  phases: keep both A and B in flight as in attempt 119, but store both as
+  BF16x2 register pairs to shorten their combined live range. Start directly
+  from attempt 100; do not inherit attempt 119 or 120 as an accepted baseline.
