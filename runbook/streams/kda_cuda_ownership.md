@@ -10206,3 +10206,56 @@ uv run --no-sync python scripts/kda_cuda_development.py \
   warp-local scratch, and uses global BF16 operands. This removes resident
   128x128 shared operands and CTA barriers while preserving the useful
   `dP -> dQ` boundary.
+
+## 2026-08-09 [Codex] Attempt 138 row-warp direct VJP rejected and profiled
+
+**Context**
+
+- Attempt 138 starts exactly from accepted attempt 127 and preserves attempt
+  137's validated direct equations. Four warps own the four 16-row tiles;
+  each keeps eight `dQ` accumulators and hands `dP` through warp-local scratch.
+  Global BF16 operands replace the 45.6-KiB resident shared matrices.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_138 \
+  --lane optimization <isolated artifact/cache arguments>
+# Seed-4101 production capture/repeat, Level 1 versus accepted 127, and one
+# bounded correlated operator profile.
+```
+
+**Artifacts**
+
+- Pushed commit `630058b7213e72183cca435d9f25569b10b37fe9`; source
+  SHA-256 `643f0be4216d0675ef6788beded373a34140d59c42cb6aeff44adf9f4a970814`.
+- Protected checker manifest:
+  `b24b0238355dfb2c0b0b996674378cf8e8abd8b84199210ca24401fe67c87b23`.
+- Production comparison/repeat manifest:
+  `ef846351d148bd378c95790b3648602cf3452f472d5e42784cda6d42f4beaee2`.
+- Level-1 manifest:
+  `db40402d7792c1456752ce07e694a1767ff9fdd40e68b47cc7e2acf6ad9cb9b2`.
+- Operator-profile manifest:
+  `49cc5602c72ec4f1d92a6127412ad836f1caa16b1aefb7370abf20c2337443a2`.
+
+**Result**
+
+- Correctness, deterministic repeat, ownership 1.0, runtime audit, and FLA
+  freedom pass with the same `5.820766091346741e-11` maximum frozen gradient
+  delta as attempt 137.
+- Level 1 rejects the topology. T=4096 forward+backward regresses
+  `11.771792 -> 12.333104 ms` (4.768%); T=256 regresses 6.644% and violates
+  the important-row guard. Peak allocation falls only 0.450%.
+- The direct kernel costs 1.737120 ms, uses 128 registers/thread, 8,448 bytes
+  shared, and zero local bytes/thread. Thus compiler spilling is disproved;
+  four warps serializing eight column tiles and rereading global operands is
+  the failure. No sanitizer or Level 2 ran, and no quality claim is made.
+
+**Next**
+
+- Keep accepted attempt 127 and close four-row-warp/eight-accumulator
+  ownership. Use eight column-owner warps with one live accumulator and
+  warp-local result scratch. Retain only a global `dP` product so `dQ` can be
+  computed without CTA barriers; remove `dR/dE/dQ` workspaces and their
+  standalone consumers.
