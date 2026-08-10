@@ -13615,3 +13615,68 @@ uv run --no-sync python scripts/kda_cuda_development.py \
 - Return to attempt190 for the next strategy boundary. Pursue a larger FLA
   decomposition change in state products or colored intra-backward fusion;
   do not spend more Level-2 runs on isolated broad handoff variants.
+
+## 2026-08-10 [Codex] Direct forward state-fragment consumption helps forward but fails the combined gate
+
+**Context**
+
+- Attempt193 returns to exact attempt190 and applies the validated fixed-SM121
+  accumulator mapping to the persistent C64 forward scan. Each warp applies its
+  two `E^T Z` accumulator fragments directly to the recurrent FP32 state,
+  removing the FP32 shared store/reload and one CTA barrier in every chunk.
+- The recurrence equations, FP32 accumulation and state update expression,
+  output path, launch geometry, public ABI, and backward implementation remain
+  unchanged. FLA is an offline scheduling reference only.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_193 \
+  --lane optimization <isolated artifact/cache arguments>
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_190 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_193 \
+  runs/kda-cuda-development/attempt-00193-fla-register-state-consumer-level1 \
+  --level2-order baseline-first
+```
+
+**Artifacts**
+
+- Branch `kda-cuda/fla-register-state-consumer-193`, pushed commit
+  `7e57a3f510391f471c0f71ccb13fe583c05b10c6`; changed source SHA-256
+  `4ccca1827db292820130243b62ac5fe75d37bee0634f4060caa37fe293362805`.
+- Checker summary
+  `5ce8f0f0fef9b7d7c415f6be82a5cc29b4303ed7cfb027e202ea74699bea7d4d`;
+  production-gradient manifest
+  `e5a867c0c53ab4bda3bceba4718cea37b329b9dafc50fcbf74caf3c7a347a439`;
+  Level-1 manifest
+  `3eb698958617e9de86cbb892b72f72e662bcf134fd76a24c60d70aad9a979e7c`.
+
+**Result**
+
+- The protected audit passes ownership 1.0 and runtime/profile FLA freedom.
+  Production output and all seven gradients are finite and bitwise equal to
+  attempt190. An independent fresh-cache repeat is bitwise equal for every
+  tensor.
+- The intended local forward mechanism is visible: T=4096 forward improves
+  `16.760832 -> 16.410176 ms` (2.092%), and the persistent forward kernel falls
+  from 61 to 54 registers/thread while retaining 50,176 shared bytes and zero
+  stack/local spill.
+- Level 1 nevertheless rejects the candidate. T=4096 forward+backward regresses
+  `9.140160 -> 9.433248 ms` (3.207%). T=1024 combined improves 3.381%, while
+  T=256 combined regresses 3.907%; memory is unchanged throughout.
+- No Level 2, sanitizer run, statistical confirmation, or LM-quality evaluation
+  ran. Attempt190 remains the strongest non-retained scaffold at 37,519 tok/s;
+  attempt176 and attempt175 remain the accepted development/full baselines.
+
+**Next**
+
+- Preserve attempt193 as a correct forward scheduling observation, not a new
+  baseline. Do not spend a sparse Level-2 run on a candidate that failed the
+  target combined gate.
+- Return to attempt190. The isolated register handoff improves forward, but it
+  is not sufficient to reproduce FLA's compact decomposition end to end. The
+  next candidate must remove a larger useful state/intra-backward boundary or
+  combine producer and consumer work without replaying the rejected global
+  state, reverse-base, or incremental broad-handoff schedules.
