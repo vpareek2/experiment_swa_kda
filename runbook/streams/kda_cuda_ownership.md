@@ -12463,3 +12463,83 @@ uv run --no-sync research cuda-candidate-check \
   After the convolution remainder plateaus, return to the much larger complete
   WY/UT backward gap. Do not run another Level 2 until another major boundary,
   plateau, four-hour checkpoint, or final candidate.
+
+## 2026-08-10 [Codex] On-chip dz fusion matches the FLA convolution component
+
+**Context**
+
+- Attempt176 starts from exact attempt175 and removes the remaining global FP32
+  `dz` materialization. Each existing 64-by-32 CTA computes its 67-by-32 `dz`
+  tile, including the three-token future halo, directly into shared memory with
+  the same preactivation rounding and SiLU derivative as its parent.
+- This eliminates the separate 12,288-block producer, its allocator-visible
+  12 MiB buffer at T=4096, and the global `dz` write/read. The `dx` and
+  deterministic per-tile `dweight` arithmetic after the shared handoff are
+  unchanged. FLA remains an offline scheduling reference only.
+
+**Commands**
+
+```bash
+# Convolution-specific candidate/parent microgate and fresh-cache repeat.
+# Protected audit/provenance lane (KDA-only timing is not applicable).
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_175 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_176 \
+  runs/kda-cuda-development/attempt-00176-fused-conv-dz-level1-not-applicable \
+  --level2-order candidate-first
+# Exact staged checker with all four sanitizers, then one attribution-only
+# seven-step full-model nsys trace. No Level 2 was launched.
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_validation_176 \
+  --lane optimization --sanitizers <isolated artifact/cache arguments>
+```
+
+**Artifacts**
+
+- Branch `kda-cuda/fla-fused-conv-dz-176`, pushed commit
+  `29dc8c0b246f34379cf7fcd43c3dc04fc0626e1b`; changed source SHA-256
+  `5e08c21114eaa6f03dd349205ada3ef85c060c695b3b1be62fdda4bf1e765e86`.
+- KDA-only audit/Level-1 manifest
+  `a2b3b9254f027522c7e14708275f501059839436871fc759d510958f43ec8536`;
+  convolution microgate
+  `c0420be64106c66520014d580af15a0a2782816af3cfdfc78355104067dc7b71`;
+  checker/sanitizers
+  `adc5feecde06cde4ee2f56a31516840ef3dcad93fd9fa3ae10783733666a866d`;
+  full-step profile
+  `b0b07ff0a52ebd8b87f917723f88a6270115dd81f6a33407043f497de57ec977`.
+- Convolution-development record
+  `runs/kda-cuda-development/baseline/29dc8c0b2-convolution.json`, SHA-256
+  `7caa4d77d52fd9be6c0ef165484c74e619d75564867b92c251d0d6b634caeeff`.
+- The append-only index now has 200 rows and hashes to
+  `9701384ff05365b28575d047ae162aefd5bd2f3f03a8b0964430af01508d1508`.
+
+**Result**
+
+- Candidate output, `dx`, and `dweight` hashes are bitwise equal to attempt175
+  at T=256/1024/4096, and a fresh isolated build repeats every hash exactly.
+  The protected checker reports ownership 1.0, runtime/profile FLA freedom,
+  and genuine zero-error memcheck, racecheck, synccheck, and initcheck.
+- At T=4096, convolution backward improves `0.179936 -> 0.088064 ms`
+  (51.06%) and forward+backward improves `0.253328 -> 0.165184 ms`
+  (34.79%). The fresh-build candidate repeats at `0.090768` and `0.166320 ms`.
+  Isolated forward+backward peak falls `57,421,824 -> 44,838,912` bytes.
+- The seven-step full trace measures the complete owned convolution family at
+  `13.732 ms/step`, versus attempt175's `19.95 ms/step` and FLA's matched
+  `13.398725 ms/step`. The remaining component gap is only `0.333275 ms/step`,
+  or 2.49%. Launches fall from four to three per call. The fused kernel uses
+  40 registers/thread, 8,576 reported shared bytes, and zero local/stack spill.
+- Convolution is now treated as matched. Attempt176 becomes the validated
+  convolution development parent, while attempt175 remains the latest exact
+  matched full-throughput baseline at `36,719.5 tok/s` (84.06% of FLA). No
+  Level 2, statistical confirmation, or LM-quality evaluation ran for 176.
+
+**Next**
+
+- Stop spending the inner loop on convolution: another 0.333 ms/step cannot
+  explain the roughly 6,960 tok/s overall gap. Start the next WY/UT backward
+  candidate from exact attempt176 so the matched convolution is carried
+  forward.
+- Re-attribute the broad VJP and reverse/state kernels against FLA's compact
+  backward schedule, prioritizing a real reduction in operand materialization
+  or useful work rather than register caps, barrier substitutions, or global
+  buffer lifetime changes already rejected in attempts171-174.
