@@ -13484,3 +13484,66 @@ uv run --no-sync python \
   scalar phase reloads them. Directly consume `dR` and `dE` in registers while
   retaining only the cross-warp BF16 `dW` tile; preserve deterministic end-state
   reductions and compare the cumulative candidate against attempt176.
+
+## 2026-08-10 [Codex] Register-resident dR/dE is correct but sub-threshold
+
+**Context**
+
+- Attempt191 builds on the non-retained attempt190 scaffold and directly
+  consumes the `dR` and `dE` WMMA accumulators for `dqbar`, `dkhat`, and
+  `dprefix`. Eight-lane strided reductions compress `dE*E` into 64 shared
+  partials for the deterministic end-prefix update. Only the cross-warp `dW`
+  tile retains its FP32 shared handoff. FLA remains an offline reference only.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_191 \
+  --lane optimization <isolated artifact/cache arguments>
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_190 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_191 \
+  runs/kda-cuda-development/attempt-00191-fla-register-dre-consumer-level1 \
+  --level2-order baseline-first
+```
+
+**Artifacts**
+
+- Branch `kda-cuda/fla-register-dre-consumer-191`, pushed commit
+  `8b3fb97eeed34081311d2a2540f7e16b461762c8`; changed source SHA-256
+  `63d1102e8c464e8a54f84605d3c09cd56d1b9c4d4a1160c8f1dc3a300073923a`.
+- Checker summary
+  `8b9852c454ca51b24331ed5c00b0d885d43a139759ef4da997ded6f52c502362`;
+  production-gradient manifest
+  `0741990e9663731d8607fd02d3d6a73f40daf46fe297c391358e43d48fad8abc`;
+  Level-1 manifest
+  `eb12a4b31b7ebfdc45e122fc7312549eaa411b0193f4c3087c53b59c25be5868`.
+
+**Result**
+
+- Ownership 1.0 and runtime/profile FLA freedom pass. Production output,
+  `dq`, `dk`, `dv`, and `dbeta` are bitwise equal to attempt190. Cooperative
+  FP32 end-sum grouping changes `draw_gate` and `ddt_bias` by at most
+  `1.4210854715202004e-14`; every tensor is finite and the independent
+  fresh-cache repeat is bitwise equal.
+- Level 1 does not advance. T=4096 forward+backward improves
+  `9.071888 -> 8.983632 ms` (0.973%), below the 3% threshold. T=256 improves
+  0.678%, while T=1024 regresses 3.205%, inside the 5% guard. Memory is
+  unchanged.
+- The broad kernel falls from 132 to 128 registers/thread and retains 25,600
+  shared bytes with no stack/local spill. Removing the `dR`/`dE` tile traffic
+  helps, but the remaining FP32 `dW` store, scalar BF16 conversion, and two
+  synchronization phases limit the standalone gain.
+- No Level 2, sanitizer, statistical confirmation, or LM-quality evaluation
+  ran. Attempt190 remains the strongest non-retained scaffold at 37,519 tok/s;
+  attempt176 and attempt175 remain the accepted development/full baselines.
+
+**Next**
+
+- Preserve attempt191 as a correct cumulative scaffold, not an independently
+  advancing baseline.
+- Consume the `dW` accumulator directly into BF16 shared scratch using the
+  validated fragment mapping. This removes its FP32 shared store/reload and
+  one CTA barrier while retaining the single cross-warp synchronization needed
+  before `T^T dW`; gate the cumulative result against attempt190 and attempt176.
