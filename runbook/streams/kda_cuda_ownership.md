@@ -12236,3 +12236,76 @@ uv run --no-sync python scripts/kda_cuda_development.py \
   on both the older two-warp and current four-warp broad kernels.
 - Continue matching FLA through a structural reduction in useful broad-VJP or
   colored-pair work while preserving attempt168's group-local lifetime.
+
+## 2026-08-10 [Codex] Four-CTA VJP clears Level 1 but fails Level 2
+
+**Context**
+
+- Attempt173 returns to accepted attempt168 after static cubin inspection found
+  the four-warp broad VJP at 130 registers/thread, just above the 128-register
+  threshold for four 128-thread CTAs in the GB10's 65,536-register SM budget.
+  A function-local `__launch_bounds__(128, 4)` asks NVCC to reach the threshold
+  without changing equations, operations, buffers, precision, or ABI.
+- This is an independent owned CUDA resource experiment. No FLA or FlashKDA
+  source is imported, linked, or used at runtime.
+
+**Commands**
+
+```bash
+# Seed-4101 production capture, commit/push, and matched baseline-first Level 1.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_168 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_173 \
+  runs/kda-cuda-development/attempt-00173-fla-four-cta-vjp-level1 \
+  --level2-order baseline-first
+# Exact staged checker with all sanitizers, fresh-cache repeat, one bounded
+# correlated operator profile, then the saved Level-2 pair exactly once.
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_validation_173 \
+  --lane optimization --sanitizers <isolated artifact/cache arguments>
+```
+
+**Artifacts**
+
+- Branch `kda-cuda/fla-four-cta-vjp-173`, pushed commit
+  `6fa87471ecdeee6358753d5b721083b3bb31684b`; changed source SHA-256
+  `1411629d514f42155cbd51fff14ba6491257f10b4f746bdf207dbfffb4bc1e13`.
+- Diagnostic manifest
+  `e5184e7c7880b1a261bf3fd610048ad617aa2b717f5662891b5c9f15d43b6843`;
+  repeat `aa11721ea675a266a6f567d4e5cfac9e9847b9a9c3cd9b806773ac190c2ede90`;
+  checker `56e695c571a313704c647f3d990f5371a66c7584287dbb016ee7d8341a0b2464`;
+  Level 1 `c28a82bf92df89079df283030cb17e04ec7234980dbfd9dda3ac391f369c1a5f`;
+  profile `8c9c8f061dfb07806a6397c3803c60e9dccd88c653b126b7c090b45442022053`;
+  Level 2 `c761d10681f414a00aadf18829d492815073e7e71d464d0c659e91bc0b77bfda`.
+- The append-only index now has 197 rows and hashes to
+  `e928376a7128f588aa071ca064fac059808ba5ca0791509b3cfccbac519df3a7`.
+
+**Result**
+
+- NVCC reaches exactly 128 registers/thread with zero local spill and unchanged
+  25,600-byte shared allocation. Output and all gradients are bitwise equal to
+  attempt168; the independent repeat is bitwise exact. The checker reports
+  ownership 1.0, runtime/profile FLA freedom, and zero-error memcheck,
+  racecheck, synccheck, and initcheck.
+- Level 1 advances: T=4096 forward+backward improves
+  `9.960128 -> 9.626736 ms` (3.347%) with identical allocation. T=256 and
+  T=1024 improve 2.620% and 1.294%; all guards pass.
+- The bounded profile contradicts that point estimate. The broad VJP rises
+  from attempt168's `1.571936` to `1.879232 ms`; summed kernel time rises
+  `8.934784 -> 9.631776 ms`, span rises `9.377056 -> 10.090560 ms`, and launch
+  count stays 167. Forced register reduction increases instruction pressure
+  more than nominal residency helps.
+- The single baseline-first Level-2 pair rejects the candidate. Attempt168
+  measured `[36105,36046,36112,36114,36124]`, median 36,112 tok/s; attempt173
+  measured `[36140,35981,35810,36068,35973]`, median 35,981 tok/s, a 0.363%
+  loss. Both peak at 5,507.908 MiB. This is not statistical confirmation and
+  no LM-quality evaluation ran.
+
+**Next**
+
+- Keep exact attempt168 as the accepted development baseline at its preserved
+  36,185 tok/s observation, 82.84% of FLA and 7,495 tok/s short. Attempt173 is
+  correct and fully validated but rejected for performance.
+- Do not compose forced register capping. The next FLA-matching change must
+  lower live storage through a real layout/useful-work reduction rather than
+  asking the compiler to compress the same program.
