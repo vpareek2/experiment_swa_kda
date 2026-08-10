@@ -11237,3 +11237,60 @@ uv run --no-sync python scripts/kda_cuda_development.py \
 - Remove the remaining packed `R/E` family by deriving those scaled operands
   inside the persistent forward/reverse state programs. Profile before any
   Level 2 and retain all correctness and memory gates.
+
+## 2026-08-10 [Codex] Attempt 158 rejects BF16 R/E prepacking; attempt 157 profile redirects to decay reuse
+
+**Context**
+
+- Attempt158 tests the next FLA lifetime directly: preprocessing computes
+  grouped BF16 `R/E` once and both scan directions consume them, replacing the
+  duplicated FP32 group-pack work. A bounded profile of attempt157 was also
+  captured to attribute the combined forward-`Z` reuse scaffold.
+
+**Commands**
+
+```bash
+# Seed-4101 production capture and matched Level 1 for attempt158.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_127 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_158 \
+  runs/kda-cuda-development/attempt-00158-fla-prepacked-bf16-re-level1 \
+  --level2-order candidate-first
+# One bounded correlated nsys capture of committed attempt157.
+```
+
+**Artifacts**
+
+- Attempt158 branch `kda-cuda/fla-prepacked-bf16-re-158`, pushed commit
+  `98df07c23dabd8a020d5fc84482579ff740f174b`; source SHA-256
+  `7577764ba074d67ca3bb279739512781bf204b87ae3ef0066f46e039c9c1447a`.
+- Attempt158 diagnostic manifest
+  `bbb072c746a344e57d924d45c6b92233ed24a13f754334ff12c61870b1ca3878`;
+  Level-1 manifest
+  `420eb16db753f8522924a14b487d58eb816b6ceb9951e96d1806a7fadbcd80e9`.
+- Attempt157 profile manifest
+  `07022f4017b4aac68198a007ea1b4816b0f3542864179cccd1f51967d3e5429a`.
+- The append-only index now has 178 rows and hashes to
+  `a372aeed9537b1c254bd0dfbe8b52ff8ecf23c381e47744099ff1c5a0017ceda`.
+
+**Result**
+
+- Attempt158 output and `dq` are bitwise equal to attempt157; all tensors are
+  finite and the largest gradient delta is `2.0983105e-05`, within the frozen
+  `0.02` gradient tolerance. Runtime audit completes and remains FLA-free.
+- Against accepted127, T=4096 improves `11.541600 -> 10.594640 ms` (8.205%),
+  but this is 0.58% slower than attempt157's Level-1 point estimate. Allocation
+  rises from attempt157's 191,105,536 to 201,067,008 bytes. Attempt158 is
+  rejected as the next scaffold; no Level 2, checker, sanitizers, or repeat ran.
+- Attempt157's profile has 193 launches, 10.513696 ms summed kernel time, and
+  an 11.046144-ms span. The broad VJP is largest at 2.571616 ms, versus FLA's
+  preserved 0.797600 ms. Group packing is only 0.492576 ms; simply relocating
+  it cannot close the gap.
+
+**Next**
+
+- Return to committed attempt157. Follow FLA's more consequential mechanism:
+  compute decay exponent factors once and reuse them in group packing and the
+  broad VJP, which currently repeats scalar `expf` across key/value strips.
+- Require a materially larger operator reduction before Level 2. Neither result
+  is statistically confirmed and neither evaluates LM quality.
