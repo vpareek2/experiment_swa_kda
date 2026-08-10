@@ -68,7 +68,8 @@ __device__ __forceinline__ float preactivation_gradient(
 }
 
 constexpr int64_t kHotConvolutionWidth = 4;
-constexpr int64_t kDweightTokenTile = 256;
+constexpr int64_t kFusedTimeTile = 64;
+constexpr int64_t kFusedChannelTile = 32;
 
 __global__ void nanochat_kda_causal_convolution_preactivation_gradient_kernel(
     const __nv_bfloat16* x,
@@ -90,40 +91,92 @@ __global__ void nanochat_kda_causal_convolution_preactivation_gradient_kernel(
       kHotConvolutionWidth);
 }
 
-__global__ void nanochat_kda_causal_convolution_dweight_partial_kernel(
+__global__ void nanochat_kda_causal_convolution_tiled_dx_dweight_kernel(
     const __nv_bfloat16* x,
+    const __nv_bfloat16* weight,
     const float* dz,
+    __nv_bfloat16* dx,
     float* partials,
     int64_t length,
     int64_t channels,
-    int64_t flattened_tokens,
-    int64_t partial_elements) {
-  const int64_t index = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (index >= partial_elements) {
-    return;
-  }
-  const int64_t tap = index % kHotConvolutionWidth;
-  const int64_t c = (index / kHotConvolutionWidth) % channels;
-  const int64_t tile = index / (channels * kHotConvolutionWidth);
-  const int64_t first_token = tile * kDweightTokenTile;
-  const int64_t tile_limit = first_token + kDweightTokenTile;
-  const int64_t last_token =
-      tile_limit < flattened_tokens ? tile_limit : flattened_tokens;
+    int64_t time_tile_count) {
+  __shared__ float shared_dz[
+      (kFusedTimeTile + kHotConvolutionWidth - 1) * kFusedChannelTile];
 
-  float gradient = 0.0f;
-  for (int64_t flattened_token = first_token;
-       flattened_token < last_token; ++flattened_token) {
-    const int64_t token_index = flattened_token % length;
-    const int64_t source_index =
-        token_index + tap - (kHotConvolutionWidth - 1);
-    if (source_index >= 0) {
-      const int64_t b = flattened_token / length;
-      const float source = __bfloat162float(
-          x[(b * length + source_index) * channels + c]);
-      gradient += dz[flattened_token * channels + c] * source;
+  const int64_t channel_base =
+      static_cast<int64_t>(blockIdx.x) * kFusedChannelTile;
+  const int64_t time_base =
+      static_cast<int64_t>(blockIdx.y) * kFusedTimeTile;
+  const int64_t b = blockIdx.z;
+  constexpr int64_t kSharedDzElements =
+      (kFusedTimeTile + kHotConvolutionWidth - 1) * kFusedChannelTile;
+
+  for (int64_t local_index = threadIdx.x; local_index < kSharedDzElements;
+       local_index += blockDim.x) {
+    const int64_t local_time = local_index / kFusedChannelTile;
+    const int64_t local_channel = local_index % kFusedChannelTile;
+    const int64_t token_index = time_base + local_time;
+    const int64_t c = channel_base + local_channel;
+    float value = 0.0f;
+    if (token_index < length && c < channels) {
+      value = dz[(b * length + token_index) * channels + c];
+    }
+    shared_dz[local_index] = value;
+  }
+  __syncthreads();
+
+  constexpr int64_t kOutputTileElements =
+      kFusedTimeTile * kFusedChannelTile;
+  for (int64_t local_index = threadIdx.x;
+       local_index < kOutputTileElements; local_index += blockDim.x) {
+    const int64_t local_time = local_index / kFusedChannelTile;
+    const int64_t local_channel = local_index % kFusedChannelTile;
+    const int64_t token_index = time_base + local_time;
+    const int64_t c = channel_base + local_channel;
+    if (token_index < length && c < channels) {
+      float gradient = 0.0f;
+#pragma unroll
+      for (int64_t offset = 0; offset < kHotConvolutionWidth; ++offset) {
+        if (token_index + offset < length) {
+          gradient +=
+              shared_dz[(local_time + offset) * kFusedChannelTile +
+                        local_channel] *
+              __bfloat162float(
+                  weight[c * kHotConvolutionWidth +
+                         kHotConvolutionWidth - 1 - offset]);
+        }
+      }
+      dx[(b * length + token_index) * channels + c] =
+          __float2bfloat16_rn(gradient);
     }
   }
-  partials[index] = gradient;
+
+  constexpr int64_t kWeightTileElements =
+      kFusedChannelTile * kHotConvolutionWidth;
+  if (threadIdx.x < kWeightTileElements) {
+    const int64_t local_channel = threadIdx.x / kHotConvolutionWidth;
+    const int64_t tap = threadIdx.x % kHotConvolutionWidth;
+    const int64_t c = channel_base + local_channel;
+    if (c < channels) {
+      float gradient = 0.0f;
+#pragma unroll 4
+      for (int64_t local_time = 0; local_time < kFusedTimeTile;
+           ++local_time) {
+        const int64_t token_index = time_base + local_time;
+        const int64_t source_index =
+            token_index + tap - (kHotConvolutionWidth - 1);
+        if (token_index < length && source_index >= 0) {
+          gradient +=
+              shared_dz[local_time * kFusedChannelTile + local_channel] *
+              __bfloat162float(
+                  x[(b * length + source_index) * channels + c]);
+        }
+      }
+      const int64_t tile = b * time_tile_count + blockIdx.y;
+      partials[(tile * channels + c) * kHotConvolutionWidth + tap] =
+          gradient;
+    }
+  }
 }
 
 __global__ void nanochat_kda_causal_convolution_dweight_finalize_kernel(
@@ -333,9 +386,9 @@ causal_convolution_backward_cuda(
       !grad_final_state.has_value();
   if (use_factored_width_four_path) {
     at::Tensor dz = at::empty(x.sizes(), x.options().dtype(at::kFloat));
-    const int64_t flattened_tokens = batch * length;
-    const int64_t tile_count =
-        (flattened_tokens + kDweightTokenTile - 1) / kDweightTokenTile;
+    const int64_t time_tile_count =
+        (length + kFusedTimeTile - 1) / kFusedTimeTile;
+    const int64_t tile_count = batch * time_tile_count;
     at::Tensor dweight_partials = at::empty(
         {tile_count, channels, kHotConvolutionWidth},
         x.options().dtype(at::kFloat));
@@ -358,52 +411,28 @@ causal_convolution_backward_cuda(
               dx_elements);
       C10_CUDA_KERNEL_LAUNCH_CHECK();
 
-      nanochat_kda_causal_convolution_backward_kernel
-          <<<blocks, threads, 0,
+      const int channel_tiles = static_cast<int>(
+          (channels + kFusedChannelTile - 1) / kFusedChannelTile);
+      const dim3 fused_grid(
+          channel_tiles, static_cast<unsigned int>(time_tile_count),
+          static_cast<unsigned int>(batch));
+      nanochat_kda_causal_convolution_tiled_dx_dweight_kernel
+          <<<fused_grid, threads, 0,
              at::cuda::getCurrentCUDAStream(x.get_device())>>>(
               reinterpret_cast<const __nv_bfloat16*>(
                   x.data_ptr<at::BFloat16>()),
               reinterpret_cast<const __nv_bfloat16*>(
                   weight.data_ptr<at::BFloat16>()),
-              nullptr,
-              reinterpret_cast<const __nv_bfloat16*>(
-                  grad_output.data_ptr<at::BFloat16>()),
               dz.data_ptr<float>(),
-              nullptr,
               reinterpret_cast<__nv_bfloat16*>(
                   dx.data_ptr<at::BFloat16>()),
-              reinterpret_cast<__nv_bfloat16*>(
-                  dweight.data_ptr<at::BFloat16>()),
-              nullptr,
-              batch,
-              length,
-              channels,
-              width,
-              dx_elements,
-              weight_elements,
-              0,
-              dx_elements);
-      C10_CUDA_KERNEL_LAUNCH_CHECK();
-    }
-
-    const int64_t partial_elements =
-        tile_count * channels * kHotConvolutionWidth;
-    if (partial_elements > 0) {
-      const int partial_blocks =
-          static_cast<int>((partial_elements + threads - 1) / threads);
-      nanochat_kda_causal_convolution_dweight_partial_kernel
-          <<<partial_blocks, threads, 0,
-             at::cuda::getCurrentCUDAStream(x.get_device())>>>(
-              reinterpret_cast<const __nv_bfloat16*>(
-                  x.data_ptr<at::BFloat16>()),
-              dz.data_ptr<float>(),
               dweight_partials.data_ptr<float>(),
               length,
               channels,
-              flattened_tokens,
-              partial_elements);
+              time_tile_count);
       C10_CUDA_KERNEL_LAUNCH_CHECK();
     }
+
     if (weight_elements > 0) {
       const int finalize_blocks =
           static_cast<int>((weight_elements + threads - 1) / threads);
