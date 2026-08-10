@@ -8977,3 +8977,105 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_126 \
   scan-ready operand into preprocess or dead storage, retain attempt 125's
   bounded restored-key representation and alias barriers, and require finite
   first-step training before interpreting any full-model timing.
+
+## 2026-08-09 [Codex] Accept attempt 127 preprocess-emitted qgamma baseline
+
+**Context**
+
+- Attempt 127 starts directly from accepted attempt 100 and narrows the failed
+  attempt-126 producer fusion. Pair-builder qbar/khat remain FP32 and preserve
+  attempt-100 arithmetic. Preprocess emits only BF16 qgamma while the pair
+  builder writes `A` directly as BF16; the bounded restored-key and `W`
+  conversion remain in one post-BMM producer before attempt-125's proven
+  double-buffered asynchronous scan.
+- The first committed source wrote only the lower 16x16 `A` tile triangle into
+  an `at::empty` BF16 allocation, while the persistent WMMA scan loads all four
+  source tiles for each output row. Seed-4101 happened to observe benign upper
+  storage and remained bitwise exact, but the first full-model candidate run
+  had NaN loss from step 0. The raw pair was stopped candidate-first and is
+  invalid.
+- Final commit explicitly zero-initializes the complete BF16 `A` allocation on
+  the current stream before lower-tile construction. A fresh one-step
+  full-model diagnostic then reproduced the baseline finite loss exactly before
+  any final timing was interpreted.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_127 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact seed-4101 production capture and independent fresh-cache repeat.
+# One bounded full-model step after defining all A tiles.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_100 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_127 \
+  runs/kda-cuda-development/attempt-00127-preprocess-qgamma-level1-zeroed-001 \
+  --level2-order candidate-first
+# Exact final source staged in validation worktree 127; run all sanitizers.
+# Execute the final saved candidate-first Level-2 pair exactly once.
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_127 \
+  push -u origin kda-cuda/wy-preprocess-qgamma-127
+```
+
+**Artifacts**
+
+- Pushed accepted development commit
+  `f2fa705e22fc97d2f455b4ccabcf42a6a9ab120f` after preserved undefined-upper-A
+  commit `343fc76cd0e8671babfe793f9653424bd92ffa2e`; final forward source SHA-256
+  `05542260b122544e89f98745ad47c743b42e67843f9a9112734feaba8378e701`.
+- Pre-fix and final protected checkers:
+  `runs/kda-cuda-development/diagnostics/attempt-00127-preprocess-qgamma-protected-checker`,
+  manifest `48265cc1253695d9e1d354140703d4f0a6c437ad7f6fac07b334ef339dfd27b4`,
+  and `runs/kda-cuda-development/diagnostics/attempt-00127-preprocess-qgamma-protected-checker-002`,
+  manifest `cb4fb382838a46d127b00757fae495b8195b2d24fcf12552899d229550be953d`.
+- Final production comparison/repeat:
+  `runs/kda-cuda-development/diagnostics/attempt-00127-preprocess-qgamma-gradient-zeroed-001`,
+  manifest `c89ead4e98e361202ee118a468a63c47091f6cd24bc27d428fbf59efaca43ba3`.
+- Full-model first-step finiteness diagnostic:
+  `runs/kda-cuda-development/diagnostics/attempt-00127-preprocess-qgamma-first-step-finite`,
+  manifest `c17f9e503b54658aee8b1c2354bbce97e33f1163b5f88933e39a3cfcd2e2da81`.
+- Final Level 1:
+  `runs/kda-cuda-development/attempt-00127-preprocess-qgamma-level1-zeroed-001`,
+  manifest `c724c557f64351afbdf64bbaebba5eacc6860da4a92fe3c3b3fd9ef861c50ac7`.
+- Final full sanitizer validation:
+  `runs/kda-cuda-development/validations/validation-00033-preprocess-qgamma-zeroed`,
+  manifest `857b6113cba867f05ccc79c6ef885b42d088b53dd12a833b8a6fbd1c2b1d93d5`.
+- Excluded pre-fix candidate-first run:
+  `runs/kda-cuda-development/attempt-00127-preprocess-qgamma-level2`,
+  manifest `41e4233dba196f66e305d906bf33b1c6f76ab783bdc9dcba60748f24142270ec`.
+- Final valid Level 2:
+  `runs/kda-cuda-development/attempt-00127-preprocess-qgamma-level2-zeroed-001`,
+  manifest `36def565d9d74e8c98519f081382532a1a6bf2d2aab8b1908188c6d88090228d`.
+- Append-only attempt/reference index has 132 valid JSONL entries, SHA-256
+  `5edd20a36a3ac33b53403017a6ddda6d58c9a43ecdd5e448f4bbf9ffdc8cd587`.
+
+**Result**
+
+- Final output and all seven gradients are bitwise equal to attempt 100; the
+  independent fresh-cache repeat is bitwise exact for all eight tensors.
+  Ownership is 1.0, protected runtime/profile audit passes, runtime is
+  FLA-free, and memcheck, racecheck, synccheck, and initcheck report zero
+  errors. The fresh full-model step-0 loss is finite at `10.396439552307129`.
+- Final Level 1 advances: T=4096 forward+backward improves
+  `12.322336 -> 11.876528 ms` (3.618%) at a 1.00646 memory ratio. T=256 and
+  T=1024 forward+backward regress 3.321% and 1.920%, inside the 5% guard;
+  every memory guard passes.
+- The final candidate-first Level-2 pair exceeds the declared 2% development
+  retention gate. Candidate samples `[34494,34565,34453,34676,34423]` have
+  median 34,494 tok/s; baseline `[33619,33613,33796,33533,33788]` has median
+  33,619 tok/s. The gain is 2.603%. Candidate peak is 5507.908 MiB versus
+  baseline 5508.533 MiB (ratio 0.999887).
+- Attempt 127 reaches 78.970% of the fixed 43,680 tok/s FLA reference. Its
+  remaining gaps are 9,186 tok/s to FLA and 10,506 tok/s to 45k. This is one
+  development pair, not statistical confirmation or LM-quality evidence.
+
+**Next**
+
+- Use exact `f2fa705e22fc97d2f455b4ccabcf42a6a9ab120f` as the accepted development
+  baseline. Official protected retention remains `4d1a3b231da2c99882324efbda5306a1815e21c7`;
+  do not merge or change defaults.
+- Keep explicit full-`A` initialization. Next target the remaining bounded
+  restored-key/`W` producer or the backward dependency/ownership boundary.
+  Continue reporting absolute throughput and the gaps to FLA/45k; do not stop
+  at this intermediate acceptance.
