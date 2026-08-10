@@ -13305,3 +13305,84 @@ uv run --no-sync python scripts/kda_cuda_development.py \
   scalar CTA barriers by consuming producer fragments in registers, or fuse a
   genuinely useful broad/intra product. Do not retry tile-width or register-cap
   variants already covered by attempts162-164,173,179, and188.
+
+## 2026-08-10 [Codex] Register-resident dP improves the broad VJP but misses Level 2
+
+**Context**
+
+- Attempt189 returns to exact attempt176 and applies the most direct mechanism
+  identified by the preserved FLA trace: consume the `dP = T^T dZ` WMMA
+  accumulator in registers instead of storing and reloading it through shared
+  memory. The fixed SM121 fragment mapping supplies `dv` directly and a
+  deterministic four-lane shuffle reduction supplies `dbeta`, removing two CTA
+  barriers in each of eight value strips. FLA remains an offline reference only.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_189 \
+  --lane optimization <isolated artifact/cache arguments>
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_validation_189 \
+  --lane optimization --sanitizers <isolated artifact/cache arguments>
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_176 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_189 \
+  runs/kda-cuda-development/attempt-00189-fla-register-dp-consumer-level1 \
+  --level2-order candidate-first
+nsys profile <bounded production chunk-forward/backward runner>
+uv run --no-sync python \
+  runs/kda-cuda-development/attempt-00189-fla-register-dp-consumer-level2/run_level2.py
+```
+
+**Artifacts**
+
+- Branch `kda-cuda/fla-register-dp-consumer-189`, pushed commit
+  `ea154eea1692ac3ea2ca2d679c186251184b8ee8`; changed source SHA-256
+  `6d00ce6e3cc84a60cfb8b597bd73a85c1e19bbd5cd3eec73a9bfc4561a7e31d0`.
+- Checker summary
+  `c1111e5408d2acdb270c05c5911b764eb46034b0f12a7dca13605884f842ca91`;
+  production-gradient manifest
+  `ae7433ddbb043770b3eadd0c6ef350a590f4c378aa8b038d9be8e7792e96df73`;
+  Level-1 manifest
+  `c39678908d66018d01628460df15673fecb78b2ef59890449227f3becea449a9`.
+- Sanitizer checker summary
+  `747bf9c95e9a0bda14040955cd6950c4cbf63f39f1435b653a0e36b048e11566`;
+  operator-profile manifest
+  `cd2f572f30a6436e6202d99c9ba38647de336807eec092ffc871747b16c04866`;
+  Level-2 manifest
+  `7a2ca5f09d3aaee1e35b523981faaf2ceac15717ad3ee8aaa5f3c3924897c8df`.
+
+**Result**
+
+- Ownership 1.0, runtime/profile FLA freedom, memcheck, racecheck, synccheck,
+  and initcheck all pass. Output and six gradients are bitwise equal to
+  attempt176; `dbeta` differs by `1.8189894035458565e-12`. All tensors are
+  finite, and an independent fresh-cache repeat is bitwise equal throughout.
+- Level 1 advances: T=4096 forward+backward improves
+  `9.921200 -> 9.517760 ms` (4.066%) at identical memory. T=1024 regresses
+  3.932% and T=256 regresses 0.967%, both inside the declared 5% guard.
+- The warmed operator profile attributes a real local win. Broad VJP time falls
+  `1.571936 -> 1.450944 ms` (7.697%), registers fall from 130 to 128/thread,
+  and the complete 167-launch operator span improves 1.482%.
+- The sparse candidate-first Level-2 pair is valid but does not retain the
+  candidate. Candidate measurements `[37338,37341,37120,37198,36990]` have
+  median 37,198 tok/s; baseline measurements
+  `[36859,36716,36993,37012,37100]` have median 36,993 tok/s. The 0.554% gain
+  is below the declared 2% gate, with identical 5,507.908 MiB peak memory.
+- This non-retained observation is 85.16% of the 43,680 tok/s FLA target, a
+  6,482 tok/s gap. It is not statistically confirmed and is not an LM-quality
+  result. Attempt176 remains the accepted convolution development parent;
+  attempt175 remains the latest full matched baseline.
+
+**Next**
+
+- Preserve attempt189 as a correct cumulative scaffold, not an accepted
+  baseline. The local kernel result validates register-resident fragment
+  consumption, but one handoff is too small to move end-to-end training by the
+  retention threshold.
+- Apply the same isolated strategy to `dQ = T^T dW`: consume its accumulator
+  directly for `dkhat`, `dprefix`, and `dbeta`, removing its shared store/read
+  and two CTA barriers per key strip. Gate the cumulative scaffold against
+  attempt189 locally and against accepted attempt176 before any retention call.
