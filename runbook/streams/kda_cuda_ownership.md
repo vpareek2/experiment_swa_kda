@@ -13229,3 +13229,79 @@ uv run --no-sync python scripts/kda_cuda_development.py \
   producer-resident into their state consumer. Otherwise concentrate on the
   training-only state/broad backward program where FLA's fused decomposition
   remains materially different.
+
+## 2026-08-10 [Codex] FLA-autotuned BV32 backward tiling helps short shapes but regresses T4096
+
+**Context**
+
+- The preserved FLA nsys trace and Triton autotune cache were inspected without
+  rerunning the reference. The warmed production launch is 384 CTAs, 128
+  threads/CTA, 255 registers/thread, 22,528 dynamic shared bytes, and 797.600
+  microseconds. Its saved autotune winner is `BK=16`, `BV=32`, four warps, and
+  four stages.
+- Attempt188 returns to exact attempt176 and isolates the missing `BV=32`
+  mechanism in the owned four-warp broad VJP. Two adjacent 16-wide WMMA value
+  fragments are retained together, halving value-phase CTA handoffs while
+  preserving FP32 accumulation, equations, storage, and public ABI. FLA is an
+  offline attribution reference only and is not imported or linked.
+
+**Commands**
+
+```bash
+sqlite3 runs/kda-cuda-development/reference-benchmarks/fla-triton-operator-profile-001/trace.sqlite \
+  <saved-kernel resource/timing query>
+jq <saved-autotune ranking query> \
+  /tmp/fla-triton-operator-profile-001/*/chunk_kda_bwd_kernel_wy_dqkg_fused.autotune.json
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_188 \
+  --lane optimization <isolated artifact/cache arguments>
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_176 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_188 \
+  runs/kda-cuda-development/attempt-00188-fla-bv32-vjp-level1 \
+  --level2-order baseline-first
+```
+
+**Artifacts**
+
+- Branch `kda-cuda/fla-bv32-vjp-188`, pushed commit
+  `a46cd5a8632e1cc5c912724dc6681308b8326010`; changed source SHA-256
+  `58e1f156d8c01079cb55322dc701829b6a130734dbe2807a51f73cc7942f079c`.
+- Checker summary
+  `de3b19f30d730c0605d953ba06ee63f0d72fe1d6c8795c322b030d96ed5ea3e9`;
+  production-gradient manifest
+  `c9589c218a21797b913c23eb04712fba4283bdff1a2d5471f78649f7ff8b2722`;
+  Level-1 manifest
+  `39e6947f8e28f3601cd3ef762cb961551d01de508ed87abcf5c4203b0679dc5c`.
+- The first production capture failed before candidate import because the
+  diagnostic runner resolved the coordinator placeholder backend. Its exact
+  log is preserved as `invalid-coordinator-import.log`; inserting the explicit
+  candidate worktree at the front of the diagnostic-only module path was the
+  sole runner correction.
+
+**Result**
+
+- The protected audit passes ownership 1.0 and runtime/profile FLA freedom.
+  Production output and six gradients are bitwise equal to attempt176;
+  `dbeta` differs by only `5.684341886080802e-14` from the changed FP32 sum
+  grouping. All tensors are finite, and an independent fresh-cache repeat is
+  bitwise equal for every tensor.
+- Level 1 rejects the candidate. T=256 forward+backward improves
+  `3.826912 -> 3.713280 ms` (2.969%) and T=1024 improves
+  `14.934128 -> 14.555328 ms` (2.536%), but T=4096 regresses
+  `9.696016 -> 10.004032 ms` (3.177%) at identical memory. The broad kernel
+  rises from 130 to 138 registers/thread with 25,600 shared bytes and no spill.
+- No Level 2, sanitizer, statistical confirmation, or LM-quality evaluation
+  ran. Attempt176 remains the convolution development parent; attempt175
+  remains the latest full matched baseline at 36,719.5 tok/s, 84.06% of the
+  43,680 tok/s FLA target and 6,960.5 tok/s short.
+
+**Next**
+
+- Return to exact attempt176 and close manual BV32 widening. The exact FLA
+  tile is beneficial only where occupancy pressure matters less; widening
+  ordinary WMMA fragments does not reproduce Triton's register layout.
+- The next FLA-matching candidate must eliminate shared store/reload and
+  scalar CTA barriers by consuming producer fragments in registers, or fuse a
+  genuinely useful broad/intra product. Do not retry tile-width or register-cap
+  variants already covered by attempts162-164,173,179, and188.
