@@ -12753,3 +12753,67 @@ uv run --no-sync python scripts/kda_cuda_development.py \
 - This in-place form should require only 40 WMMA operations per chunk and no
   new buffer or launch. Test exact production gradients before Level 1 and do
   not compose attempt180's global handoff.
+
+## 2026-08-10 [Codex] In-place triangular adjoint helps but raises registers
+
+**Context**
+
+- Attempt181 starts from exact parent176 and applies attempt180's proven
+  triangular dependency inside the original broad CTA. Row warp `r` produces
+  only columns `c <= r`; the first transform visits only `a >= r`, and the
+  second visits only `k <= c`. No tensor, allocation, launch, precision, or
+  ABI changes.
+- The inverse-transform work falls from 128 to 40 WMMA operations per chunk.
+  The production comparison reuses the preserved seed-4101 attempt176 baseline
+  tensor from attempt180 rather than rerunning it.
+
+**Commands**
+
+```bash
+# Staged protected audit, commit/push, one candidate production capture, and
+# one clean candidate-first Level 1 versus exact attempt176.
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_181 \
+  --lane optimization <isolated artifact/cache arguments>
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_176 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_181 \
+  runs/kda-cuda-development/attempt-00181-fla-inplace-triangular-adjoint-level1 \
+  --level2-order candidate-first
+```
+
+**Artifacts**
+
+- Branch `kda-cuda/fla-inplace-triangular-adjoint-181`, pushed commit
+  `6f777c324717f96de78f3acea0612317ef5b7d60`; changed source SHA-256
+  `9a7836ad2bfb0b51f57c7b6d950ccef7ce7f8323061dec645059935fe17114be`.
+- Checker summary
+  `226bb04465611d55a0497e3ecd6b7cb706db50296d540fbec3e5d395d37d0199`;
+  production-gradient manifest
+  `15f45da10d172889eab633a55fefca38efaab0205a52cd4e5aa7197f4ffd3c6b`;
+  Level-1 manifest
+  `2a2aa3e49d8f1146e99340a80d5b56cfbd7a8631e377b6817f1a205fa1982e8e`.
+- The append-only index now has 204 rows and hashes to
+  `9b9199250f6a5aaec085cc0499316e4c6bb04db9a8788f35e585657f1284112b`.
+
+**Result**
+
+- Candidate output and all seven gradients are bitwise equal to attempt176 and
+  finite. The protected audit passes ownership 1.0 and runtime/profile FLA
+  freedom.
+- T=4096 forward+backward improves `9.709824 -> 9.624320 ms` (0.881%) with
+  equal allocation, below the 3% gate. T=256 improves 12.365%; T=1024 regresses
+  0.712%. Runtime row-dependent bounds raise the broad kernel from 130 to 138
+  registers/thread despite the large MMA reduction.
+- No Level 2, sanitizer run, statistical confirmation, or LM-quality
+  evaluation ran. Attempt176 remains the development parent; attempt175
+  remains the latest full matched baseline at 36,719.5 tok/s.
+
+**Next**
+
+- Test one compile-time row-specialized form with common CTA barriers between
+  phases. It must preserve the 40 useful WMMA operations while removing the
+  runtime-bound/register penalty.
+- If specialization remains below Level 1, close the inverse-transform axis;
+  the remaining FLA gap is then dominated by the rest of the broad/state
+  decomposition rather than zero-tile MMA work.
