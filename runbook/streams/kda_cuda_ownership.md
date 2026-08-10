@@ -9642,3 +9642,49 @@ uv run --no-sync python scripts/kda_cuda_development.py \
   guard but contributes nothing at T=4096; closing the remaining gap requires
   a larger specialized backward GEMM/dependency boundary. Do not retest
   attempt 133 unchanged.
+
+## 2026-08-09 [Codex] Attribute attempt-133 production near miss
+
+**Context**
+
+- Captured one bounded T=4096 forward+backward profile of the valid but
+  subthreshold attempt-133 candidate to choose a larger specialized boundary.
+  This is attribution only and does not change its rejection or the accepted
+  attempt-127 baseline.
+
+**Commands**
+
+```bash
+PYTHONPATH=/home/veer/Master/projects/experiment_swa_kda_cuda_attempt_133 \
+TORCH_EXTENSIONS_DIR=/tmp/kda133-profile-ext-001 \
+CUDA_CACHE_PATH=/tmp/kda133-profile-cuda-001 \
+nsys profile --trace=cuda,nvtx,osrt --sample=none --cpuctxsw=none \
+  --output=<artifact>/trace \
+  /home/veer/Master/projects/experiment_swa_kda/.venv/bin/python \
+  <artifact>/runner.py
+```
+
+**Artifacts**
+
+- `runs/kda-cuda-development/diagnostics/attempt-00133-production-profile`,
+  manifest `cca850022e19ffcc779445ec06ec738c8324d0d8216ac2bbd2d8334482fcb778`.
+
+**Result**
+
+- The measured iteration contains 8.056000 ms of project kernels. The largest
+  project kernel is the backward group-boundary WMMA scan at 1.411616 ms
+  (17.523%), followed by the forward scan at 1.233024 ms (15.306%) and reverse
+  group scan at 0.796928 ms (9.892%). Colored pair VJPs cost 0.618528 ms and
+  the final vector VJP costs 0.528928 ms. ATen MAGMA and CUTLASS SGEMMs account
+  for another 1.337184 and 0.654112 ms, respectively.
+- The group-boundary kernel evaluates the same chunk-end `exp(prefix_g)` once
+  per state element: sixteen duplicate exponentials inside each value-tile CTA,
+  repeated across eight value tiles. The reverse-group kernel already caches
+  one factor per key per CTA, confirming a local no-workspace template.
+
+**Next**
+
+- Explicitly widen attempt 133 by caching 128 chunk-end decay factors once per
+  group-boundary CTA. Preserve the exact FP32 update order and add only 512
+  bytes of shared memory; compare the complete candidate to accepted attempt
+  127 rather than treating attempt 133 as accepted.
