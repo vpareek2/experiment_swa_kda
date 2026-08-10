@@ -13028,3 +13028,69 @@ uv run --no-sync python scripts/kda_cuda_development.py \
 - The next FLA-matching design must change the register/cooperative
   decomposition of the broad/state programs without importing reference code
   or adding unavailable CUTLASS dependencies.
+
+## 2026-08-10 [Codex] Direct FlashKDA residual factorization saves memory but regresses runtime
+
+**Context**
+
+- Attempt185 starts from exact attempt176 and tests the highest-payoff forward
+  algebra found in the offline FlashKDA implementation. Instead of
+  materializing FP32 `U=T*P` and `W=T*Q` and evaluating `U-W*H`, the persistent
+  recurrence evaluates the equivalent `T*(P-Q*H)` directly.
+- The candidate compacts `P`, `Q`, and `T` in place to BF16, removes two FP32
+  ATen BMMs, and halves the relevant chunk-local WMMA count from 384 to 192.
+  FLA remains an offline equation/schedule reference only and is not imported
+  or linked.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_185 \
+  --lane optimization <isolated artifact/cache arguments>
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_176 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_185 \
+  runs/kda-cuda-development/attempt-00185-flash-direct-residual-forward-level1 \
+  --level2-order candidate-first
+```
+
+**Artifacts**
+
+- Branch `kda-cuda/flash-direct-residual-forward-185`, pushed commit
+  `634db6f8283e622b252d991c1e409b9ebb497ed2`; changed source SHA-256
+  `bc3624a818892f5c856942fdc19436e1636723490bb3c0f8322d08fdefb16bc0`.
+- Checker summary
+  `6ce527dfbce172bd44198ed7604f78b1fe402a16be922477f802c576854d8dfa`;
+  production-gradient manifest
+  `48847c137f096ac38d153ef62044a816c76b59cff031e7990901f6e68f00f519`;
+  Level-1 manifest
+  `a5d7a51e95a7247bb46722801f1f1e552a8f4663bb6b0884a7cb182bdabd9bb3`.
+
+**Result**
+
+- The protected audit passes ownership 1.0 and runtime/profile FLA freedom.
+  Production output and all seven gradients are finite. Maximum output delta
+  versus attempt176 is `0.00048828125`; maximum gradient delta is
+  `2.193520776927471e-05`, both comfortably inside the frozen tolerances.
+  A same-commit repeat is bitwise equal for output and all gradients.
+- Level 1 rejects the implementation. T=4096 forward regresses
+  `16.548160 -> 16.796752 ms` (1.502%), while forward+backward regresses
+  `9.579568 -> 9.620848 ms` (0.431%). T=1024 forward+backward regresses
+  1.314%, and T=256 regresses 7.036%, violating the 5% important-shape guard.
+  Peak allocation at T=4096 falls from 191,105,536 to 183,634,432 bytes, a
+  3.91% reduction.
+- No Level 2, sanitizer run, statistical confirmation, or LM-quality
+  evaluation ran. Attempt176 remains the development parent; attempt175
+  remains the latest full matched throughput baseline at 36,719.5 tok/s,
+  84.06% of the 43,680 tok/s FLA target and 6,960.5 tok/s short.
+
+**Next**
+
+- Preserve the direct-residual algebra but close this standalone in-place pack
+  implementation. The removed BMM work is outweighed by packing and the larger
+  fused scan path, especially for short sequences.
+- Return to exact attempt176. A retry is justified only if `P/Q/T` can be
+  consumed directly from a producer-resident cooperative layout, eliminating
+  rather than relocating the pack/global-memory boundary. Otherwise move to
+  FLA's compact backward/state decomposition, where the measured gap is larger.
