@@ -934,6 +934,110 @@ __global__ void nanochat_kda_wy_backward_group_uw_wmma_c64_kernel(
       W + destination, w_accumulator, kDim, wmma::mem_row_major);
 }
 
+// Fuse the two reverse-group products that share dO. Eight warps own the
+// 128 state-adjoint rows; the first four also own the 64 dZ rows. BF16 tensor
+// operands feed FP32 accumulators and both results remain FP32 for the exact
+// sequential reverse scan.
+__global__ void nanochat_kda_wy_backward_group_reverse_products_wmma_c64_kernel(
+    const float* R,
+    const float* A,
+    const float* dO,
+    float* dstate_base,
+    float* dZ,
+    int group_rows) {
+  namespace wmma = nvcuda::wmma;
+  constexpr int kTile = 16;
+  constexpr int kTileElements = kTile * kTile;
+  constexpr int kValueTiles = kDim / kTile;
+
+  const int owner = blockIdx.x;
+  const int local_n = owner / kValueTiles;
+  const int value_tile = owner - local_n * kValueTiles;
+  if (local_n >= group_rows) {
+    return;
+  }
+  const int value_start = value_tile * kTile;
+  const int warp = threadIdx.x / warpSize;
+  const int lane = threadIdx.x % warpSize;
+  const int output_row_start = warp * kTile;
+
+  __shared__ __align__(16) __nv_bfloat16 state_left[8 * kTileElements];
+  __shared__ __align__(16) __nv_bfloat16 dz_left[4 * kTileElements];
+  __shared__ __align__(16) __nv_bfloat16 right[kTileElements];
+
+  using MatrixA = wmma::fragment<
+      wmma::matrix_a, kTile, kTile, kTile,
+      __nv_bfloat16, wmma::row_major>;
+  using MatrixB = wmma::fragment<
+      wmma::matrix_b, kTile, kTile, kTile,
+      __nv_bfloat16, wmma::row_major>;
+  using Accumulator = wmma::fragment<
+      wmma::accumulator, kTile, kTile, kTile, float>;
+
+  Accumulator state_accumulator;
+  Accumulator dz_accumulator;
+  wmma::fill_fragment(state_accumulator, 0.0f);
+  wmma::fill_fragment(dz_accumulator, 0.0f);
+
+  for (int inner_start = 0; inner_start < kChunk; inner_start += kTile) {
+    for (int element = lane; element < kTileElements; element += warpSize) {
+      const int output_row = element / kTile;
+      const int inner = element - output_row * kTile;
+      const int64_t r_source =
+          (static_cast<int64_t>(local_n) * kChunk + inner_start + inner) *
+          kDim + output_row_start + output_row;
+      state_left[warp * kTileElements + element] =
+          __float2bfloat16_rn(R[r_source]);
+      if (warp < kChunk / kTile) {
+        const int64_t a_source =
+            (static_cast<int64_t>(local_n) * kChunk + inner_start + inner) *
+            kChunk + output_row_start + output_row;
+        dz_left[warp * kTileElements + element] =
+            __float2bfloat16_rn(A[a_source]);
+      }
+    }
+    for (int element = threadIdx.x; element < kTileElements;
+         element += blockDim.x) {
+      const int inner = element / kTile;
+      const int value = element - inner * kTile;
+      right[element] = __float2bfloat16_rn(dO[
+          (static_cast<int64_t>(local_n) * kChunk + inner_start + inner) *
+          kDim + value_start + value]);
+    }
+    __syncthreads();
+
+    MatrixA state_fragment;
+    MatrixB do_fragment;
+    wmma::load_matrix_sync(
+        state_fragment, state_left + warp * kTileElements, kTile);
+    wmma::load_matrix_sync(do_fragment, right, kTile);
+    wmma::mma_sync(
+        state_accumulator, state_fragment, do_fragment, state_accumulator);
+    if (warp < kChunk / kTile) {
+      MatrixA a_fragment;
+      wmma::load_matrix_sync(
+          a_fragment, dz_left + warp * kTileElements, kTile);
+      wmma::mma_sync(
+          dz_accumulator, a_fragment, do_fragment, dz_accumulator);
+    }
+    __syncthreads();
+  }
+
+  const int64_t state_destination =
+      (static_cast<int64_t>(local_n) * kDim + output_row_start) * kDim +
+      value_start;
+  wmma::store_matrix_sync(
+      dstate_base + state_destination, state_accumulator,
+      kDim, wmma::mem_row_major);
+  if (warp < kChunk / kTile) {
+    const int64_t dz_destination =
+        (static_cast<int64_t>(local_n) * kChunk + output_row_start) * kDim +
+        value_start;
+    wmma::store_matrix_sync(
+        dZ + dz_destination, dz_accumulator, kDim, wmma::mem_row_major);
+  }
+}
+
 __global__ void nanochat_kda_wy_backward_sub_c64_kernel(
     float* destination, const float* source, int elements) {
   const int index = blockIdx.x * blockDim.x + threadIdx.x;
@@ -2713,8 +2817,12 @@ nanochat_kda_chunk_wy_backward_c64(
         {kGroupRows, kChunk, kDim}, fp32);
     at::Tensor dZ_group_bf16 = at::empty(
         {kGroupRows, kChunk, kDim}, q.options());
-    at::bmm_out(dstate_base, R_group.transpose(1, 2), dO_group);
-    at::bmm_out(dZ_group_flat, A_group.transpose(1, 2), dO_group);
+    nanochat_kda_wy_backward_group_reverse_products_wmma_c64_kernel<<<
+        kGroupRows * (kDim / 16), 256, 0, stream>>>(
+        R_group.data_ptr<float>(), A_group.data_ptr<float>(),
+        dO_group.data_ptr<float>(), dstate_base.data_ptr<float>(),
+        dZ_group_flat.data_ptr<float>(), kGroupRows);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
     at::Tensor dstate_next_group_bf16 = at::empty(
         {kGroupRows, kDim, kDim}, q.options());
     nanochat_kda_wy_backward_reverse_group_wmma_c64_kernel<<<
