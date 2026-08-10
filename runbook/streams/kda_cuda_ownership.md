@@ -13976,3 +13976,253 @@ nsys profile --trace=cuda,nvtx,osrt --sample=none --cpuctxsw=none \
 - Return to exact attempt190. Matching FLA requires less/coherently staged
   work—a compact reverse scan followed by broad chunk-parallel equations—not
   concurrent execution of the current tensor-core-heavy decomposition.
+
+
+## 2026-08-10 [Codex] Two-warp register-held reverse state scan is exact but pathological
+
+**Context**
+
+- Attempt198 starts from exact attempt190 and moves the reverse state adjoint
+  into registers across each eight-chunk group. It tests the state equations
+  `dZ = A^T dO + E dh` and `dh = R^T dO + D dh - W^T dZ` with a two-warp
+  ownership schedule. FLA is an offline equation/scheduling reference only.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_198 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact seed-4101 production-gradient capture and independent fresh-cache repeat.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_190 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_198 \
+  runs/kda-cuda-development/attempt-00198-fla-register-dh-scan-level1 \
+  --level2-order candidate-first
+```
+
+**Artifacts**
+
+- Branch `kda-cuda/fla-register-dh-scan-198`, pushed commit
+  `1c6d825bef8f71fad4c1031748315952102e1561`; changed source SHA-256
+  `e9df8a1dd477d1d2eac82602e9f07e5f46b8c66fd8c5c5b12df84dc4e1eebc1c`.
+- Checker summary
+  `84fe4c3c04b8ee2573193d1e9bfaf0942ba9f7262dc6bc9805c1105e9add1d1f`;
+  production-gradient manifest
+  `ab24dfb301caa1c1e75965ea9218763d80db97942971822aa0fa2b3a099b5424`;
+  Level-1 manifest
+  `cbe094b4b07a44ef6b807f619b8bd99fc49d58f9079a1dedf45226ec8f2cae17`.
+
+**Result**
+
+- Ownership 1.0 and runtime/profile FLA freedom pass. Production output and all
+  seven gradients are finite, bitwise equal to attempt190, and bitwise equal
+  in the independent repeat.
+- Level 1 decisively rejects the schedule. T=4096 forward+backward regresses
+  `9.146976 -> 13.713712 ms` (49.926%). T=256 improves 6.130%, T=1024
+  regresses 0.491%, and target-shape allocation falls 4.115%.
+- No Level 2, statistical confirmation, or LM-quality evaluation ran.
+
+**Next**
+
+- Preserve attempt198 as negative scheduling evidence and do not replay its
+  two-warp ownership. Retain attempt190 as the non-accepted matched scaffold.
+- Keep the equations, but restore four-warp/BV32 value ownership and a separate
+  `A^T dO` producer before evaluating the state scan again.
+
+## 2026-08-10 [Codex] Packed qg/kg does not rescue the two-warp state scan
+
+**Context**
+
+- Attempt199 builds on attempt198 and packs the reverse `R`/`E` (`qg`/`kg`)
+  operands once per eight-chunk group to remove redundant operand preparation.
+  The underlying state ownership remains the measured-pathological two-warp
+  schedule.
+
+**Commands**
+
+```bash
+# Invalid diagnostic capture: candidate snapshot was not staged.
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_199 \
+  --lane optimization --artifact-dir /tmp/kda-check-199 <isolated caches>
+# Valid exact staged snapshot.
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_199 \
+  --lane optimization --artifact-dir /tmp/kda-check-199-valid <isolated caches>
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_190 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_199 \
+  runs/kda-cuda-development/attempt-00199-fla-packed-qgkg-scan-level1 \
+  --level2-order baseline-first
+nsys profile <bounded production chunk-forward/backward runner>
+```
+
+**Artifacts**
+
+- Branch `kda-cuda/fla-packed-qgkg-scan-199`, pushed commit
+  `0a22cf1625362d13707d7210eb2f51329c5de14e`; changed source SHA-256
+  `48a0225a0507317b5be04a4da0f59d60cc5bf4fdc7423bc01d84d256ac27af40`.
+- Preserve the excluded unstaged checker capture `/tmp/kda-check-199`; valid
+  checker is `/tmp/kda-check-199-valid`, summary SHA-256
+  `6c8bf882e551ac9773babd6a01a6cc93c4aefef4475032ab7adcf27317564258`.
+- Production-gradient manifest
+  `dd75a2a41a748deb69657079f1a23630583d1c5f3a70d6c8baf4e50622a625b0`;
+  Level-1 manifest
+  `c9bcaf5ffa4107d313631a57b843dae857b6239ed4ccbc5e5722886d5b572f42`;
+  operator-profile manifest
+  `65db82df35407163ce183412502a95aea3ae1da5e6e94be2ac0b978d362b242b`.
+
+**Result**
+
+- The valid staged snapshot passes ownership 1.0 and runtime/profile FLA
+  freedom. Production output and all seven gradients remain finite, bitwise
+  equal to attempt190, and deterministic in the independent repeat.
+- T=4096 forward+backward regresses `9.092064 -> 12.350032 ms` (35.833%).
+  The warmed profile records 159 launches, 11.757920 ms summed kernel time,
+  a 12.179168 ms span, and 4.325120 ms in the register state scan. Packing
+  `qg`/`kg` to 0.226560 ms cannot repay the low-parallelism scan.
+- No Level 2, statistical confirmation, or LM-quality evaluation ran.
+
+**Next**
+
+- Reject and preserve attempt199. Never treat the unstaged checker capture as
+  evidence. Keep operand packing only as a mechanistic component of a
+  four-warp state schedule.
+
+## 2026-08-10 [Codex] Four-warp BV32 state ownership is correct but transpose-bound
+
+**Context**
+
+- Attempt200 implements the FLA-mapped state equations with four warps and
+  BV32 ownership, plus a separate `A^T dO` producer. Per-warp shared-memory
+  operand transposes remain between packed inputs and WMMA loads.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_200 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact seed-4101 production-gradient capture and independent fresh-cache repeat.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_190 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_200 \
+  runs/kda-cuda-development/attempt-00200-fla-four-warp-dh-scan-level1 \
+  --level2-order candidate-first
+nsys profile <bounded production chunk-forward/backward runner>
+```
+
+**Artifacts**
+
+- Branch `kda-cuda/fla-four-warp-dh-scan-200`, pushed commit
+  `2adb251a82d2d994779c70c35c74c4462e842c93`; changed source SHA-256
+  `9a371f5dbc2add06bcea6244055a72a5c81c21325acc65626b0e437fe607f3c9`.
+- Checker summary
+  `846c936a47587061605628c0e704f638af35d323a002191f0dc408a9f20708d1`;
+  production-gradient manifest
+  `1d5b2e7417dd10fbea81894a4c924d17a048843df2143ed31385a5b998f5da80`;
+  Level-1 manifest
+  `19012163cd39efe62437804fa262fdfeb00a260a0e04a13d982c4d70992e4490`;
+  operator-profile manifest
+  `3e51cbe946154b2dd742bbc065be14666685597422ece2e3b00b14b5d535bced`.
+
+**Result**
+
+- Ownership 1.0 and runtime/profile FLA freedom pass. Production output and all
+  seven gradients are finite and bitwise equal to attempt190 and the fresh
+  repeat.
+- Level 1 rejects the candidate: T=4096 forward+backward regresses
+  `9.108240 -> 10.158768 ms` (11.534%). T=256 improves 1.254%, T=1024
+  regresses 3.576%, and target allocation falls 2.469%.
+- The direct scan still costs 1.987136 ms. The full profile records 167
+  launches, 9.762400 ms summed kernel time, and a 10.215552 ms span. The
+  corresponding retained FLA state kernel is approximately 0.322880 ms.
+- No Level 2, statistical confirmation, or LM-quality evaluation ran.
+
+**Next**
+
+- Preserve attempt200 as the correct four-warp equation/ownership scaffold, not
+  a baseline. Replace the per-warp shared operand transposes with direct WMMA
+  loads while preserving the separate `A^T dO` boundary and exact arithmetic.
+
+## 2026-08-10 [Codex] Direct WMMA state scan reaches 38,052 tok/s but misses acceptance
+
+**Context**
+
+- Attempt201 builds on the correct attempt200 decomposition. Direct WMMA loads
+  replace per-warp shared operand transposes, and `W` is packed to BF16 with
+  `qg`/`kg`. The scan still launches once for each of eight eight-chunk groups.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_201 \
+  --lane optimization --artifact-dir /tmp/kda-check-201-valid \
+  <isolated extension/CUDA caches>
+# Exact seed-4101 production-gradient capture and independent fresh-cache repeat.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_190 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_201 \
+  runs/kda-cuda-development/attempt-00201-fla-direct-wmma-dh-scan-level1 \
+  --level2-order candidate-first
+nsys profile <bounded production chunk-forward/backward runner>
+uv run --no-sync python \
+  runs/kda-cuda-development/attempt-00201-fla-direct-wmma-dh-scan-level2/run_level2.py
+```
+
+**Artifacts**
+
+- Branch `kda-cuda/fla-direct-wmma-dh-scan-201`, pushed commit
+  `311654ba3f0d2c5e03372aca5b1226b4cc4fea79`; changed source SHA-256
+  `3e14bc1048b752ddbfe4c44e152e52e4fb6ccc1a12da1d2c3db5177efb465677`.
+- Valid checker summary
+  `c46d7eb9258c9027530aec259def8902a7363081020f0cd01f51d87c24818625`;
+  production-gradient manifest
+  `53814bcc2051bbb6baccbf6201326ca363c4523de170662bd6606afcb82d81e0`;
+  Level-1 manifest
+  `0ab6f076e39f6268bc45284fe9d11b1564dfd15861043a83558daf05020bfc65`;
+  finalized operator-profile manifest
+  `f59f738b0b3da6333132b46b0e6874be348a1c9a61b3ab7ed27bdab1b59c421c`;
+  Level-2 manifest
+  `9b96e9060a4dd0959106920c0cc0a7c9477aa9778f5572cd7b57e9fc825a196d`.
+- Append-only development index SHA-256 after attempts198-201:
+  `ed91c5e72fb8aa08eb474678047109337af695660ea83a756427a80fddbda53f`.
+
+**Result**
+
+- Ownership 1.0 and runtime/profile FLA freedom pass. Production output and all
+  seven gradients are finite, bitwise equal to attempt190, and bitwise equal
+  in the independent fresh-cache repeat.
+- Level 1 advances. T=4096 forward+backward improves
+  `9.040528 -> 8.731648 ms` (3.417%) and peak allocation falls 2.058%.
+  T=256 improves 4.003%; T=1024 regresses 2.962%, inside the guard; T=4096
+  forward regresses 1.440%.
+- The finalized profile records 167 launches on one stream, 8.890528 ms summed
+  kernel time, and a 9.329504 ms span. The direct state scan takes 0.437024 ms
+  across eight calls; repeated `qg`/`kg`/`W` packing takes 0.276544 ms and the
+  separate `A^T dO` producer takes 0.237152 ms. The scan uses 152
+  registers/thread, 28,672 static profile bytes (29,696 bytes from
+  `cuobjdump`), and no local/stack spill. Total span remains 4.284% slower
+  than attempt190 despite the compact scan.
+- The valid candidate-first sparse Level-2 pair is below the declared acceptance
+  gate. Candidate steps 2-6 `[38003,38011,38052,38213,38307]` have median
+  38,052 tok/s; attempt190 `[37544,37377,37567,37396,37375]` has median
+  37,396 tok/s. The matched gain is 1.754%, below 2%, with identical
+  5,507.908 MiB peak memory.
+- Attempt201 is the highest raw project-owned observation so far: 87.115% of
+  the 43,680 tok/s FLA target, 5,628 tok/s short of FLA and 6,948 tok/s short
+  of 45k. It is not statistically confirmed and is not an LM-quality result.
+  Attempt176 remains the accepted convolution development baseline; attempt175
+  remains the accepted full matched development baseline.
+
+**Next**
+
+- Preserve attempt201 as the mechanistic scaffold, not an accepted baseline.
+- FLA launches one state CTA per batch/head/value tile and loops backward over
+  all 64 chunks. Test one all-sequence reverse-state kernel that keeps `dh`
+  CTA-local across all chunks while leaving local VJP work broadly
+  chunk-parallel. Do not replay attempt135's naive all-product fusion or
+  attempt198's two-warp schedule. Spend another Level 2 only if the candidate
+  crosses the Level-1 gate and marks a major strategy boundary.
