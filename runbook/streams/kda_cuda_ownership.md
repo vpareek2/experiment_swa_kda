@@ -11574,3 +11574,58 @@ uv run --no-sync python scripts/kda_cuda_development.py \
   BK/BV operand tile or reduce the 130-register live set, then combine that
   with the adjacent boundary/reverse/pack pipeline before spending another
   sparse Level 2.
+
+## 2026-08-10 [Codex] Shared H/dH strip reuse is below the Level-1 gate
+
+**Context**
+
+- Attempt163 starts from the faster four-warp attempt162 scaffold. It stages
+  each complete 16x128 H/dH key strip once in the broad VJP's existing shared
+  BF16 scratch, replacing four warps' duplicate global operand loads. No new
+  allocation, equation, precision, output, or ABI change is introduced.
+
+**Commands**
+
+```bash
+# One seed-4101 production capture and matched Level 1 versus attempt162.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_162 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_163 \
+  runs/kda-cuda-development/attempt-00163-fla-shared-state-strip-level1 \
+  --level2-order baseline-first
+```
+
+**Artifacts**
+
+- Branch `kda-cuda/fla-shared-state-strip-163`, pushed commit
+  `e1d783be29005d4ded2f47324499fa4f5d20d18a`; source SHA-256
+  `9b652f4342d62b58a8b1af0eaf19b44d3d2edc7c0a89d24f452d42b664796cbc`.
+- Diagnostic manifest
+  `d05aef5426077d94d4d61ef58f44b46b3b4a95279c90c92ab6e0fa2aa978586a`;
+  Level-1 manifest
+  `7dfa344c9d53631006625df0cd4186b1dbdd277d585c03112e69429a4ab03cb2`.
+- The append-only index now has 185 rows and hashes to
+  `8a645430d250db07b10fd5733727c4546136ca096ecbf4ed898939f69faef573`.
+
+**Result**
+
+- Output and every gradient are bitwise equal to attempt162; the committed
+  runtime audit completes and remains FLA-free.
+- T=4096 forward+backward improves only `10.210336 -> 10.109840 ms`
+  (0.984%) with unchanged allocation, below the three-percent gate. T=256 and
+  T=1024 improve 5.767% and 2.372%; all forward-only changes remain inside the
+  five-percent guard.
+- The likely explanation is that the duplicate state loads were already
+  cache-friendly, while the added block synchronization consumed much of the
+  saved traffic. No profile, checker, sanitizers, repeat, or Level 2 ran. This
+  is not statistical or LM-quality evidence.
+
+**Next**
+
+- Return to attempt162 as the cumulative scaffold; keep attempt161 as the
+  accepted development baseline. Do not extend shared staging to P/Q/T/dZ
+  without first removing synchronization or demonstrating a larger reuse
+  boundary.
+- The next FLA-matching change should reduce the broad kernel's 130-register
+  lifetime or fuse an adjacent state/pack boundary, aiming for a multi-tenth-ms
+  operator reduction before another Level 2.
