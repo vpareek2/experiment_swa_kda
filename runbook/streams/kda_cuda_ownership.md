@@ -14653,3 +14653,62 @@ nsys profile --trace=cuda,nvtx,osrt --sample=none --cpuctxsw=none \
   parallelism without reviving two-warp ownership. Independently, do not assume
   wider 16-chunk consumer slabs are faster merely because they remove launches:
   either return to eight chunks or fuse their producer/consumer work.
+
+
+## 2026-08-10 [Codex] Rejected V16 state owners and eight-chunk consumers
+
+**Context**
+
+- Attempt207 changes only attempt206's full-sequence state owner from 32 to 16
+  value columns. Grid width doubles from 24 to 48 CTAs while retaining four
+  warps, two key tiles per warp, prepared qg/kg/W, FP32 carried state, and the
+  owner-packed alias.
+- Attempt208 then tests the isolated consumer-width reversal from four
+  16-chunk slabs back to eight checkpoint-aligned groups.
+
+**Artifacts**
+
+- Attempt207 branch `kda-cuda/fla-prepared-fullseq-v16-207`, commit
+  `b8d7594709cb2d7e695810dc773e26e252956042`, source SHA
+  `934870f20a0818a11b8d9ac0aae1947823d93a350f48ebdcd8e8faeed5f3b893`.
+  Checker/gradient/Level-1/profile hashes are respectively
+  `d8464932741e79fa2c07b449a10048eb109740242acc7746c554b684760d0a6a`,
+  `674f08ad4bc3ec62a165fb29c5418796a714a83dfdb35833c37ccce8b09511fd`,
+  `bc8328b215160336d26f97e5e5ee3509b6571e8b27c12b4d21ca54431686acfd`, and
+  `fe93a583bff3bff212746789e4841974299a808d195e78b4fbde9cdd27c4ba42`.
+- Attempt208 branch `kda-cuda/fla-prepared-fullseq-v16-g8-208`, commit
+  `cf42c979b0c0ab5b330289792e9428576e4909e8`, source SHA
+  `c7be004a68281eb535a6d16e02fe30be7c89346a9fbcbe6b25d1c12632f12eec`.
+  Checker/gradient/Level-1/profile hashes are respectively
+  `636b81ab895c71d0389607fd49517d7a123520cd7ccbbf0591e23512be35fcb7`,
+  `7e22ca05c8df5d5e152c0cd1e0a6b0434f7d1d72811dd6da2a6a8efb5d37a0f8`,
+  `3763483544fbd7e771651e4605253e17bb82d337b579a2ff6bea3401c10342f7`, and
+  `7db5f8415f9e75321d02632e618bc9bfdf1d02514e9f58c09cfc12fa67b951e6`.
+- Append-only index SHA-256 after both attempts:
+  `c07154828e6f578d251a276bf6265209ef41e2948650c8b1f526fa0d07bcaddc`.
+
+**Result**
+
+- Both candidates remain finite, frozen-tolerance correct, and bitwise
+  deterministic across fresh caches. Maximum delta to attempt204 is
+  `1.2281816452741623e-08`; output and dq are bitwise equal. No Level 2 or
+  sanitizer campaign was spent after either Level-1 rejection.
+- Attempt207 cuts the full-sequence scan `0.724416 -> 0.537216 ms`, with 87
+  registers/thread, 14,336 shared bytes, 48 CTAs, and no local-memory spill.
+  Its operator profile is 96 launches / 7.831296 ms sum / 8.136032 ms span.
+  Level 1 measures T=4096 `8.489648 -> 8.422688 ms`, only +0.789%, below the
+  3% gate, and the noisy T=256 lane violates the 5% important-lane guard.
+- Attempt208 raises topology to 140 launches / 7.917728 ms / 8.321632 ms.
+  Eight smaller complete-VJP launches cost 1.115968 ms versus attempt207's
+  0.892416 ms; cheaper colored/finalize work does not compensate. Matched
+  T=4096 regresses `8.342976 -> 8.750464 ms` (4.884%), although allocation
+  falls to 0.96557x baseline.
+
+**Next**
+
+- Reject both and retain attempt204 as the accepted baseline. Attempt207 is the
+  only useful scaffold: its V16 full-sequence state ownership is mechanically
+  better but still subthreshold. Do not repeat the width-only return to eight
+  consumer groups. The next change must remove a producer/consumer boundary,
+  preferably by preparing W once, producing U inside checkpoint-local history
+  CTAs, and reusing the already-prepared qg/kg across history and reverse state.
