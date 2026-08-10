@@ -13900,3 +13900,79 @@ uv run --no-sync python scripts/kda_cuda_development.py \
   attempt190 and require a broader reverse/intra decomposition that removes a
   material kernel/global-workspace boundary rather than only changing local
   scratch lifetime.
+
+## 2026-08-10 [Codex] Reverse-state/local-VJP stream pipeline is exact but contention-bound
+
+**Context**
+
+- Attempt197 starts from exact attempt190 and changes the reverse-group
+  ownership schedule at a strategy boundary. The caller stream retains the
+  only cross-group dependency—the reverse state scan—while one pooled CUDA
+  stream executes each completed group's local broad/intra VJP in the same
+  reverse-group order.
+- Per-group readiness and final completion use CUDA events. Every temporary
+  that outlives its C++ loop scope is recorded on the local stream before the
+  caching allocator may recycle it. Equations, kernel arithmetic, launch
+  geometry, parameter accumulation order, buffers, precision, and ABI remain
+  unchanged. FLA is an offline scheduling reference only.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_197 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact seed-4101 production capture and independent fresh-cache repeat.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_190 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_197 \
+  runs/kda-cuda-development/attempt-00197-fla-reverse-vjp-pipeline-level1 \
+  --level2-order baseline-first
+nsys profile --trace=cuda,nvtx,osrt --sample=none --cpuctxsw=none \
+  <bounded production operator runner>
+```
+
+**Artifacts**
+
+- Branch `kda-cuda/fla-reverse-vjp-pipeline-197`, pushed commit
+  `aa46c5c9bd33f2fb8f56528ea983288f3b4823bb`; changed source SHA-256
+  `168285e70bde0b333530e42dedab6244b5fc36587138c85cb5ed717f360ff652`.
+- Checker summary
+  `7bcee1a8196158abf1261810c44866095edc0bc85604f68d3fe654ec5c25950b`;
+  production-gradient manifest
+  `3c36be4c9015fa26100cf4ac3e6a8813393adf840fe176f4dc3fd6cf35cc6edb`;
+  Level-1 manifest
+  `9aea70af994058b8c5e99cda9ecb29c8f945170b8c5823d1fc0218a841a5a00a`;
+  operator-profile manifest
+  `fcef76105183ac883cdde3aef0e1a029f9e2481e0b341a6e05751ece898ed3f7`.
+
+**Result**
+
+- Ownership 1.0 and runtime/profile FLA freedom pass. Production output and
+  all seven gradients are finite and bitwise equal to attempt190; an
+  independent fresh-cache repeat is bitwise equal for every tensor.
+- Level 1 decisively rejects the schedule. T=4096 forward+backward regresses
+  `9.115808 -> 9.602512 ms` (5.339%), and T=256 combined regresses 16.311%,
+  violating the important-shape guard. T=1024 regresses 1.168%. Target-shape
+  peak allocation rises only 0.274%, from 191,105,536 to 191,629,824 bytes.
+- The bounded profile confirms genuine overlap rather than accidental stream
+  serialization. Two streams overlap 1.608992 ms, but summed kernel time rises
+  `8.512192 -> 10.882112 ms` (27.841%) and span rises
+  `8.946240 -> 9.273120 ms` (3.654%) across the same 167 launches.
+- Tensor-core contention is broad. Broad VJP rises
+  `1.078688 -> 1.775840 ms` (64.630%), colored intra rises
+  `0.551392 -> 0.985600 ms` (78.748%), and reverse-group rises
+  `0.623360 -> 1.188928 ms` (90.729%). The 1.609-ms overlap cannot repay the
+  2.370-ms increase in aggregate kernel execution.
+- No Level 2, sanitizer, statistical confirmation, or LM-quality evaluation
+  ran. Attempt190 remains the strongest non-retained matched scaffold at
+  37,519 tok/s; attempt194 remains the highest raw observation at 37,701 tok/s,
+  and attempt176/175 remain the accepted development/full baselines.
+
+**Next**
+
+- Preserve attempt197 as exact negative scheduling evidence, not a baseline.
+  Close cross-stream overlap of the existing state/local kernels on GB10.
+- Return to exact attempt190. Matching FLA requires less/coherently staged
+  work—a compact reverse scan followed by broad chunk-parallel equations—not
+  concurrent execution of the current tensor-core-heavy decomposition.
