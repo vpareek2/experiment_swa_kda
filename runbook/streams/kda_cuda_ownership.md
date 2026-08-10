@@ -9128,3 +9128,82 @@ nsys stats --report cuda_gpu_kern_sum --format csv <trace>
   final pair-builder CTA while leaving only the simple `W` conversion as a
   separate pass. Preserve FP32 pair inputs, attempt-125 async alias barriers,
   and explicit initialization of every `A` tile.
+
+## 2026-08-09 [Codex] Attempt 128 final-pair restored-key fusion rejected at Level 1
+
+**Context**
+
+- Attempt 128 starts directly from accepted attempt 127. The final `(48,48)`
+  pair-builder CTA converts all bounded restored keys into the now-dead FP32
+  `qbar` backing after its last read, removing that work from the separate
+  post-BMM producer. The remaining producer converts only FP32 `W` to the BF16
+  scan view. FP32 pair inputs, full-`A` initialization, the asynchronous scan,
+  and the complete backward are unchanged.
+- Each per-chunk `qbar` allocation contains exactly twice as many BF16 slots as
+  FP32 elements, so the existing doubled-stride key-major packing remains
+  within the original allocation. CUDA stream order completes all pair-builder
+  launches before the solve, BMMs, and scan consume the reused view.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_128 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact seed-4101 candidate capture versus the preserved attempt-100 tensors,
+# followed by an independent candidate capture with fresh compiler caches.
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_128 \
+  push -u origin kda-cuda/wy-final-pair-restored-128
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_127 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_128 \
+  runs/kda-cuda-development/attempt-00128-final-pair-restored-level1 \
+  --level2-order baseline-first
+```
+
+**Artifacts**
+
+- Pushed commit `3751e607468e0bba48e406375c13b10e673219a4`;
+  forward source SHA-256
+  `1adf0e90803d7a8145725463afb4cb62701e6cc69960416932988b8d6e25f1a1`.
+- Protected checker:
+  `runs/kda-cuda-development/diagnostics/attempt-00128-final-pair-restored-protected-checker`,
+  manifest `3402ba71883f7f385e3bea0f7a0444cfd005990c1d592dde7b054074d97ab148`.
+- Production comparison/repeat:
+  `runs/kda-cuda-development/diagnostics/attempt-00128-final-pair-restored-gradient`,
+  manifest `531296362460618785898f1b565bcc58e1f569db883f6007c6711f3a5e30ab76`.
+- Level 1:
+  `runs/kda-cuda-development/attempt-00128-final-pair-restored-level1`,
+  manifest `7ee09e0b80d3b4b8013055776ccadd94d2d21a4e60b1123984d0df7941d283fb`.
+- Append-only attempt/reference index has 134 valid JSONL entries, SHA-256
+  `beca37fd09465cbb5c37b9060d268c6d9f2f560ee8d2442cd3ee97465f1a7877`.
+
+**Result**
+
+- The candidate passes ownership 1.0, protected runtime/profile audit,
+  runtime FLA freedom, and frozen production tolerance. Output is bitwise equal
+  to the frozen accepted-equivalent capture; maximum gradient delta is
+  `1.2395503290463239e-08`. The independent fresh-cache repeat is bitwise exact
+  for output and all seven gradients.
+- Level 1 rejects the mechanism. T=4096 forward+backward regresses
+  `11.789744 -> 11.881712 ms` (0.780%), and forward-only regresses 0.161%.
+  T=256 and T=1024 forward+backward improve 7.636% and 2.485%, respectively;
+  peak allocation is identical in every row. The production-length row misses
+  the 3% advance gate, so no sanitizer or Level-2 run was performed.
+- Two capture wrappers ran from the coordinator cwd and stopped at relative
+  native-source resolution before compilation or GPU kernel execution. Their
+  empty directories and exact logs are preserved in the production-comparison
+  artifact; neither is evidence and neither caused a candidate rerun.
+- This is development evidence only. It is not statistically confirmed and no
+  LM-quality evaluation ran.
+
+**Next**
+
+- Keep exact `f2fa705e22fc97d2f455b4ccabcf42a6a9ab120f` as the accepted
+  development baseline. Attempt 128 is a preserved negative result and must not
+  be composed into later candidates.
+- Folding the restored-key loop into an already busy pair-builder CTA helps
+  small lengths but loses at T=4096. Treat this forward producer as a
+  diminishing-return boundary and use the saved profiles to select a larger
+  backward dependency, state-history, or dense-matmul boundary. Do not retest
+  attempt 128 unchanged.
