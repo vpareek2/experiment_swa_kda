@@ -33,7 +33,11 @@ def prepare() -> None:
         return
     from nanochat.research.cuda_build import build_cuda_extension
 
-    _RECEIPT = build_cuda_extension(list(_SOURCES), name="nanochat_kda_complete_naive")
+    _RECEIPT = build_cuda_extension(
+        list(_SOURCES),
+        name="nanochat_kda_complete_naive",
+        extra_cuda_cflags=("--use_fast_math",),
+    )
 
 
 def provenance() -> dict[str, Any]:
