@@ -8381,3 +8381,94 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_120 \
   phases: keep both A and B in flight as in attempt 119, but store both as
   BF16x2 register pairs to shorten their combined live range. Start directly
   from attempt 100; do not inherit attempt 119 or 120 as an accepted baseline.
+
+## 2026-08-09 [Codex] Attempt 121 packed dual pipeline remains Level-1 subthreshold
+
+**Context**
+
+- Attempt 121 starts directly from accepted attempt 100 and applies packed
+  BF16x2 lookahead to both operands in all four persistent forward products:
+  `W H`, `qgamma H`, `A Z`, and `E^T Z`. It retains both-operand overlap from
+  attempt 119 while reducing each lane's lookahead storage from sixteen FP32
+  scalars to eight packed BF16x2 values.
+- The initial fully unrolled packed-dual source still compiled to 128
+  registers. The exact checker/source snapshot was preserved, then only the
+  four outer tile loops were changed to `#pragma unroll 1`; the four-pair
+  register pack/unpack loops remain unrolled. The committed rolled source
+  compiles to 96 registers, 50,176 bytes shared, no stack, and no local spill.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_121 \
+  --lane optimization <isolated artifact/cache arguments>
+# Repeat with the four outer tile loops explicitly rolled.
+# Seed-4101 exact production capture and independent fresh-cache repeat.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_100 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_121 \
+  runs/kda-cuda-development/attempt-00121-forward-packed-dual-rolled-level1 \
+  --level2-order baseline-first
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_121 \
+  push -u origin kda-cuda/wy-forward-packed-dual-pipeline-121
+```
+
+**Artifacts**
+
+- Pushed commit `02b3f66f1b66cae4ddf311013aa4c0159fa578a7`;
+  committed forward source SHA-256
+  `e1bab7235b1d85d6d751af5fd4f4454535f2cc760b8b88f1e48b78ef638bcf1a`.
+- Initial 128-register design checker:
+  `runs/kda-cuda-development/diagnostics/attempt-00121-forward-packed-dual-pipeline-protected-checker`,
+  manifest `ed80ecc65d00a7b8aa6ea7b0a0029fe88951c8ea9e85b3d731908b97daca9099`.
+- Rolled 96-register committed-source checker:
+  `runs/kda-cuda-development/diagnostics/attempt-00121-forward-packed-dual-rolled-protected-checker-002`,
+  manifest `8aeea510f8d2bfaeb51db6e5288a4dc18e31b67f8839387946fd1eeacfee35e3`.
+- Production comparison/repeat:
+  `runs/kda-cuda-development/diagnostics/attempt-00121-forward-packed-dual-rolled-gradient`,
+  manifest `36e3618f26f8526660ceb922a3bf2d62b27234483c8b9319be903ee4eeef3f35`.
+- Level 1:
+  `runs/kda-cuda-development/attempt-00121-forward-packed-dual-rolled-level1`,
+  manifest `50b4e5761cc39a8ca17515706573b2c5f2c932e9a0b1062bf60c6c9e8f5ab074`.
+- Invalid candidate-local uv environment setup:
+  `runs/kda-cuda-development/diagnostics/attempt-00121-forward-packed-dual-rolled-invalid-env-001`,
+  manifest `0332a8c242447dd7ca3d6712c25763fc618eaa5ebcb0ae1ee05cc658b54b6bbe`.
+- Invalid coordinator-relative finalization read from the candidate cwd:
+  `runs/kda-cuda-development/diagnostics/attempt-00121-forward-packed-dual-rolled-finalize-invalid-cwd-001`,
+  manifest `204434527c258ce24525ebeeb95b3db1cee81a8292439c1e28b90b19780629f9`.
+- Append-only attempt/reference index has 125 valid JSONL entries, SHA-256
+  `02b1806a817bca2e804c910aafca17e48bd78b8fb6f8f468121e372c2e629560`.
+
+**Result**
+
+- Both staged sources pass ownership 1.0, the protected runtime/profile audit,
+  and runtime FLA freedom. The committed candidate is bitwise equal to attempt
+  100 for output and all seven gradients, and its independent fresh-cache
+  repeat is bitwise exact for all eight tensors.
+- Explicitly rolling the outer loops lowers the persistent kernel from 128 to
+  96 registers without a spill. Level 1 shows T=4096 forward+backward improving
+  `12.222928 -> 11.913680 ms` (2.530%) with unchanged allocation. T=256
+  forward+backward regresses only `4.273136 -> 4.359408 ms` (2.019%), safely
+  inside the frozen 5% small-sequence guard; T=1024 regresses 0.128%.
+- The candidate is nevertheless `do_not_advance`: the production target misses
+  the 3% Level-1 threshold, and T=4096 forward-only regresses
+  `19.092096 -> 19.699887 ms` (3.183%). No sanitizer, Level 2, production
+  profile, confirmation, or LM-quality evaluation ran.
+- The first invalid wrapper created a candidate-local `.venv` and failed to
+  spawn `research` before checker/GPU work. It is preserved intact at
+  `/tmp/kda121-accidental-venv-20260809-001`. A later read-only finalization
+  wrapper stopped at a missing candidate-relative manifest path before its
+  push command; the exact incident and empty ignored candidate directory are
+  preserved. The valid branch push was then performed explicitly.
+
+**Next**
+
+- Retain attempt 100. Do not advance, retest, sanitize, or run Level 2 for
+  attempt 121. The register-lookahead family is now closed: packing protects
+  T=256, but neither A-only nor packed-dual overlap produces a sufficient
+  end-to-end long-sequence gain.
+- Resume from attempt 100 at a larger boundary. Prefer eliminating a repeated
+  forward producer/consumer handoff or attacking the remaining backward
+  recomputation/group-GEMM boundary; do not silently compose attempts 119-121
+  into the accepted baseline.
