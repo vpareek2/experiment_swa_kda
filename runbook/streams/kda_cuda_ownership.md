@@ -8876,3 +8876,104 @@ nsys stats --report cuda_gpu_kern_sum --format csv <trace>
   producer-consumer boundary, for example by emitting scan-ready BF16 operands
   from an existing forward preparation phase or by using dedicated load/store
   warps that remove the materialized pack handoff.
+
+## 2026-08-09 [Codex] Attempt 126 preprocess-emitted scan operands invalid at Level 2
+
+**Context**
+
+- Attempt 126 starts directly from accepted attempt 100 and widens attempt
+  125's forward producer/consumer boundary. Preprocess emits BF16 qgamma and
+  restored-key scan operands, the pair builder writes BF16 `A` directly, and
+  only the FP32 `W` result retains a separate conversion before the proven
+  double-buffered `cp.async` persistent scan.
+- The first realization stored uncentered `khat / exp(g)` in BF16. With the
+  production `lower_bound=-5`, a C64 prefix can require an inverse exponent far
+  outside BF16 range. That exact source was preserved before correction.
+- The bounded realization instead keeps unscaled BF16 q/k for pair building,
+  retains exact normalized keys in preprocess shared memory, and emits
+  `khat * exp(g_end-g)` for the scan. Four BF16 vector views use the same
+  aggregate bytes as the former two FP32 q/k views; forward scan equations and
+  attempt-100 backward remain otherwise unchanged.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_126 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact seed-4101 production capture and independent fresh-cache repeat.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_100 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_126 \
+  runs/kda-cuda-development/attempt-00126-preprocess-async-scan-level1 \
+  --level2-order baseline-first
+# Exact final source staged in validation worktree 126; run all sanitizers.
+# Execute the saved baseline-first Level-2 plan exactly once.
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_126 \
+  push -u origin kda-cuda/wy-preprocess-async-scan-126
+```
+
+**Artifacts**
+
+- Pushed final commit `6f1c5fd08ddf75c91415cf579890e26f17b79838`
+  after preserved overflow commit
+  `ba4d994c63d3d3d2f0ac2d1b970f3410f2672b40`; final forward source SHA-256
+  `4a17d00e9ec643e28878547d54c2546c55d7300020c276fa705711bdd2877e8c`.
+- Overflow-source protected checker:
+  `runs/kda-cuda-development/diagnostics/attempt-00126-preprocess-async-scan-protected-checker`,
+  manifest `8264106e6c9f0287ec6ec891fec7032a667ec8b9586ab3c3e8f41d917a0f65d8`.
+- Final protected checker:
+  `runs/kda-cuda-development/diagnostics/attempt-00126-preprocess-async-scan-protected-checker-002`,
+  manifest `0a42e54f5a550dffcbdac7f41194e084f397f2bffdd9b1020182e14869b58d30`.
+- Overflow production-gradient capture:
+  `runs/kda-cuda-development/diagnostics/attempt-00126-preprocess-async-scan-gradient`,
+  manifest `bd48f21ad37375b6d8fa791c2a9dd2dec668c0fb98c0f4c0999e3680877bae1a`.
+- Bounded production comparison/repeat:
+  `runs/kda-cuda-development/diagnostics/attempt-00126-preprocess-async-scan-gradient-bounded-001`,
+  manifest `4443960d413b137af989457b8fba81922cfc26cc93c98db7e94506d34d81dfb4`.
+- Level 1:
+  `runs/kda-cuda-development/attempt-00126-preprocess-async-scan-level1`,
+  manifest `cb39c1df8766d4a5eaf3091de8d3e3de02394b5c577b86150c95abc42a331e1f`.
+- Full sanitizer validation:
+  `runs/kda-cuda-development/validations/validation-00031-preprocess-async-scan`,
+  manifest `7affd0c818be887bd7956d364ae01ba001ba30d65f23de1074b68077db188fe2`.
+- Invalid Level 2:
+  `runs/kda-cuda-development/attempt-00126-preprocess-async-scan-level2`,
+  manifest `6a6802de701e1fca7584e919f635cd4b2e075bbcd72bcca7fceb30bc5893108c`.
+- Append-only attempt/reference index has 131 valid JSONL entries, SHA-256
+  `a681c3dcd086691d439f9f787609a46be9e193028a3cf870b3df7dd3c0f18651`.
+
+**Result**
+
+- The uncentered inverse-decay source passes the small protected audit but makes
+  exact production output and all seven gradients non-finite. It is invalid;
+  no timing was used. The bounded source passes ownership 1.0, protected
+  runtime/profile audit, runtime FLA freedom, and frozen tolerances. Against
+  attempt 100 its maximum output delta is `0.00048828125` and maximum gradient
+  delta is `2.7275746106170118e-09`; the independent fresh-cache repeat is
+  bitwise exact for all eight tensors.
+- Memcheck, racecheck, synccheck, and initcheck all pass with zero errors.
+  Level 1 advances: T=4096 forward+backward improves
+  `12.495024 -> 11.336624 ms` (9.271%), with a 1.00905 memory ratio. T=256 and
+  T=1024 forward+backward improve 2.582% and 2.606%; all guards pass.
+- The exact baseline-first Level-2 pair is invalid. Baseline measured samples
+  `[33498,33579,33732,33623,33732]` have median 33,623 tok/s and finite losses.
+  Candidate loss is NaN from step 0 through step 6. Its raw timing samples
+  `[34703,34672,34652,34610,34753]` are preserved but explicitly excluded:
+  they are not a throughput result, improvement, FLA fraction, or retention
+  signal. Candidate peak is 5510.533 MiB versus baseline 5508.533 MiB.
+- Two wrappers stopped before checker/build/GPU work: the first staged from the
+  coordinator-relative path, and the first gradient wrapper resolved its
+  baseline precheck relative to the candidate. Neither created evidence. No
+  confirmation or LM-quality evaluation ran.
+
+**Next**
+
+- Retain attempt 100. Do not retest, advance, or compose attempt 126. Its exact
+  training pair is numerically invalid despite passing isolated production
+  seed/tolerance and sanitizer gates.
+- Preserve the producer-boundary result, but keep pair-builder qbar/khat in the
+  exact FP32 path in the next direct attempt-100 candidate. Move only a
+  scan-ready operand into preprocess or dead storage, retain attempt 125's
+  bounded restored-key representation and alias barriers, and require finite
+  first-step training before interpreting any full-model timing.
