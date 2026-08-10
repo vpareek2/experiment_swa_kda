@@ -10087,3 +10087,50 @@ uv run --no-sync python scripts/kda_cuda_development.py \
   The next candidate must restore GPU-level product concurrency without
   recreating four full global workspaces or adding work to the low-parallelism
   persistent reverse scan.
+
+## 2026-08-09 [Codex] Attempt 136 operator attribution selects direct FLA equations
+
+**Context**
+
+- A single bounded nsys capture profiles attempt 136 at the exact
+  B=2/T=4096/H=3/K=V=128 operator shape. CUDA runtime launch correlation is
+  used, matching the corrected accepted-127/FLA methodology. No accepted or
+  FLA experiment was rerun.
+
+**Commands**
+
+```bash
+nsys profile --trace=cuda,nvtx,osrt --sample=none --cpuctxsw=none \
+  <coordinator-python> <attempt136 project-owned operator runner>
+nsys export --type sqlite <trace>
+# Join runtime launches inside the NVTX range to kernels by correlationId.
+```
+
+**Artifacts**
+
+- `runs/kda-cuda-development/profiles/attempt-00136-fla-parity-local-vjp-operator`,
+  manifest `d33b9cdb0782dab90664b2e94d21b40c84c9c8b6c2b07df3dc3c96a444ba4f0e`.
+
+**Result**
+
+- Attempt 136 reduces launches from accepted 127's 393 to 345, but summed
+  kernel time rises `10.999328 -> 11.570144 ms` and span rises
+  `11.928448 -> 12.527104 ms`. Its eight local-VJP calls consume 1.634400 ms.
+- The removed baseline BMM/elementwise/chunk-backward work is not the remaining
+  problem by itself: the new CTA costs more than those savings, and the
+  retained colored-pair/inverse path also rises to 0.904096 ms. In the frozen
+  FLA trace, the direct fused WY/query/key/gate kernel costs 0.797600 ms and
+  the complete intra kernel 0.516064 ms.
+- This falsifies the proposed phase-split follow-up. Splitting the same five
+  materialized products would retain their excess arithmetic and staging. The
+  meaningful FLA inspiration is its direct `T`/`Aqk` backward algebra, which
+  produces vector gradients and the inverse/intra adjoints without the current
+  global `dW -> dT -> dP/dQ -> colored-pair` chain.
+
+**Next**
+
+- Start a fresh candidate from accepted attempt 127 and implement a
+  project-owned direct-equation two-kernel VJP: one chunk-local fused
+  WY/query/key/gate stage and one intra-chunk `Aqk/Akk` stage. Keep FLA source
+  offline, cite it only as the equation/schedule reference, and preserve the
+  existing path until exact production gradients pass.
