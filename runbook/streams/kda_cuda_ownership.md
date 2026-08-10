@@ -10134,3 +10134,75 @@ nsys export --type sqlite <trace>
   WY/query/key/gate stage and one intra-chunk `Aqk/Akk` stage. Keep FLA source
   offline, cite it only as the equation/schedule reference, and preserve the
   existing path until exact production gradients pass.
+
+## 2026-08-09 [Codex] Attempt 137 direct fragment VJP correct but Level-1 rejected
+
+**Context**
+
+- Attempt 137 starts exactly from accepted attempt 127. It retains the proven
+  group-boundary/reverse scan and matrix `dT` path, but replaces global
+  `dR/dE/dP/dQ` workspaces and their four BMMs with a direct chunk CTA.
+- Warp zero produces each `dP = T^T dZ` fragment and all eight warps consume it
+  immediately in the exact reassociation `dQ = -dP H^T`. This is a
+  project-owned implementation of the offline FLA producer/consumer equation;
+  no FLA code is imported or linked.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_137 \
+  --lane optimization <isolated artifact/cache arguments>
+# Seed-4101 production capture and independent fresh-cache repeat.
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_137 \
+  push -u origin kda-cuda/fla-direct-vjp-137
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_127 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_137 \
+  runs/kda-cuda-development/attempt-00137-fla-direct-vector-vjp-level1 \
+  --level2-order candidate-first
+# One bounded correlated production-shape nsys operator capture.
+```
+
+**Artifacts**
+
+- Pushed commit `e3ab8cc6b532ffd67617fa41558e2981faaa084d`; backward
+  source SHA-256
+  `83c56b4ea38e16fbbe9f53a7545790f26b8e49f1dac3c05af8fba9f7829b85c5`.
+- Protected checker:
+  `runs/kda-cuda-development/diagnostics/attempt-00137-fla-direct-vector-vjp-protected-checker`,
+  manifest `b412368104b0413ce435ce8d72120074253e3670b7e9c4ff3ab4b3227724f5b8`.
+- Production comparison/repeat:
+  `runs/kda-cuda-development/diagnostics/attempt-00137-fla-direct-vector-vjp-gradient`,
+  manifest `0c1451304d0827669d92c86abe29abb31a12551176e1a36200ab108cb9b1aa0f`.
+- Level 1:
+  `runs/kda-cuda-development/attempt-00137-fla-direct-vector-vjp-level1`,
+  manifest `1d1c52b4461e6d81a4ba3d19a8a6c2c0c2c61484f9efe89d0668cfd1c3817668`.
+- Operator profile:
+  `runs/kda-cuda-development/profiles/attempt-00137-fla-direct-vector-vjp-operator`,
+  manifest `11ffc8c4686914f2e4a89498e78a654a2371e5934baaf81011eb2f3245696941`.
+
+**Result**
+
+- Ownership 1.0, protected runtime/profile audit, and runtime FLA freedom pass.
+  Production output is bitwise equal; the maximum frozen gradient delta is
+  `5.820766091346741e-11`; every fresh-cache repeat tensor is bitwise exact.
+- Level 1 rejects the implementation: T=4096 forward+backward regresses
+  `11.899968 -> 12.109504 ms` (1.761%), although peak allocation falls 2.762%
+  to 198,445,568 bytes. T=1024 improves 0.584%; T=256 regresses 3.860%.
+- The correlated profile attributes 1.612896 ms to the eight direct-VJP calls.
+  The sixteen per-group BF16 conversions consume only 0.035648 ms, so launch
+  cleanup cannot recover the gap. The 45,632-byte CTA and repeated CTA-wide
+  barriers—not the direct algebra—are the rejected component.
+- No sanitizer or Level 2 ran. This is not confirmed and has no LM-quality
+  evaluation.
+
+**Next**
+
+- Keep exact accepted attempt 127. Preserve attempt 137 as equation evidence,
+  not an accepted candidate.
+- Reimplement the same direct equations with four warps owning the four
+  16-row tiles. Each warp keeps eight `dQ` accumulators, hands `dP` through
+  warp-local scratch, and uses global BF16 operands. This removes resident
+  128x128 shared operands and CTA barriers while preserving the useful
+  `dP -> dQ` boundary.
