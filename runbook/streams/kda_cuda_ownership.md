@@ -12966,3 +12966,65 @@ uv run --no-sync python scripts/kda_cuda_development.py \
   strategy must remove state-history/local-VJP traffic or fuse a true producer
   and consumer boundary; merely moving operands global or widening the
   persistent scan does not reproduce FLA's advantage.
+
+## 2026-08-10 [Codex] Plain shared-row padding is exact but neutral
+
+**Context**
+
+- Preserved full-step traces attribute 220.901 ms/step to named attempt176 KDA
+  kernels versus 88.910 ms/step for matched FLA kernels. Convolution is already
+  within 0.333 ms/step, so the remaining gap is the WY/state implementation.
+- FlashKDA's offline forward source uses swizzled shared layouts and cooperative
+  load/MMA pipelines. CUTLASS/CuTe is absent from the allowed installed
+  toolchain, so attempt184 tests the smallest owned transferable mechanism:
+  pad the broad VJP's BF16 shared rows from 64 to 72 elements. This breaks the
+  repeated 128-byte bank mapping while preserving WMMA stride legality,
+  equations, arithmetic, and global storage.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_184 \
+  --lane optimization <isolated artifact/cache arguments>
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_176 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_184 \
+  runs/kda-cuda-development/attempt-00184-fla-padded-broad-shared-level1 \
+  --level2-order baseline-first
+```
+
+**Artifacts**
+
+- Branch `kda-cuda/fla-padded-broad-shared-184`, pushed commit
+  `2194ae7c923d736fc74a2819349f7c0aa4e612e8`; source SHA-256
+  `3189b5b180db2e8d5a48c9c4f422e65f21a92f119c6af6b0cd4779cda1ecee27`.
+- Checker summary
+  `25aa939d44ef8ae3cef9c9ab8a991820fc20f9386c0c76b4c35dae1eded8255f`;
+  gradient manifest
+  `797043b697dfc44cd6dcef4c447d13332ef993c2a7b10fdd0d23ee53a522a7d1`;
+  Level-1 manifest
+  `cc7be20fd1312be320c149e9afc25e6deff9cd2702a5c747b106e0931775f0a7`.
+- The append-only index now has 207 rows and hashes to
+  `d6f4a5f883c719c0cea2da2f926b6b6977abecff0bd8815583a5b4d7e84fb95a`.
+
+**Result**
+
+- Production output and all seven gradients are bitwise equal to attempt176
+  and finite. The protected audit passes ownership 1.0 and runtime/profile FLA
+  freedom. The broad kernel remains at 130 registers/thread with zero spill;
+  shared storage rises from 25,600 to 26,624 bytes.
+- T=4096 forward+backward is neutral: `9.603024 -> 9.600464 ms`, a 0.027%
+  improvement at identical memory. T=256 improves 6.844%, while T=1024
+  regresses 2.412%; all guards pass but the target gate does not.
+- No Level 2, sanitizer run, statistical confirmation, or LM-quality
+  evaluation ran. Attempt176 remains the development parent and attempt175
+  remains the latest full matched baseline at 36,719.5 tok/s, 84.06% of FLA.
+
+**Next**
+
+- Return to exact attempt176 and close plain shared-stride skewing. Padding
+  alone does not reproduce FlashKDA's complete swizzled cooperative pipeline.
+- The next FLA-matching design must change the register/cooperative
+  decomposition of the broad/state programs without importing reference code
+  or adding unavailable CUTLASS dependencies.
