@@ -1736,6 +1736,7 @@ __global__ void nanochat_kda_wy_backward_complete_four_warp_vjp_c64_kernel(
   const int h = recurrence % kHeads;
   const int b = recurrence / kHeads;
   const int warp = threadIdx.x / warpSize;
+  const int lane = threadIdx.x % warpSize;
 
   constexpr int kStrip = kMatrixTile;
   constexpr int kStripElements = kChunk * kStrip;
@@ -1808,32 +1809,53 @@ __global__ void nanochat_kda_wy_backward_complete_four_warp_vjp_c64_kernel(
       wmma::mma_sync(
           dP_fragment, t_fragment, dz_inner_fragment, dP_fragment);
     }
-    wmma::store_matrix_sync(
-        result + row_start * kStrip, dP_fragment, kStrip,
-        wmma::mem_row_major);
-    __syncthreads();
-
-    if (threadIdx.x < kChunk) {
-      const int row = threadIdx.x;
-      float beta_contribution = 0.0f;
-      const float beta_row = beta[static_cast<int64_t>(n) * kChunk + row];
+    // For the fixed SM121 m16n16 accumulator layout, each four-lane subgroup
+    // owns two rows and all sixteen columns. Consume dP directly from the
+    // fragment instead of round-tripping it through shared memory and two CTA
+    // barriers. Each matrix element has exactly one lane/element owner.
+    float beta_lower = 0.0f;
+    float beta_upper = 0.0f;
+#pragma unroll
+    for (int element = 0; element < dP_fragment.num_elements; ++element) {
+      const int local_row = (lane >> 2) + ((element & 2) ? 8 : 0);
+      const int local_value = ((lane & 3) << 1) + (element & 1) +
+          ((element & 4) ? 8 : 0);
+      const int row = row_start + local_row;
+      const int value = value_start + local_value;
       const int token = chunk_id * kChunk + row;
-      for (int local_value = 0; local_value < kStrip; ++local_value) {
-        const int value = value_start + local_value;
-        const float dP_value = result[row * kStrip + local_value];
-        const int64_t input = input_vector_index(b, token, h, value);
-        dv[input] = __float2bfloat16_rn(beta_row * dP_value);
-        beta_contribution += dP_value * __bfloat162float(v[input]);
-      }
-      if (value_start == 0) {
-        dbeta[static_cast<int64_t>(local_n) * kChunk + row] =
-            beta_contribution;
+      const int64_t input = input_vector_index(b, token, h, value);
+      const float dP_value = dP_fragment.x[element];
+      const float beta_row = beta[static_cast<int64_t>(n) * kChunk + row];
+      dv[input] = __float2bfloat16_rn(beta_row * dP_value);
+      const float contribution =
+          dP_value * __bfloat162float(v[input]);
+      if (element & 2) {
+        beta_upper += contribution;
       } else {
-        dbeta[static_cast<int64_t>(local_n) * kChunk + row] +=
-            beta_contribution;
+        beta_lower += contribution;
       }
     }
-    __syncthreads();
+#pragma unroll
+    for (int offset = 2; offset > 0; offset >>= 1) {
+      beta_lower += __shfl_down_sync(0xffffffffu, beta_lower, offset, 4);
+      beta_upper += __shfl_down_sync(0xffffffffu, beta_upper, offset, 4);
+    }
+    if ((lane & 3) == 0) {
+      const int local_row = lane >> 2;
+      const int lower_row = row_start + local_row;
+      const int upper_row = lower_row + 8;
+      const int64_t lower_index =
+          static_cast<int64_t>(local_n) * kChunk + lower_row;
+      const int64_t upper_index =
+          static_cast<int64_t>(local_n) * kChunk + upper_row;
+      if (value_start == 0) {
+        dbeta[lower_index] = beta_lower;
+        dbeta[upper_index] = beta_upper;
+      } else {
+        dbeta[lower_index] += beta_lower;
+        dbeta[upper_index] += beta_upper;
+      }
+    }
   }
 
   // Key strips form all boundary-state products. dW is negated into BF16
