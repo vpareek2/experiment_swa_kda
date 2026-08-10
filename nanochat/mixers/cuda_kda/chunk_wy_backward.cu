@@ -580,8 +580,8 @@ __global__ void nanochat_kda_wy_backward_group_boundary_wmma_c64_kernel(
     const float* prefix_g,
     const float* U,
     const float* W,
-    const float* E,
-    float* state,
+    const __nv_bfloat16* E,
+    const float* initial_state,
     __nv_bfloat16* state_history,
     __nv_bfloat16* z_history,
     int chunk_start,
@@ -612,7 +612,7 @@ __global__ void nanochat_kda_wy_backward_group_boundary_wmma_c64_kernel(
        index += blockDim.x) {
     const int key = index / kValueTile;
     const int value = index - key * kValueTile;
-    local_state[index] = state[
+    local_state[index] = initial_state == nullptr ? 0.0f : initial_state[
         (static_cast<int64_t>(recurrence) * kDim + key) * kDim +
         value_start + value];
   }
@@ -714,8 +714,7 @@ __global__ void nanochat_kda_wy_backward_group_boundary_wmma_c64_kernel(
           const int64_t offset =
               (static_cast<int64_t>(group_n) * kChunk +
                source_start + column) * kDim + key_start + row;
-          operand_a[warp * kTileElements + element] =
-              __float2bfloat16_rn(E[offset]);
+          operand_a[warp * kTileElements + element] = E[offset];
         }
         __syncwarp();
         MatrixA a_fragment;
@@ -751,13 +750,6 @@ __global__ void nanochat_kda_wy_backward_group_boundary_wmma_c64_kernel(
     __syncthreads();
   }
 
-  for (int index = threadIdx.x; index < kDim * kValueTile;
-       index += blockDim.x) {
-    const int key = index / kValueTile;
-    const int value = index - key * kValueTile;
-    state[(static_cast<int64_t>(recurrence) * kDim + key) * kDim +
-          value_start + value] = local_state[index];
-  }
 }
 
 // Rebuild only Z from saved incoming chunk states. Unlike the boundary sweep,
@@ -3091,6 +3083,7 @@ nanochat_kda_chunk_wy_backward_c64(
     const at::Tensor& beta_logits,
     const at::Tensor& A_log,
     const at::Tensor& dt_bias,
+    const at::Tensor& output,
     const at::Tensor& grad_output,
     float lower_bound,
     float scale) {
@@ -3105,6 +3098,11 @@ nanochat_kda_chunk_wy_backward_c64(
   constexpr int kVectorElements = kRecurrences * kChunk * kDim;
   constexpr int kGroupVectorElements = kGroupRows * kChunk * kDim;
   constexpr int kStateElements = kRecurrences * kDim * kDim;
+  constexpr int64_t kOutputElements =
+      static_cast<int64_t>(kBatch) * kLength * kHeads * kDim;
+  const float* group_state_checkpoints = reinterpret_cast<const float*>(
+      reinterpret_cast<const __nv_bfloat16*>(
+          output.data_ptr<at::BFloat16>()) + kOutputElements);
   constexpr int kGroupMatrixElements = kGroupRows * kChunk * kChunk;
 
   at::Tensor q_inverse = at::empty({kChunkRows, kChunk}, fp32);
@@ -3155,48 +3153,10 @@ nanochat_kda_chunk_wy_backward_c64(
     return tensor.view({kGroups, kGroupRows, kChunk, kChunk})
         .select(0, chunk_start / kGroupChunks);
   };
-  at::Tensor state = at::zeros({kRecurrences, kDim, kDim}, fp32);
   at::Tensor chunk_state_history = at::empty(
       {kGroups, kGroupRows, kDim, kDim}, q.options());
   at::Tensor chunk_z_history = at::empty(
       {kGroups, kGroupRows, kChunk, kDim}, q.options());
-
-  for (int group_id = 0; group_id < kGroups; ++group_id) {
-    const int chunk_start = group_id * kGroupChunks;
-    at::Tensor P_group = pack_vectors(P, chunk_start);
-    at::Tensor Q_group = pack_vectors(Q, chunk_start);
-    at::Tensor T_group = pack_matrices(T, chunk_start);
-    at::Tensor U_group = at::empty_like(P_group);
-    at::Tensor W_group = at::empty_like(Q_group);
-    nanochat_kda_wy_backward_group_uw_wmma_c64_kernel<<<
-        kGroupRows * (kDim / 16), 128, 0, stream>>>(
-        T_group.data_ptr<float>(), P_group.data_ptr<float>(),
-        Q_group.data_ptr<float>(), U_group.data_ptr<float>(),
-        W_group.data_ptr<float>(), nullptr, nullptr, nullptr, kGroupRows);
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
-    at::Tensor R_group = at::empty_like(P_group);
-    at::Tensor E_group = at::empty_like(Q_group);
-    nanochat_kda_wy_backward_pack_group_c64_kernel<<<
-        (kGroupVectorElements + kThreads - 1) / kThreads,
-        kThreads, 0, stream>>>(qbar.data_ptr<float>(), khat.data_ptr<float>(),
-        prefix_g.data_ptr<float>(), R_group.data_ptr<float>(),
-        E_group.data_ptr<float>(), chunk_start, kGroupChunks);
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
-    nanochat_kda_wy_backward_group_boundary_wmma_c64_kernel<<<
-        kRecurrences * (kDim / 16), 256, 0, stream>>>(
-        prefix_g.data_ptr<float>(), U_group.data_ptr<float>(),
-        W_group.data_ptr<float>(), E_group.data_ptr<float>(),
-        state.data_ptr<float>(),
-        reinterpret_cast<__nv_bfloat16*>(
-            chunk_state_history.select(0, group_id)
-                .data_ptr<at::BFloat16>()),
-        reinterpret_cast<__nv_bfloat16*>(
-            chunk_z_history.select(0, group_id)
-                .data_ptr<at::BFloat16>()),
-        chunk_start, kGroupChunks);
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
-  }
-  state = at::Tensor();
 
   at::Tensor dq = at::empty_like(q);
   at::Tensor dk = at::empty_like(k);
@@ -3261,6 +3221,29 @@ nanochat_kda_chunk_wy_backward_c64(
             W_group_bf16.data_ptr<at::BFloat16>()),
         chunk_start, kGroupChunks);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
+
+    // Reconstruct this group's forward histories from the FP32 boundary saved
+    // by forward.  U/W/E are already live for the reverse state/VJP path, so
+    // this replaces the duplicated forward producer sweep.
+    const float* group_initial_state = group_id == 0 ? nullptr :
+        group_state_checkpoints +
+            static_cast<int64_t>(group_id - 1) * kStateElements;
+    nanochat_kda_wy_backward_group_boundary_wmma_c64_kernel<<<
+        kRecurrences * (kDim / 16), 256, 0, stream>>>(
+        prefix_g.data_ptr<float>(), U_group.data_ptr<float>(),
+        W_group.data_ptr<float>(),
+        reinterpret_cast<const __nv_bfloat16*>(
+            kg_group_bf16.data_ptr<at::BFloat16>()),
+        group_initial_state,
+        reinterpret_cast<__nv_bfloat16*>(
+            chunk_state_history.select(0, group_id)
+                .data_ptr<at::BFloat16>()),
+        reinterpret_cast<__nv_bfloat16*>(
+            chunk_z_history.select(0, group_id)
+                .data_ptr<at::BFloat16>()),
+        chunk_start, kGroupChunks);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+
     nanochat_kda_wy_backward_group_dz_base_wmma_c64_kernel<<<
         kGroupRows * (kDim / 32), 128, 0, stream>>>(
         A_group.data_ptr<float>(),

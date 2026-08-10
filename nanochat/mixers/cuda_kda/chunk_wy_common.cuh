@@ -29,6 +29,7 @@ nanochat_kda_chunk_wy_backward_c64(
     const at::Tensor& beta_logits,
     const at::Tensor& A_log,
     const at::Tensor& dt_bias,
+    const at::Tensor& output,
     const at::Tensor& grad_output,
     float lower_bound,
     float scale);

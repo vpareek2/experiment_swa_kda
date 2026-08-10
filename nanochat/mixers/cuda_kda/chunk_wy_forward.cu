@@ -628,7 +628,8 @@ __global__ void nanochat_kda_chunk_wy_forward_wmma_c64_kernel(
     const __nv_bfloat16* A,
     const float* U,
     const __nv_bfloat16* W,
-    __nv_bfloat16* output) {
+    __nv_bfloat16* output,
+    float* group_state_checkpoints) {
   namespace wmma = nvcuda::wmma;
   constexpr int kValueTile = 32;
   constexpr int kMatrix = 16;
@@ -917,6 +918,23 @@ __global__ void nanochat_kda_chunk_wy_forward_wmma_c64_kernel(
       state[index] = expf(end_g) * state[index] + next_state[index];
     }
     __syncthreads();
+
+    // Save only inter-group FP32 boundaries in the output allocation's hidden
+    // sidecar.  Backward can reconstruct each eight-chunk group's H/Z history
+    // with its already-live reverse operands instead of replaying all forward
+    // producers a second time.
+    if ((chunk_id + 1) % 8 == 0 && chunk_id + 1 < kChunks) {
+      const int boundary = chunk_id / 8;
+      for (int index = threadIdx.x; index < kDim * kValueTile;
+           index += blockDim.x) {
+        const int key = index / kValueTile;
+        const int value = index - key * kValueTile;
+        group_state_checkpoints[
+            ((static_cast<int64_t>(boundary) * kRecurrences + recurrence) *
+                 kDim + key) * kDim + value_start + value] = state[index];
+      }
+      __syncthreads();
+    }
   }
 }
 
@@ -945,8 +963,20 @@ at::Tensor nanochat_kda_chunk_wy_forward_c64(
   at::Tensor A = at::empty(
       {kChunkRows, kChunk, kChunk}, q.options());
   at::Tensor T = at::empty_like(M);
-  at::Tensor output = at::empty(
-      {kBatch, kLength, kHeads, kDim}, v.options());
+  constexpr int64_t kOutputElements =
+      static_cast<int64_t>(kBatch) * kLength * kHeads * kDim;
+  constexpr int64_t kCheckpointElements =
+      static_cast<int64_t>(kChunks / 8 - 1) * kRecurrences * kDim * kDim;
+  // The visible tensor is a contiguous prefix.  Its saved storage keeps seven
+  // FP32 group-boundary states alive until the protected backward receives the
+  // exact same output tensor, without changing the public shape or dtype.
+  at::Tensor output_storage = at::empty(
+      {kOutputElements + 2 * kCheckpointElements}, v.options());
+  at::Tensor output = output_storage.narrow(0, 0, kOutputElements).view(
+      {kBatch, kLength, kHeads, kDim});
+  float* group_state_checkpoints = reinterpret_cast<float*>(
+      reinterpret_cast<__nv_bfloat16*>(
+          output_storage.data_ptr<at::BFloat16>()) + kOutputElements);
 
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream(q.get_device());
   constexpr int kThreads = 256;
@@ -1016,7 +1046,8 @@ at::Tensor nanochat_kda_chunk_wy_forward_c64(
       reinterpret_cast<const __nv_bfloat16*>(A.data_ptr<at::BFloat16>()),
       U.data_ptr<float>(),
       reinterpret_cast<const __nv_bfloat16*>(T.data_ptr<float>()),
-      reinterpret_cast<__nv_bfloat16*>(output.data_ptr<at::BFloat16>()));
+      reinterpret_cast<__nv_bfloat16*>(output.data_ptr<at::BFloat16>()),
+      group_state_checkpoints);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return output;
 }

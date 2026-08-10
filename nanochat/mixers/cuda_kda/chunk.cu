@@ -1815,7 +1815,7 @@ chunk_backward_cuda(
   if (use_wy_backward) {
     auto gradients = nanochat_kda_chunk_wy_backward_c64(
         contiguous_q, contiguous_k, contiguous_v, contiguous_raw_gate,
-        contiguous_beta_logits, A_log, dt_bias, contiguous_grad_output,
+        contiguous_beta_logits, A_log, dt_bias, output, contiguous_grad_output,
         static_cast<float>(lower_bound), static_cast<float>(scale));
     return {
         std::get<0>(gradients), std::get<1>(gradients),
