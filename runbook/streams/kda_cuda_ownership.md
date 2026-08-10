@@ -11294,3 +11294,56 @@ uv run --no-sync python scripts/kda_cuda_development.py \
   broad VJP, which currently repeats scalar `expf` across key/value strips.
 - Require a materially larger operator reduction before Level 2. Neither result
   is statistically confirmed and neither evaluates LM quality.
+
+## 2026-08-10 [Codex] Attempt 159 rejects cached decay factors
+
+**Context**
+
+- Attempt159 starts from attempt157 and computes BF16 prefix/restoration decay
+  factors once in preprocessing. Group packing and the complete two-warp VJP
+  consume them directly, removing their repeated scalar `expf` evaluations.
+  This mirrors FLA's explicit scaled-operand lifetime while preserving the
+  owned C64 equations and public ABI.
+
+**Commands**
+
+```bash
+# Seed-4101 production comparison, then matched Level 1 versus accepted127.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_127 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_159 \
+  runs/kda-cuda-development/attempt-00159-fla-decay-factor-reuse-level1 \
+  --level2-order baseline-first
+```
+
+**Artifacts**
+
+- Branch `kda-cuda/fla-decay-factor-reuse-159`, pushed commit
+  `1f4390560d1644c7b30ba3cc3c7afa78a51a4cc9`; source SHA-256
+  `91a87613c7475606dfe77f92d19936f31361d416273d40eda6341abd90ea5bfb`.
+- Diagnostic manifest
+  `1074bf956cfc806a52e0fd5eb01998dee42853e4fc3522058522fd45e918df96`;
+  Level-1 manifest
+  `04baeb16de27042d9831f4f19e6ef4d5071ce6ea3beb0f0135f6a7952e49b672`.
+- The append-only index now has 179 rows and hashes to
+  `15779976c0fc3923f4ddcf15ad91bbbc257d644662f2a51b1e6596e50b25560a`.
+
+**Result**
+
+- Output remains bitwise equal to attempt157, every gradient is finite, and the
+  maximum gradient delta is `2.0983105e-05`, within the frozen tolerance.
+  The committed runtime audit completes and remains FLA-free.
+- Against accepted127, T=4096 improves `11.543552 -> 10.712656 ms` (7.198%),
+  but it is 1.70% slower than attempt157's point estimate and peak allocation
+  rises to 204,212,736 bytes. The cached-factor mechanism is rejected; no Level
+  2, checker, sanitizer, or deterministic-repeat run was launched.
+
+**Next**
+
+- Keep attempt157 as the FLA-shaped scaffold and accepted127 as the official
+  development baseline. The factor result shows scalar exponentiation is not
+  the broad-VJP bottleneck on GB10; extra global lifetime is counterproductive.
+- The remaining 2.57 versus 0.80-ms broad-kernel gap requires FLA-like generated
+  tensor-core dot/register scheduling or a new VJP decomposition, not more
+  cached operands. This is not statistically confirmed and has no LM-quality
+  evaluation.
