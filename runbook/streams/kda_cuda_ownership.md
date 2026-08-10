@@ -14835,3 +14835,39 @@ uv run --no-sync python scripts/kda_cuda_development.py /home/veer/Master/projec
 **Next**
 
 - Preserve attempt210 as negative evidence and retain attempt204. Output parallelism does not repay global H/Z publication and rereads. Target the 24-owner recurrence itself: translate the retained FLA block64/BV32 register-held state schedule with GB10-supported warp `mma.sync`/WMMA, not unavailable `wgmma` or `tcgen05`. Do not repeat a history-only split.
+
+
+## 2026-08-10 [Codex] GB10 register-held forward state clears Level 1 but misses the Level-2 gate
+
+**Context**
+
+- Attempt211 starts from rejected attempt210 only as a split-output scaffold and replaces its 24-owner shared-FP32 recurrence with the mechanism used by the retained FLA schedule: one 64-thread/BV32 CTA per `(batch, head, value strip)`, FP32 state held in registers across all 64 chunks, and ordinary GB10-supported warp MMA. FLA remains an offline equation/scheduling reference and is neither imported nor linked.
+- The owned fast path uses documented `mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32` and `ldmatrix.sync.aligned.m8n8.x4.shared.b16`, padded W/E/Z panels, two-stage `cp.async`, 254 registers/thread, and 40,960 bytes shared. `NANOCHAT_DISABLE_SELECTIVE_PTX=1` builds the exact attempt210 standard-CUDA WMMA fallback and launches its 256-thread CTA.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_211 --lane optimization <isolated artifacts/caches>
+# Two independent seed-4101 B=2/H=3/T=4096 production-gradient captures; repeat once with NANOCHAT_DISABLE_SELECTIVE_PTX=1.
+compute-sanitizer --tool {memcheck,initcheck,synccheck,racecheck} <production-shape runner>
+nsys profile <enabled production operator>; NANOCHAT_DISABLE_SELECTIVE_PTX=1 nsys profile <fallback production operator>
+uv run --no-sync python scripts/kda_cuda_development.py /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_204 /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_211 runs/kda-cuda-development/attempt-00211-gb10-register-forward-state-level1 --level2-order candidate-first
+# Execute the emitted candidate-first Level-2 plan exactly once.
+```
+
+**Artifacts**
+
+- Branch `kda-cuda/gb10-register-forward-state-211`, pushed commit `20b6332f1d930e4f1ce5de922a389cfb642e8d78`; forward source SHA-256 `3a6e95e88084530d1dd07515e6e740e86f257caa89ee9a2a86a6972967030d2d` and provenance-loader SHA-256 `3326fdf4142c2e5d0b136bffc83ec2304af0aaa24fc1c34e5ab731851d7e2d0b`.
+- Checker manifest `93484cc0f5bd8af07270ad36c3d840c1c2b4b07a42e5a98f4ac7cc0855e7a836` and summary `315f7639c2416a21e478b5d1f9562beaf94755a27a44216c068007fdd4b613f4`; production-gradient manifest `04db850d03a541318981e097b51b18b2fef6896a4fa96669abc705cd09421dfa`; sanitizer manifest `6ec913155ba8e4269230efd2411a94259c65cb1c12575e2f80274db51c1f688d`; profile/AB manifest `a8aa76bf57b6418b7ab696638ce0789a3a5cce9ee4a8e24b1553e5a6e6ecff92`; Level-1 manifest `06fc7bcfcca211882ff14223eb55ffe3c9c844484705b5d115a06d7b410ac5c5`; Level-2 manifest `fbfd99e1fad52b4c71cb45816897a7933661a7de8b953c79a6796d12f88c3c3a`.
+- Append-only development index SHA-256 after attempt211: `e697ee84349e460f902d3a5291c1cf841c0bb8ec06ef4cc02174a1b043746990`.
+
+**Result**
+
+- Ownership 1.0 and runtime/profile FLA freedom pass. Enabled output and every gradient are finite and bitwise equal to attempt204 and the independent fresh-cache repeat. The disabled standard-CUDA fallback is also bitwise equal. Production memcheck, initcheck, and synccheck report zero errors. Racecheck reports 37 warnings and zero errors only in inherited backward group-da/dZ-base WMMA patterns, with zero mentions of the new forward state kernel.
+- Enabled profile: 151 launches, 7.179392 ms summed kernels, 7.604384 ms span. The register-state kernel is 0.433600 ms at 24x64, 254 registers/thread, 40,960 bytes shared, and zero local memory. Disabled fallback: 7.569856 ms sum, 7.989920 ms span, state 0.844160 ms. Selective PTX improves the state 48.64% and operator span 4.825%, clearing the 2% AB gate. Attempt204 was 150 / 7.644896 / 8.048416.
+- Matched Level 1 advances: T=4096 forward+backward `8.245216 -> 7.843312 ms`, +4.874%, with identical allocation and no guarded regression. Forward alone improves 0.287%.
+- Sparse candidate-first Level 2 does **not** meet acceptance: candidate steps 2-6 `[39608, 39569, 39560, 39433, 39530]` have median **39,560 tok/s**; attempt204 `[39189, 39174, 39131, 39130, 39041]` has median 39,131 tok/s. The gain is 1.096%, below the declared 2% gate, with identical 5,525.408 MiB peak memory. The candidate is the highest raw project observation but remains 4,120 tok/s below the 43,680 FLA reference. No statistical confirmation or LM-quality evaluation ran.
+
+**Next**
+
+- Preserve attempt211 as the exact GB10 register-state/PTX scaffold, but do not accept it; attempt204 remains the accepted baseline. Do not spend another attempt on forward state microvariants alone. Continue only with an additional operator-scale reduction, prioritizing the backward tail while retaining attempt211's forward mechanism conditionally.
