@@ -14316,3 +14316,80 @@ nsys profile <bounded production chunk-forward/backward runner>
   launches—for example, match the retained FLA state's more efficient operand
   staging/pipeline while preserving four-warp ownership, separate `A^T dO`,
   broad local VJP work, exact rounding, and project-owned CUDA.
+
+
+## 2026-08-10 [Codex] Direct accumulator-to-BF16 state publication regresses
+
+**Context**
+
+- Attempt203 is the smallest follow-up to the exact attempt202 all-64-chunk
+  scan. It removes the 16 KiB FP32 `dh_shared` array and publishes each
+  accumulator-owned state element directly to the BF16 WMMA operand tile and
+  BF16 state-history output. The existing accumulator lane/element mapping is
+  reused, and the now-unnecessary FP32-publication barrier is removed.
+- The public ABI, all-64 24-CTA schedule, group-major history layout, separate
+  `A^T dO`, and broad group-parallel local VJP are unchanged. FLA remains an
+  offline reference only.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_203 \
+  --lane optimization --artifact-dir /tmp/kda-check-203 \
+  --extension-cache /tmp/kda-ext-203 --cuda-cache /tmp/kda-cuda-203
+# Exact seed-4101 production-gradient capture plus independent fresh-cache repeat.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_202 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_203 \
+  runs/kda-cuda-development/attempt-00203-fla-all64-direct-bf16-dh-level1 \
+  --level2-order candidate-first
+nsys profile <bounded production chunk-forward/backward runner>
+```
+
+**Artifacts**
+
+- Branch `kda-cuda/fla-all64-direct-bf16-dh-203`, pushed commit
+  `3ee6eeb8788b08ef6aa9cc2bfa4aaa632623b646`; changed source SHA-256
+  `c7f073445268345d6363d1249dd426b396fb40bb8d31da6ab13d084dcadd6379`.
+- Checker summary
+  `3d30ee23fa981f0137622620a8279f464487bc67b09e4048e724a0ca05793dca`;
+  production-gradient manifest
+  `9bd89ef3a48e7a7becdbc62e2082120db27088005234de98d83b7a29d4ad2507`;
+  Level-1 manifest
+  `fce83931c107e716b322f67b9bacd5391e6f611f6a5533b30b4b92b5c8c12967`;
+  operator-profile manifest
+  `40cf45bf8c16afb7efd1dd57ab180b70580e9f462b818bde89f1f20389c309f4`.
+- Append-only development index SHA-256 after attempt203:
+  `a1299be45ce12128a0684ba2bcf0f3e04d3a02659e98e355d6758ac903faece9`.
+
+**Result**
+
+- Ownership 1.0, provenance, profile audit, and runtime FLA freedom pass.
+  Production output and all seven gradients are finite, bitwise equal to
+  attempt190, and bitwise equal in an independent fresh-cache repeat.
+- Level 1 rejects the change. T=4096 forward+backward regresses
+  `8.654592 -> 8.710736 ms` (0.649%) with unchanged 190,712,832-byte peak
+  allocation. T=1024 improves 2.502%, but T=256 regresses 5.095% and therefore
+  exceeds the important-shape guard. T=4096 forward improves 0.177%.
+- The profile explains the failure. Static state-scan shared storage falls
+  `28,672 -> 12,288` bytes (57.143%) and registers fall `146 -> 144` per
+  thread, with no local-memory spill, but the scan grows
+  `0.558464 -> 0.648096 ms` (16.050%). Fragment-lane publication produces a
+  worse access pattern than attempt202's cooperative FP32-to-BF16 pass despite
+  eliminating one barrier and the FP32 shared array.
+- Total one-trace kernel time regresses `7.971296 -> 8.189856 ms` (2.742%) and
+  the span regresses `8.363968 -> 8.635872 ms` (3.251%), with the same 152
+  launches on one stream. These are mechanistic single-trace observations;
+  Level 1 is the decision evidence.
+- No Level 2, sanitizer campaign, statistical confirmation, or LM-quality
+  evaluation ran. No accepted baseline or default changes.
+
+**Next**
+
+- Preserve and reject attempt203. Do not replay direct accumulator-fragment
+  lane mapping for BF16 state/history publication.
+- Keep attempt202 only as the exact all-sequence scheduling boundary. Any
+  further persistent-scan candidate must retain coalesced publication or
+  implement a demonstrably lower-cost FLA-equivalent operand/staging pipeline;
+  reducing shared bytes or barriers alone is not sufficient.
