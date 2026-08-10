@@ -9359,3 +9359,74 @@ uv run --no-sync python scripts/kda_cuda_development.py \
   index space; one fused producer can remove eight launches and duplicate
   index arithmetic while retaining exact equations and attempt 130's bounded
   workspace. Do not rerun attempt 130 unchanged.
+
+## 2026-08-09 [Codex] Attempt 131 fused reverse inputs rejected by T=256 guard
+
+**Context**
+
+- Attempt 131 builds on attempt 130's group-major backward workspace and fuses
+  exact reverse `P/Q` recomputation with BF16 grad-output conversion. The two
+  producers traverse the same group/token/vector index space, so this removes
+  eight launches and their duplicate index arithmetic without changing the
+  equations or increasing the bounded workspace.
+- The specialized call is selected only for exact `(B,T,H,K,V) =
+  (2,4096,3,128,128)` in `chunk.cu`; T=256 and T=1024 continue to execute the
+  unchanged generic fallback. The Level-1 guard remains binding even though
+  the T=256 observation is not a direct execution of the changed kernel.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_131 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact seed-4101 production capture and independent fresh-cache repeat.
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_131 \
+  push -u origin kda-cuda/wy-backward-fused-inputs-131
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_127 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_131 \
+  runs/kda-cuda-development/attempt-00131-backward-fused-inputs-level1 \
+  --level2-order candidate-first
+```
+
+**Artifacts**
+
+- Pushed commit `695adac9041a1c437e47ad2a719bc99d72ec20c6`;
+  backward source SHA-256
+  `ac826f34887157cf6b52727325a8281ca16bd765e9d3c8c2527a74aa4340248a`.
+- Protected checker:
+  `runs/kda-cuda-development/diagnostics/attempt-00131-backward-fused-inputs-protected-checker`,
+  manifest `caf1ef2e30961123782eb043069b7f5924bd1a2f0bac680ba07d9b2ab7be6162`.
+- Production comparison/repeat:
+  `runs/kda-cuda-development/diagnostics/attempt-00131-backward-fused-inputs-gradient`,
+  manifest `6614380f3d66d5bc1b1d592c3d737b56884f319dc14a93640a0b17d130635f66`.
+- Level 1:
+  `runs/kda-cuda-development/attempt-00131-backward-fused-inputs-level1`,
+  manifest `67520c61404fb4534a5d0374f0b7b3a84e9bcd6c3af52dfb422f4bbceb8f7737`.
+
+**Result**
+
+- Output and `dq` are bitwise equal to the frozen accepted-equivalent capture;
+  maximum gradient delta is `2.0559127733577043e-09`, inside the frozen
+  contract. The independent fresh-cache repeat is bitwise exact for output and
+  all seven gradients. Ownership is 1.0, protected runtime/profile audit
+  passes, and runtime remains FLA-free.
+- T=4096 forward+backward improves `11.710976 -> 11.119696 ms` (5.049%),
+  and peak allocation falls 2.569%, from 204,081,664 to 198,838,784 bytes.
+  T=1024 regresses 1.720%, inside the 5% guard, but T=256 regresses
+  `4.110816 -> 4.529600 ms` (10.187%), violating it. The unchanged generic
+  T=256 samples were bimodal, but the contract does not permit an unchanged
+  retest to erase this saved observation.
+- No sanitizer or Level-2 run was performed. This is development evidence
+  only, is not statistically confirmed, and contains no LM-quality evaluation.
+
+**Next**
+
+- Keep exact `f2fa705e22fc97d2f455b4ccabcf42a6a9ab120f` as the accepted
+  development baseline. Attempt 131 is a preserved rejection, not an accepted
+  composition, despite its strong specialized T=4096 result.
+- Capture one bounded profile of the accepted T=256 generic path and make a
+  distinct causal short-path optimization. Continue protecting the short lane
+  needed for small experiments; only a later changed candidate may establish
+  whether the attempt-131 long-path mechanism composes safely.
