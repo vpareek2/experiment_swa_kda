@@ -9079,3 +9079,52 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_127 \
   restored-key/`W` producer or the backward dependency/ownership boundary.
   Continue reporting absolute throughput and the gaps to FLA/45k; do not stop
   at this intermediate acceptance.
+
+## 2026-08-09 [Codex] Attribute accepted attempt-127 forward boundary
+
+**Context**
+
+- Captured one bounded production forward+backward profile of accepted attempt
+  127 to measure the remaining restored-key/`W` producer after qgamma moved
+  into preprocess and `A` moved directly to BF16. This was attribution only;
+  it did not rerun Level 1/2, alter retention, or evaluate quality.
+
+**Commands**
+
+```bash
+PYTHONPATH=/home/veer/Master/projects/experiment_swa_kda_cuda_attempt_127 \
+TORCH_EXTENSIONS_DIR=/tmp/kda127-profile-ext-001 \
+CUDA_CACHE_PATH=/tmp/kda127-profile-cuda-001 \
+nsys profile --trace=cuda,nvtx,osrt --sample=none --cpuctxsw=none \
+  --output=<artifact>/trace \
+  /home/veer/Master/projects/experiment_swa_kda/.venv/bin/python \
+  /tmp/kda033_nsys.py
+nsys stats --report cuda_gpu_kern_sum --format csv <trace>
+```
+
+**Artifacts**
+
+- Production profile:
+  `runs/kda-cuda-development/diagnostics/attempt-00127-production-profile`,
+  manifest `5980fd2d5c5b4ab037515c438867e1855ac73898ea2ce34f80706bde719cece0`.
+- Append-only attempt/reference index has 133 valid JSONL entries, SHA-256
+  `b8a125652a8f8877ea13daacf01037c8599216feb299295d208b3ce70d3b79fa`.
+
+**Result**
+
+- The remaining restored-key/`W` producer averages 0.281680 ms versus attempt
+  125's combined vector/matrix producer at 0.436864 ms, a 35.522% reduction.
+- The persistent scan averages 1.064640 ms. Scan plus remaining pack is
+  1.346320 ms versus attempt 125's 1.579104 ms, a 14.742% boundary reduction.
+  The remaining pack is still 26.458% of scan time. Forward preprocess averages
+  0.435808 ms, only 0.023600 ms above attempt 125's saved 0.412208 ms.
+- The first wrapper created only a candidate-relative empty directory and then
+  stopped at the missing coordinator-absolute log path before `nsys`, Python,
+  build, or GPU work. It is invalid and excluded.
+
+**Next**
+
+- From accepted `f2fa705...`, test folding bounded restored-key packing into the
+  final pair-builder CTA while leaving only the simple `W` conversion as a
+  separate pass. Preserve FP32 pair inputs, attempt-125 async alias barriers,
+  and explicit initialization of every `A` tile.
