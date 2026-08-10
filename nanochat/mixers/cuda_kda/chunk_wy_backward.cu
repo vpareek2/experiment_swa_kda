@@ -1970,29 +1970,51 @@ __global__ void nanochat_kda_wy_backward_complete_four_warp_vjp_c64_kernel(
       wmma::mma_sync(
           dQ_fragment, t_fragment, dw_inner_fragment, dQ_fragment);
     }
-    wmma::store_matrix_sync(
-        result + row_start * kStrip, dQ_fragment, kStrip,
-        wmma::mem_row_major);
-    __syncthreads();
 
-    if (threadIdx.x < kChunk) {
-      const int row = threadIdx.x;
-      float beta_contribution = 0.0f;
+    // Consume the fixed SM121 accumulator layout in registers. As for dP,
+    // each four-lane subgroup owns two rows and all sixteen columns. This
+    // avoids the dQ shared-memory store/reload and its producer barrier.
+    float beta_lower = 0.0f;
+    float beta_upper = 0.0f;
+#pragma unroll
+    for (int element = 0; element < dQ_fragment.num_elements; ++element) {
+      const int local_row = (lane >> 2) + ((element & 2) ? 8 : 0);
+      const int local_key = ((lane & 3) << 1) + (element & 1) +
+          ((element & 4) ? 8 : 0);
+      const int row = row_start + local_row;
+      const int key = key_start + local_key;
+      const int64_t local =
+          (static_cast<int64_t>(local_n) * kChunk + row) * kDim + key;
+      const int64_t source = chunk_vector_index(n, row, key);
+      const float dQ_value = dQ_fragment.x[element];
+      const float exp_g = expf(prefix_g[source]);
       const float beta_row = beta[static_cast<int64_t>(n) * kChunk + row];
-      for (int local_key = 0; local_key < kStrip; ++local_key) {
-        const int key = key_start + local_key;
-        const float dQ_value = result[row * kStrip + local_key];
-        const int64_t local =
-            (static_cast<int64_t>(local_n) * kChunk + row) * kDim + key;
-        const int64_t source = chunk_vector_index(n, row, key);
-        const float exp_g = expf(prefix_g[source]);
-        dkhat[local] += dQ_value * beta_row * exp_g;
-        dprefix[local] += dQ_value * beta_row * exp_g * khat[source];
-        beta_contribution += dQ_value * exp_g * khat[source];
+      dkhat[local] += dQ_value * beta_row * exp_g;
+      dprefix[local] += dQ_value * beta_row * exp_g * khat[source];
+      const float contribution = dQ_value * exp_g * khat[source];
+      if (element & 2) {
+        beta_upper += contribution;
+      } else {
+        beta_lower += contribution;
       }
-      dbeta[static_cast<int64_t>(local_n) * kChunk + row] +=
-          beta_contribution;
     }
+#pragma unroll
+    for (int offset = 2; offset > 0; offset >>= 1) {
+      beta_lower += __shfl_down_sync(0xffffffffu, beta_lower, offset, 4);
+      beta_upper += __shfl_down_sync(0xffffffffu, beta_upper, offset, 4);
+    }
+    if ((lane & 3) == 0) {
+      const int local_row = lane >> 2;
+      const int lower_row = row_start + local_row;
+      const int upper_row = lower_row + 8;
+      dbeta[static_cast<int64_t>(local_n) * kChunk + lower_row] +=
+          beta_lower;
+      dbeta[static_cast<int64_t>(local_n) * kChunk + upper_row] +=
+          beta_upper;
+    }
+
+    // The end-prefix reduction updates row 63 from warp 0, so retain this
+    // barrier until every owning warp has completed its direct dQ update.
     __syncthreads();
 
     if (threadIdx.x < kStrip) {
