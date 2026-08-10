@@ -11629,3 +11629,62 @@ uv run --no-sync python scripts/kda_cuda_development.py \
 - The next FLA-matching change should reduce the broad kernel's 130-register
   lifetime or fuse an adjacent state/pack boundary, aiming for a multi-tenth-ms
   operator reduction before another Level 2.
+
+## 2026-08-10 [Codex] Eight-warp adjoint lowers registers but fails the guards
+
+**Context**
+
+- Attempt164 starts from attempt162 and splits the persistent 64x64 inverse
+  adjoint across eight warps: each warp owns two column tiles instead of four.
+  Four warps continue to own row-local dP/dQ/state products. This tests whether
+  lowering the broad VJP's compiled register lifetime can improve occupancy on
+  GB10 without changing any tile's arithmetic order.
+
+**Commands**
+
+```bash
+# One seed-4101 production capture and matched Level 1 versus attempt162.
+# Inspect compiled resources with cuobjdump; no additional GPU profile.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_162 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_164 \
+  runs/kda-cuda-development/attempt-00164-eight-warp-adjoint-level1 \
+  --level2-order candidate-first
+```
+
+**Artifacts**
+
+- Branch `kda-cuda/eight-warp-adjoint-164`, pushed commit
+  `0f1d4e0a541a92612fb6cb168bc11466bacd60a7`; source SHA-256
+  `d46662f4b810ec8e4baf614167c558e4af9b9df6a96fcef39c922950b47632e6`.
+- Diagnostic manifest
+  `9ae1e5ca87446b49fb17386f5265bbaa62fd910affc16643f24de32eb1d4d4e3`;
+  Level-1 manifest
+  `89348b4ba946f1c776a7ca1a624c19a2377b80678e2b11eca95a3d492cd63678`.
+- The append-only index now has 186 rows and hashes to
+  `9042ada35246c45badfef0ebaec28511e264cce93249182940d9b51e7d88f5a6`.
+
+**Result**
+
+- Output and every gradient are bitwise equal to attempt162; the committed
+  runtime audit completes and remains FLA-free.
+- Compiled register allocation falls from 130 to 86 registers/thread with the
+  same 25,600-byte static shared allocation. The mechanism therefore achieves
+  its direct resource objective.
+- T=4096 forward+backward improves `10.095936 -> 9.840896 ms` (2.526%),
+  below the three-percent advancement gate. T=1024 improves 3.825%, but T=256
+  regresses 5.107%, just beyond the five-percent important-shape guard.
+- The larger 256-thread CTA underuses warps 4-7 during row-local phases, so the
+  register benefit does not yield a robust lane improvement. No profile,
+  checker, sanitizer, repeat, or Level 2 ran. This is not statistical or
+  LM-quality evidence.
+
+**Next**
+
+- Return to attempt162 as the cumulative scaffold and retain attempt161 as the
+  accepted baseline. Do not pursue a larger broad-VJP CTA without distributing
+  all row-local work and eliminating the resulting partial reductions.
+- Move to the adjacent pipeline boundary: combine a state/reverse/pack family
+  so whole global histories or launch groups disappear. A multi-kernel
+  lifetime change is now more likely to close the 7,696 tok/s observed gap than
+  further tuning one already-improved VJP.
