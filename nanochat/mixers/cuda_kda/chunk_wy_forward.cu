@@ -247,14 +247,23 @@ __global__ void nanochat_kda_wy_build_pair_wmma_c64_kernel(
     const float* prefix_g,
     const float* beta,
     float* M,
-    __nv_bfloat16* A,
-    int target_start,
-    int source_start) {
+    __nv_bfloat16* A) {
   namespace wmma = nvcuda::wmma;
-  const int n = blockIdx.x;
-  if (n >= kChunkRows) {
+  constexpr int kTileCount = kChunk / kMatrixTile;
+  constexpr int kPairCount = kTileCount * (kTileCount + 1) / 2;
+  const int pair = blockIdx.x / kChunkRows;
+  const int n = blockIdx.x - pair * kChunkRows;
+  if (pair >= kPairCount || n >= kChunkRows) {
     return;
   }
+  int target_tile = 0;
+  int source_tile = pair;
+  while (source_tile > target_tile) {
+    source_tile -= target_tile + 1;
+    ++target_tile;
+  }
+  const int target_start = target_tile * kMatrixTile;
+  const int source_start = source_tile * kMatrixTile;
   constexpr int kTileElements = kMatrixTile * kDim;
   __shared__ __nv_bfloat16 left[2 * kTileElements];
   __shared__ __nv_bfloat16 right[kTileElements];
@@ -966,21 +975,15 @@ at::Tensor nanochat_kda_chunk_wy_forward_c64(
       P.data_ptr<float>(), Q.data_ptr<float>(), lower_bound, scale);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 
-  for (int target_start = 0; target_start < kChunk;
-       target_start += kMatrixTile) {
-    for (int source_start = 0; source_start <= target_start;
-         source_start += kMatrixTile) {
-      nanochat_kda_wy_build_pair_wmma_c64_kernel<<<
-          kChunkRows, kThreads, 0, stream>>>(
-          qbar.data_ptr<float>(), khat.data_ptr<float>(),
-          prefix_g.data_ptr<float>(), beta.data_ptr<float>(),
-          M.data_ptr<float>(),
-          reinterpret_cast<__nv_bfloat16*>(A.data_ptr<at::BFloat16>()),
-          target_start,
-          source_start);
-      C10_CUDA_KERNEL_LAUNCH_CHECK();
-    }
-  }
+  constexpr int kPairCount =
+      (kChunk / kMatrixTile) * (kChunk / kMatrixTile + 1) / 2;
+  nanochat_kda_wy_build_pair_wmma_c64_kernel<<<
+      kPairCount * kChunkRows, kThreads, 0, stream>>>(
+      qbar.data_ptr<float>(), khat.data_ptr<float>(),
+      prefix_g.data_ptr<float>(), beta.data_ptr<float>(),
+      M.data_ptr<float>(),
+      reinterpret_cast<__nv_bfloat16*>(A.data_ptr<at::BFloat16>()));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
 
   nanochat_kda_wy_unit_lower_solve_c64_kernel<<<
       kChunkRows, kChunk, 0, stream>>>(M.data_ptr<float>(), T.data_ptr<float>());
