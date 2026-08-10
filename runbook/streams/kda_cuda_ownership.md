@@ -10323,3 +10323,63 @@ uv run --no-sync python scripts/kda_cuda_development.py \
   actual tensor-core instruction and register topology. Use that evidence to
   select either a measured inline-PTX path or a true compact-reverse-scan then
   broad-local-VJP boundary; do not replay these CTA layouts unchanged.
+
+## 2026-08-09 [Codex] Attempt 140 validates FLA boundary separation but fails memory
+
+**Context**
+
+- Inspection of the exact preserved FLA cubin identified a `64 x 6` grid of
+  two-warp CTAs, 255 registers/thread, 15,360 bytes dynamic shared memory, and
+  180 BF16 HMMA instructions per CTA. It uses ordinary `mma.sync`, so inline
+  PTX is not the missing mechanism; complete forward/reverse chunk histories
+  and a register-resident local VJP are the decisive boundary.
+- Attempt 140 starts exactly from accepted attempt 127. It stores incoming
+  forward and reverse chunk states in BF16, finishes the compact reverse scan
+  before local VJP work, and preserves per-chunk `dZ`. The second phase still
+  uses the existing dense group VJP and intentionally recomputes operands.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check --lane optimization \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_140 \
+  <isolated artifact/cache arguments>
+# Frozen seed-4101 production capture plus independent fresh-cache repeat.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_127 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_140 \
+  runs/kda-cuda-development/attempt-00140-fla-boundary-histories-level1 \
+  --level2-order baseline-first
+```
+
+**Artifacts**
+
+- Pushed commit `50b241ad16055c5b3f558fa6b103cc1ff100869a`; source SHA-256
+  `191e35f384282475de21efd89bc0cf497cb7641b90076402010b64a60e7d25c6`.
+- Protected checker manifest `97df6cc45ac417004ba05c62057a78cd9b7b381b7d011ffdcb054e4bddcdd4c7`.
+- Production comparison/repeat manifest `af43699efb301e16828fac5f077b3f8517372183f4dcdd77cec20fa1596a1dba`.
+- Level-1 manifest `97df40844c3bb0826bd1fe5a8064c08ff02a2fa6fea5780b4690edc67ef9690d`.
+- The first capture failed before CUDA execution because relative source paths
+  resolved against the coordinator; its empty directory is preserved as
+  `invalid-source-root-001` and excluded from numeric evidence.
+
+**Result**
+
+- Ownership 1.0, runtime/profile audit, and runtime FLA freedom pass. Output is
+  bitwise equal, maximum frozen gradient delta is `2.459273673593998e-09`,
+  and every fresh-cache repeat tensor is bitwise exact.
+- T=4096 forward+backward improves `12.011088 -> 11.665168 ms` (2.880%) even
+  with duplicated operand construction. Forward alone improves 2.255%.
+  However, peak allocation rises `204,081,664 -> 228,461,056` bytes (11.946%),
+  so Level 1 rejects the scaffold. T=1024 regresses 2.184%.
+- No sanitizer or Level 2 ran. This is not statistically confirmed and has no
+  LM-quality result.
+
+**Next**
+
+- Keep accepted attempt 127. Use attempt 140 only as the correct equation and
+  scheduling scaffold for the next candidate.
+- Implement the observed two-warp chunk-by-head local VJP and eliminate the
+  expanded FP32 H/dH tensors plus dense dR/dE/dW/dP/dQ workspaces. Those
+  removals must recover about 24.4 MB and turn the scaffold's 2.88% gain into
+  a memory-safe improvement before any Level 2 run.
