@@ -14582,3 +14582,74 @@ nsys profile --trace=cuda,nvtx,osrt --sample=none --cpuctxsw=none \
   scaffold only after preparing compact qg/kg once outside the 24-CTA scan.
   The larger remaining win must still fuse or replace the forward-history and
   colored/intra boundaries; launch count alone is not the thesis.
+
+
+## 2026-08-10 [Codex] Rejected prepared full-sequence reverse
+
+**Context**
+
+- Attempt206 is the single measured correction to attempt205: qg/kg are
+  prepared once in a broad grouped BF16 pack instead of recomputing their
+  exponentials independently in every value-strip owner. Lifetimes stage P in
+  dv, qg/kg in draw_gate/dq, and W in dk; after the scan, P is copied to its
+  consumer buffer and Q/T are compacted. Attempt205's full-sequence reverse and
+  four 16-chunk local consumers otherwise remain intact.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_206 \
+  --lane optimization --artifact-dir /tmp/kda-check-206-dev \
+  --extension-cache /tmp/kda-ext-206-dev --cuda-cache /tmp/kda-cuda-206-dev
+# Two fresh-cache production-gradient captures, then protected Level 1.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_204 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_206 \
+  runs/kda-cuda-development/attempt-00206-fla-prepared-fullseq-reverse-level1 \
+  --level2-order baseline-first
+nsys profile --trace=cuda,nvtx,osrt --sample=none --cpuctxsw=none \
+  --force-overwrite=true --output=<attempt206-profile>/trace \
+  <coordinator-python> <attempt206-profile>/runner.py
+```
+
+**Artifacts**
+
+- Pushed branch `kda-cuda/fla-prepared-fullseq-reverse-206`, commit
+  `ca124bddcd672f738930c168bdc2d9101258882f`; source SHA-256
+  `44f9658adce8522ec8007f743b7cda1f79a398455f755faf5bd9a4f2e25d572a`.
+- Checker summary
+  `ace768216112cff1a027cca45f15f4f15591f545ede3553ce67c464b73a060da`;
+  gradient manifest
+  `63e53837db5d842b97d0f1f913de2b6fb598d99d58d87f1737126a1e4fc48bf4`;
+  Level-1 manifest
+  `975f617e055dab6dbf4e28274fbdf679a64394aa5d8929f033053d1368281088`;
+  profile manifest
+  `4843211fa8e302ad6743084b1955e8c1e8fd000fc40a559783c706143f35a53e`.
+- Append-only index SHA-256 after attempt206:
+  `a7f71190b673879e24b9b5b9021ae1cafcd808dd930df18ea8bf55a2298ce56a`.
+
+**Result**
+
+- All gradients are finite and deterministic across fresh caches; output and
+  dq are bitwise equal to attempt204. Maximum absolute delta is
+  `1.2281816452741623e-08`, inside the frozen tolerance. Ownership is 1.0 and
+  runtime remains FLA-free.
+- Preparing qg/kg succeeds mechanistically: the full-sequence reverse falls
+  `1.941824 -> 0.724416 ms`. The profile is 96 launches, 8.039488 ms summed
+  kernels, and 8.342176 ms span. It nearly recovers attempt205's failure, but
+  remains slower than attempt204's 7.644896/8.048416 ms.
+- Level 1 rejects: T=4096 forward+backward is
+  `8.507744 -> 8.731776 ms`, a 2.633% regression. Peak allocation improves
+  slightly to 0.99619x baseline. No Level 2 or sanitizer campaign was spent.
+- The remaining 24-CTA V32 state scan is 0.310880 ms slower than attempt204's
+  grouped scan total. The four 16-chunk consumer slabs also make combined
+  colored/dD/dA/finalize work roughly 0.26 ms slower than attempt204.
+
+**Next**
+
+- Preserve attempt206 as rejected and retain attempt204 as baseline. Test the
+  prepared full-sequence recurrence with 48 V16 owners; this changes state
+  parallelism without reviving two-warp ownership. Independently, do not assume
+  wider 16-chunk consumer slabs are faster merely because they remove launches:
+  either return to eight chunks or fuse their producer/consumer work.
