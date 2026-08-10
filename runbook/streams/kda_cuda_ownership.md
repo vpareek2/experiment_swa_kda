@@ -14801,3 +14801,37 @@ uv run --no-sync python scripts/kda_cuda_development.py \
   attempt204 and target a different dense boundary, while preserving separate
   A^T dO, FP32 group checkpoints, stable compact operands, and full production
   initialization bounds.
+
+
+## 2026-08-10 [Codex] GB10 split forward output is exact but loses matched Level 1
+
+**Context**
+
+- Attempt210 starts from accepted attempt204 and tests a GB10-specific forward boundary: a 24-CTA dependency-carrying state recurrence publishes incoming `H` and `Z` history, then a separate 384-CTA chunk-parallel kernel computes the output. The candidate changes only `nanochat/mixers/cuda_kda/chunk_wy_forward.cu`; FLA remains an offline equation/scheduling reference.
+- The implementation uses `M` backing plus the otherwise-unused second BF16 stride of `Q` for incoming-H history and `P` backing for Z history. An initial batch-1-only Q-history alias defect was found and repaired before evidence runs.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_210 --lane optimization <isolated artifacts/caches>
+# Two independent seed-4101 B=2/H=3/T=4096 production-gradient captures.
+compute-sanitizer --tool {memcheck,initcheck,synccheck} <production-shape runner>
+nsys profile --trace=cuda,nvtx,osrt --sample=none --cpuctxsw=none <production-shape runner>
+uv run --no-sync python scripts/kda_cuda_development.py /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_204 /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_210 runs/kda-cuda-development/attempt-00210-gb10-split-forward-output-level1 --level2-order baseline-first
+```
+
+**Artifacts**
+
+- Branch `kda-cuda/gb10-split-forward-output-210`, pushed commit `a3723a38c84601fc38650fc7e3d44fa9990f2945`; source SHA-256 `f71a4b6025d0aa242f51aba0978d46af66370f181e69413f856c2bf661bcb290`.
+- Checker manifest `14a83d01579ac1c8ec27eb757c013f847384368cbf5eb1746e1f6767abedc8f5` and summary `52f0d4792ae47c36fc50236489eb4eeeada934e771c6977a7e8f07cfb0acf4b7`; production-gradient manifest `6419c77fae6c082cd9b17b5a7c45b3f2b1e88391cb0cbcefb5e4b9334a034228`; sanitizer manifest `9b25c7a84e9946c26cd04ee7ea33048bdad6ca6238e56b6d287b1cd11e861d28`; profile manifest `ab014e22f9d3d351d97ed007c4c6c58f699b0169452a9bb18c3fe83b55a0989f`; Level-1 manifest `aa7e87c02539d330a923a158db521b7c4b8d7bf083163a0a7ff8ec4549294977`.
+- Append-only development index SHA-256 after attempt210: `86d67fc38711a0a09ff9f22325a6cd2cef3c0b99d090cd5cdd403aed1f122669`.
+
+**Result**
+
+- Ownership 1.0 and runtime/profile FLA freedom pass. Production output and all gradients are finite, bitwise equal to attempt204, and bitwise equal across the independent fresh-cache repeat. Production memcheck, initcheck, and synccheck each report zero errors.
+- The state kernel is one 24-CTA/256-thread launch at 0.835456 ms; the output kernel is one 384-CTA/128-thread launch at 0.185952 ms. The full profile has 151 launches, 7.564864 ms summed kernels, and a 7.971936 ms span, mechanically better than attempt204's 150 / 7.644896 / 8.048416.
+- Matched Level 1 rejects the boundary: T=4096 forward+backward regresses `8.247040 -> 8.302624 ms` (0.674%), while forward regresses 1.610%. No Level 2, statistical confirmation, or LM-quality evaluation ran.
+
+**Next**
+
+- Preserve attempt210 as negative evidence and retain attempt204. Output parallelism does not repay global H/Z publication and rereads. Target the 24-owner recurrence itself: translate the retained FLA block64/BV32 register-held state schedule with GB10-supported warp `mma.sync`/WMMA, not unavailable `wgmma` or `tcgen05`. Do not repeat a history-only split.
