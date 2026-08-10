@@ -1,6 +1,7 @@
 """Minimal loader and provenance for the complete naive project CUDA backend."""
 from __future__ import annotations
 
+import os
 from typing import Any
 
 _RECEIPT: dict[str, object] | None = None
@@ -33,10 +34,13 @@ def prepare() -> None:
         return
     from nanochat.research.cuda_build import build_cuda_extension
 
+    extra_cuda_cflags = ["--use_fast_math"]
+    if os.environ.get("NANOCHAT_DISABLE_SELECTIVE_PTX") == "1":
+        extra_cuda_cflags.append("-DNANOCHAT_DISABLE_SELECTIVE_PTX=1")
     _RECEIPT = build_cuda_extension(
         list(_SOURCES),
         name="nanochat_kda_complete_naive",
-        extra_cuda_cflags=("--use_fast_math",),
+        extra_cuda_cflags=tuple(extra_cuda_cflags),
     )
 
 
@@ -86,5 +90,23 @@ def provenance() -> dict[str, Any]:
         "schema_version": 1,
         "components": components,
         "build": None if _RECEIPT is None else dict(_RECEIPT),
-        "selective_ptx": [],
+        "selective_ptx": [{
+            "source": _CHUNK_WY_FORWARD_SOURCE,
+            "rationale": (
+                "Use documented warp mma.sync m16n8k16 and ldmatrix only for "
+                "the GB10 register-held forward state recurrence"
+            ),
+            "architecture_guard": (
+                "The project extension builds a native sm_121 image with CUDA "
+                "13.x; the selected instructions require baseline sm_80+"
+            ),
+            "cuda_fallback": (
+                "NANOCHAT_DISABLE_SELECTIVE_PTX=1 builds the exact standard-CUDA "
+                "WMMA shared-state recurrence and launches its 256-thread CTA"
+            ),
+            "profile_evidence": (
+                "runs/kda-cuda-development/profiles/attempt-00211-gb10-register-"
+                "forward-state-profile-001"
+            ),
+        }],
     }

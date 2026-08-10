@@ -658,6 +658,386 @@ __device__ __forceinline__ const __nv_bfloat16* wy_forward_h_value_half(
       kChunk * kDim + value_start - kHalfValues;
 }
 
+#if !defined(NANOCHAT_DISABLE_SELECTIVE_PTX)
+__device__ __forceinline__ uint32_t wy_pack_bf16_pair(
+    float first, float second) {
+  union Packed {
+    __nv_bfloat162 values;
+    uint32_t bits;
+  } packed;
+  packed.values = __halves2bfloat162(
+      __float2bfloat16_rn(first), __float2bfloat16_rn(second));
+  return packed.bits;
+}
+
+__device__ __forceinline__ void wy_mma_bf16_m16n8k16(
+    uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3,
+    uint32_t b0, uint32_t b1,
+    float& d0, float& d1, float& d2, float& d3) {
+  asm volatile(
+      "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
+      "{%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, "
+      "{%0, %1, %2, %3};\n"
+      : "+f"(d0), "+f"(d1), "+f"(d2), "+f"(d3)
+      : "r"(a0), "r"(a1), "r"(a2), "r"(a3),
+        "r"(b0), "r"(b1));
+}
+
+__device__ __forceinline__ void wy_ldmatrix_a_m16k16(
+    const __nv_bfloat16* tile, int pitch,
+    uint32_t& a0, uint32_t& a1, uint32_t& a2, uint32_t& a3) {
+  const int lane = threadIdx.x % warpSize;
+  const int matrix = lane / 8;
+  const int row = lane % 8;
+  // ldmatrix.x4 matrix order for an MMA row-major A operand is
+  // top-left, bottom-left, top-right, bottom-right.
+  const int row_offset = (matrix & 1) * 8;
+  const int column_offset = (matrix / 2) * 8;
+  const unsigned address = static_cast<unsigned>(__cvta_generic_to_shared(
+      tile + (row_offset + row) * pitch + column_offset));
+  asm volatile(
+      "ldmatrix.sync.aligned.m8n8.x4.shared.b16 "
+      "{%0, %1, %2, %3}, [%4];\n"
+      : "=r"(a0), "=r"(a1), "=r"(a2), "=r"(a3)
+      : "r"(address));
+}
+
+// GB10 exposes warp mma.sync but not the data-center Blackwell TMEM/TCGen05
+// programming model. Two warps split the BV32 value strip into BV16 owners.
+// Each warp keeps all 128x16 FP32 state elements in the register layout used
+// by the PTX m16n8 accumulator/B operand. Only the W/E master panel and BF16 Z
+// cross a shared-memory boundary. This mirrors FLA's 64-thread register-state
+// topology without linking or importing any reference implementation.
+__global__ __launch_bounds__(64, 1)
+void nanochat_kda_chunk_wy_forward_state_c64_kernel(
+    const __nv_bfloat16* restored_k,
+    const float* prefix_g,
+    const float* U,
+    const __nv_bfloat16* W,
+    __nv_bfloat16* h_history_lo,
+    __nv_bfloat16* h_history_hi,
+    __nv_bfloat16* z_history,
+    float* group_state_checkpoints) {
+  constexpr int kValueTile = 32;
+  constexpr int kWarpValues = 16;
+  constexpr int kMmaValues = 8;
+  constexpr int kKeyTiles = kDim / 16;
+  constexpr int kRowTiles = kChunk / 16;
+  constexpr int kWPitch = 136;
+  constexpr int kEPitch = 72;
+  constexpr int kZPitch = 72;
+  constexpr int kPanelElements = kDim * kEPitch;
+
+  const int owner = blockIdx.x;
+  if (owner >= kBatch * kHeads * (kDim / kValueTile)) {
+    return;
+  }
+  const int value_tile = owner % (kDim / kValueTile);
+  const int recurrence = owner / (kDim / kValueTile);
+  const int value_start = value_tile * kValueTile;
+  const int warp = threadIdx.x / warpSize;
+  const int lane = threadIdx.x % warpSize;
+  const int group = lane / 4;
+  const int thread = lane % 4;
+
+  // B-fragment register layout for 16x8 col-major operands. Per key/value
+  // fragment each lane owns rows (2t, 2t+1, 2t+8, 2t+9), column group.
+  float state[kKeyTiles][2][4];
+#pragma unroll
+  for (int key_tile = 0; key_tile < kKeyTiles; ++key_tile) {
+#pragma unroll
+    for (int value_half = 0; value_half < 2; ++value_half) {
+#pragma unroll
+      for (int element = 0; element < 4; ++element) {
+        state[key_tile][value_half][element] = 0.0f;
+      }
+    }
+  }
+
+  // W is 64x128 while restored E^T is 128x64; both occupy 16 KiB and
+  // therefore share one panel. Z is 64x32 BF16 (4 KiB).
+  __shared__ __align__(16) __nv_bfloat16 w_panel[kChunk * kWPitch];
+  __shared__ __align__(16) __nv_bfloat16 e_panel[kDim * kEPitch];
+  __shared__ __align__(16) __nv_bfloat16 z_shared[kValueTile * kZPitch];
+  __shared__ float decay[kDim];
+
+  for (int chunk_id = 0; chunk_id < kChunks; ++chunk_id) {
+    const int n = recurrence * kChunks + chunk_id;
+    __nv_bfloat16* h_value_half = wy_forward_h_value_half(
+        h_history_lo, h_history_hi, n, value_start);
+
+    // Start both read-only master panels before publishing H. The retained H
+    // history stores provide enough independent work to cover much of the
+    // two-panel transfer, matching the reference's two-stage async topology.
+    const __nv_bfloat16* w_source = W + chunk_vector_index(n, 0, 0);
+    for (int vector = threadIdx.x;
+         vector < kChunk * (kDim / 8); vector += blockDim.x) {
+      const int row = vector / (kDim / 8);
+      const int column_vector = vector - row * (kDim / 8);
+      __pipeline_memcpy_async(
+          w_panel + row * kWPitch + column_vector * 8,
+          w_source + row * kDim + column_vector * 8, 16);
+    }
+    const __nv_bfloat16* e_source =
+        restored_k + packed_strided_transpose_index(n, 0, 0);
+    for (int vector = threadIdx.x;
+         vector < kDim * (kChunk / 8); vector += blockDim.x) {
+      const int key = vector / (kChunk / 8);
+      const int source_vector = vector - key * (kChunk / 8);
+      __pipeline_memcpy_async(
+          e_panel + key * kEPitch + source_vector * 8,
+          e_source + key * kChunk + source_vector * 8, 16);
+    }
+    __pipeline_commit();
+
+    // Publish the exact BF16 incoming state consumed by the split output.
+#pragma unroll
+    for (int key_tile = 0; key_tile < kKeyTiles; ++key_tile) {
+#pragma unroll
+      for (int value_half = 0; value_half < 2; ++value_half) {
+        const int key_start = key_tile * 16;
+        const int value_base = warp * kWarpValues + value_half * kMmaValues;
+        const int key0 = key_start + 2 * thread;
+        const int key1 = key0 + 1;
+        const int key2 = key0 + 8;
+        const int key3 = key0 + 9;
+        const int value = value_base + group;
+        h_value_half[static_cast<int64_t>(key0) * (kDim / 2) + value] =
+            __float2bfloat16_rn(state[key_tile][value_half][0]);
+        h_value_half[static_cast<int64_t>(key1) * (kDim / 2) + value] =
+            __float2bfloat16_rn(state[key_tile][value_half][1]);
+        h_value_half[static_cast<int64_t>(key2) * (kDim / 2) + value] =
+            __float2bfloat16_rn(state[key_tile][value_half][2]);
+        h_value_half[static_cast<int64_t>(key3) * (kDim / 2) + value] =
+            __float2bfloat16_rn(state[key_tile][value_half][3]);
+      }
+    }
+
+    // Complete the async W/E panels after the independent H publication.
+    __pipeline_wait_prior(0);
+    __syncthreads();
+
+    // Z = U - W H. Each warp owns the same four token tiles for its BV16
+    // strip and holds eight independent m16n8 accumulators.
+    float wh[kRowTiles][2][4];
+#pragma unroll
+    for (int row_tile = 0; row_tile < kRowTiles; ++row_tile) {
+#pragma unroll
+      for (int value_half = 0; value_half < 2; ++value_half) {
+#pragma unroll
+        for (int element = 0; element < 4; ++element) {
+          wh[row_tile][value_half][element] = 0.0f;
+        }
+      }
+    }
+#pragma unroll
+    for (int key_tile = 0; key_tile < kKeyTiles; ++key_tile) {
+#pragma unroll
+      for (int row_tile = 0; row_tile < kRowTiles; ++row_tile) {
+        const int row_start = row_tile * 16;
+        const int key_start = key_tile * 16;
+        uint32_t a0, a1, a2, a3;
+        wy_ldmatrix_a_m16k16(
+            w_panel + row_start * kWPitch + key_start, kWPitch,
+            a0, a1, a2, a3);
+#pragma unroll
+        for (int value_half = 0; value_half < 2; ++value_half) {
+          const uint32_t b0 = wy_pack_bf16_pair(
+              state[key_tile][value_half][0],
+              state[key_tile][value_half][1]);
+          const uint32_t b1 = wy_pack_bf16_pair(
+              state[key_tile][value_half][2],
+              state[key_tile][value_half][3]);
+          wy_mma_bf16_m16n8k16(
+              a0, a1, a2, a3, b0, b1,
+              wh[row_tile][value_half][0],
+              wh[row_tile][value_half][1],
+              wh[row_tile][value_half][2],
+              wh[row_tile][value_half][3]);
+        }
+      }
+    }
+
+#pragma unroll
+    for (int row_tile = 0; row_tile < kRowTiles; ++row_tile) {
+#pragma unroll
+      for (int value_half = 0; value_half < 2; ++value_half) {
+        const int row_start = row_tile * 16;
+        const int value_base = warp * kWarpValues + value_half * kMmaValues;
+        const int row0 = row_start + group;
+        const int row1 = row0 + 8;
+        const int value0 = value_base + 2 * thread;
+        const int value1 = value0 + 1;
+        const int64_t u00 = chunk_vector_index(n, row0, value_start + value0);
+        const int64_t u01 = chunk_vector_index(n, row0, value_start + value1);
+        const int64_t u10 = chunk_vector_index(n, row1, value_start + value0);
+        const int64_t u11 = chunk_vector_index(n, row1, value_start + value1);
+        const float z00 = U[u00] - wh[row_tile][value_half][0];
+        const float z01 = U[u01] - wh[row_tile][value_half][1];
+        const float z10 = U[u10] - wh[row_tile][value_half][2];
+        const float z11 = U[u11] - wh[row_tile][value_half][3];
+        const __nv_bfloat16 bz00 = __float2bfloat16_rn(z00);
+        const __nv_bfloat16 bz01 = __float2bfloat16_rn(z01);
+        const __nv_bfloat16 bz10 = __float2bfloat16_rn(z10);
+        const __nv_bfloat16 bz11 = __float2bfloat16_rn(z11);
+        z_shared[value0 * kZPitch + row0] = bz00;
+        z_shared[value1 * kZPitch + row0] = bz01;
+        z_shared[value0 * kZPitch + row1] = bz10;
+        z_shared[value1 * kZPitch + row1] = bz11;
+        z_history[u00] = bz00;
+        z_history[u01] = bz01;
+        z_history[u10] = bz10;
+        z_history[u11] = bz11;
+      }
+    }
+    __syncthreads();
+
+    // E^T has been resident since the chunk-start async panel load.
+    if (warp == 0) {
+#pragma unroll
+      for (int key = lane; key < kDim; key += warpSize) {
+        decay[key] = expf(prefix_g[
+            chunk_vector_index(n, kChunk - 1, key)]);
+      }
+    }
+
+    // Hnext = E^T Z. Keep the complete 128x16 result in accumulator registers
+    // so the four source tiles have 16 independent dependency chains.
+    float next[kKeyTiles][2][4];
+#pragma unroll
+    for (int key_tile = 0; key_tile < kKeyTiles; ++key_tile) {
+#pragma unroll
+      for (int value_half = 0; value_half < 2; ++value_half) {
+#pragma unroll
+        for (int element = 0; element < 4; ++element) {
+          next[key_tile][value_half][element] = 0.0f;
+        }
+      }
+    }
+#pragma unroll
+    for (int source_tile = 0; source_tile < kRowTiles; ++source_tile) {
+#pragma unroll
+      for (int key_tile = 0; key_tile < kKeyTiles; ++key_tile) {
+        const int key_start = key_tile * 16;
+        const int source_start = source_tile * 16;
+        uint32_t a0, a1, a2, a3;
+        wy_ldmatrix_a_m16k16(
+            e_panel + key_start * kEPitch + source_start, kEPitch,
+            a0, a1, a2, a3);
+#pragma unroll
+        for (int value_half = 0; value_half < 2; ++value_half) {
+          const int value_base = warp * kWarpValues + value_half * kMmaValues;
+          const int source0 = source_start + 2 * thread;
+          const int source1 = source0 + 1;
+          const int source2 = source0 + 8;
+          const int source3 = source0 + 9;
+          const int value = value_base + group;
+          // Value-first padding makes the two adjacent source rows a single
+          // aligned 32-bit B register and shifts successive value rows by
+          // four shared-memory banks.
+          const uint32_t zb0 = *reinterpret_cast<const uint32_t*>(
+              z_shared + value * kZPitch + source0);
+          const uint32_t zb1 = *reinterpret_cast<const uint32_t*>(
+              z_shared + value * kZPitch + source2);
+          wy_mma_bf16_m16n8k16(
+              a0, a1, a2, a3, zb0, zb1,
+              next[key_tile][value_half][0],
+              next[key_tile][value_half][1],
+              next[key_tile][value_half][2],
+              next[key_tile][value_half][3]);
+        }
+      }
+    }
+    __syncthreads();
+
+    // Convert each accumulator fragment to the B-register lane layout for the
+    // next chunk, then apply the same FP32 decay/update order as attempt204.
+#pragma unroll
+    for (int key_tile = 0; key_tile < kKeyTiles; ++key_tile) {
+#pragma unroll
+      for (int value_half = 0; value_half < 2; ++value_half) {
+        const int column_pair = group / 2;
+        const bool odd_column = (group & 1) != 0;
+        const int row0 = 2 * thread;
+        const int row1 = row0 + 1;
+        const int row2 = row0 + 8;
+        const int row3 = row0 + 9;
+        const int source0 = row0 * 4 + column_pair;
+        const int source1 = row1 * 4 + column_pair;
+        const int source2 = (row2 - 8) * 4 + column_pair;
+        const int source3 = (row3 - 8) * 4 + column_pair;
+        const float n00 = __shfl_sync(0xffffffffu,
+            next[key_tile][value_half][0], source0);
+        const float n01 = __shfl_sync(0xffffffffu,
+            next[key_tile][value_half][1], source0);
+        const float n10 = __shfl_sync(0xffffffffu,
+            next[key_tile][value_half][0], source1);
+        const float n11 = __shfl_sync(0xffffffffu,
+            next[key_tile][value_half][1], source1);
+        const float n20 = __shfl_sync(0xffffffffu,
+            next[key_tile][value_half][2], source2);
+        const float n21 = __shfl_sync(0xffffffffu,
+            next[key_tile][value_half][3], source2);
+        const float n30 = __shfl_sync(0xffffffffu,
+            next[key_tile][value_half][2], source3);
+        const float n31 = __shfl_sync(0xffffffffu,
+            next[key_tile][value_half][3], source3);
+        const float next0 = odd_column ? n01 : n00;
+        const float next1 = odd_column ? n11 : n10;
+        const float next2 = odd_column ? n21 : n20;
+        const float next3 = odd_column ? n31 : n30;
+        const int key_start = key_tile * 16;
+        const int key0 = key_start + row0;
+        const int key1 = key_start + row1;
+        const int key2 = key_start + row2;
+        const int key3 = key_start + row3;
+        const float decay0 = decay[key0];
+        const float decay1 = decay[key1];
+        const float decay2 = decay[key2];
+        const float decay3 = decay[key3];
+        state[key_tile][value_half][0] =
+            decay0 * state[key_tile][value_half][0] + next0;
+        state[key_tile][value_half][1] =
+            decay1 * state[key_tile][value_half][1] + next1;
+        state[key_tile][value_half][2] =
+            decay2 * state[key_tile][value_half][2] + next2;
+        state[key_tile][value_half][3] =
+            decay3 * state[key_tile][value_half][3] + next3;
+      }
+    }
+    __syncthreads();
+
+    if ((chunk_id + 1) % 8 == 0 && chunk_id + 1 < kChunks) {
+      const int boundary = chunk_id / 8;
+#pragma unroll
+      for (int key_tile = 0; key_tile < kKeyTiles; ++key_tile) {
+#pragma unroll
+        for (int value_half = 0; value_half < 2; ++value_half) {
+          const int key_start = key_tile * 16;
+          const int value_base = warp * kWarpValues + value_half * kMmaValues;
+          const int key0 = key_start + 2 * thread;
+          const int key1 = key0 + 1;
+          const int key2 = key0 + 8;
+          const int key3 = key0 + 9;
+          const int value = value_start + value_base + group;
+          const int64_t base =
+              (static_cast<int64_t>(boundary) * kRecurrences + recurrence) *
+              kDim * kDim;
+          group_state_checkpoints[base + key0 * kDim + value] =
+              state[key_tile][value_half][0];
+          group_state_checkpoints[base + key1 * kDim + value] =
+              state[key_tile][value_half][1];
+          group_state_checkpoints[base + key2 * kDim + value] =
+              state[key_tile][value_half][2];
+          group_state_checkpoints[base + key3 * kDim + value] =
+              state[key_tile][value_half][3];
+        }
+      }
+    }
+  }
+}
+
+#else
 __global__ void nanochat_kda_chunk_wy_forward_state_c64_kernel(
     const __nv_bfloat16* restored_k,
     const float* prefix_g,
@@ -869,6 +1249,8 @@ __global__ void nanochat_kda_chunk_wy_forward_state_c64_kernel(
 // 16-row token tiles; each holds eight FP32 output fragments. This maps 384
 // independent output CTAs across all 48 GB10 SMs instead of serializing output
 // inside the 24 dependency-carrying recurrence owners.
+#endif
+
 __global__ void nanochat_kda_chunk_wy_forward_output_c64_kernel(
     const __nv_bfloat16* qgamma,
     const __nv_bfloat16* A,
@@ -1071,7 +1453,13 @@ at::Tensor nanochat_kda_chunk_wy_forward_c64(
       reinterpret_cast<__nv_bfloat16*>(P.data_ptr<float>());
 
   nanochat_kda_chunk_wy_forward_state_c64_kernel<<<
-      kBatch * kHeads * (kDim / 32), 256, 0, stream>>>(
+      kBatch * kHeads * (kDim / 32),
+#if defined(NANOCHAT_DISABLE_SELECTIVE_PTX)
+      256,
+#else
+      64,
+#endif
+      0, stream>>>(
       packed_q_storage, prefix_g.data_ptr<float>(), U.data_ptr<float>(),
       reinterpret_cast<const __nv_bfloat16*>(T.data_ptr<float>()),
       h_history_lo, h_history_hi, z_history, group_state_checkpoints);
