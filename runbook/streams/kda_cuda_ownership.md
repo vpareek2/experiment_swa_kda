@@ -13547,3 +13547,71 @@ uv run --no-sync python scripts/kda_cuda_development.py \
   validated fragment mapping. This removes its FP32 shared store/reload and
   one CTA barrier while retaining the single cross-warp synchronization needed
   before `T^T dW`; gate the cumulative result against attempt190 and attempt176.
+
+## 2026-08-10 [Codex] Direct dW pack is exact but the cumulative handoff remains flat
+
+**Context**
+
+- Attempt192 builds on attempt191 and writes each uniquely owned `dW` WMMA
+  accumulator element directly to rounded BF16 shared scratch. This removes
+  the FP32 shared tile store/reload and one CTA barrier while retaining the
+  required cross-warp synchronization before `T^T dW`. FLA is an offline
+  scheduling reference only.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_192 \
+  --lane optimization <isolated artifact/cache arguments>
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_191 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_192 \
+  runs/kda-cuda-development/attempt-00192-fla-register-dw-pack-level1 \
+  --level2-order candidate-first
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_190 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_192 \
+  runs/kda-cuda-development/attempt-00192-fla-register-dre-dw-cumulative-level1 \
+  --level2-order baseline-first
+```
+
+**Artifacts**
+
+- Branch `kda-cuda/fla-register-dw-pack-192`, pushed commit
+  `6186c7c57b2f683e5a53f365223c064f0b4fe842`; changed source SHA-256
+  `8971725427a55c198e51341c9e9f0b6c5cff6eaae3e551ab1d42045a0d10f027`.
+- Checker summary
+  `3661dc16b5fcd1641bfd6c053cc77904cc1788766e36f7a1c1abfaef3d9dbb84`;
+  production-gradient manifest
+  `ada48333eb75c6040483e43d906d44a5cfff371479540977df913ccccc28cd23`;
+  isolated Level-1 manifest
+  `0ea8bb9fa969bde4043a0aec73d4bd09d11cd1943e5b433799cc1ae9561fdb38`;
+  cumulative Level-1 manifest
+  `a83ae6ffc44cda990303a7c590777c1de2343285020423b3847279c8ee435d4a`.
+
+**Result**
+
+- Ownership 1.0 and runtime/profile FLA freedom pass. Production output and
+  all seven gradients are bitwise equal to attempt191, finite, and bitwise
+  equal in an independent fresh-cache repeat.
+- Isolated Level 1 does not advance. T=4096 forward+backward improves
+  `9.181440 -> 9.035168 ms` (1.593%), T=1024 improves 0.467%, and T=256
+  improves 1.440%, all at identical memory.
+- The cumulative attempt191+192 boundary also rejects. Against attempt190,
+  T=4096 improves only `9.127296 -> 9.106784 ms` (0.225%) and T=1024
+  regresses 1.521%. The favorable isolated samples do not survive the matched
+  cumulative anchor.
+- The broad kernel remains at 128 registers/thread, 25,600 shared bytes/CTA,
+  and no stack/local spill. No Level 2, sanitizer, statistical confirmation,
+  or LM-quality evaluation ran.
+
+**Next**
+
+- Close incremental broad shared-handoff removal. Attempts189-192 now cover
+  direct `dP`, `dQ`, `dR`, `dE`, cooperative end reduction, and direct `dW`
+  packing. Attempt190 remains the strongest non-retained scaffold at 37,519
+  tok/s; attempts191-192 are correct equation/scheduling scaffolds only.
+- Return to attempt190 for the next strategy boundary. Pursue a larger FLA
+  decomposition change in state products or colored intra-backward fusion;
+  do not spend more Level-2 runs on isolated broad handoff variants.
