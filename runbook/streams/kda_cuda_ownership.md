@@ -14504,3 +14504,81 @@ uv run --no-sync research cuda-candidate-check \
   state, broad VJP, and direct intra consumer. Do not return to scan-only,
   fragment-lane publication, convolution, or per-group micro-fusions. Require
   a multi-millisecond operator reduction before spending another Level 2.
+
+
+## 2026-08-10 [Codex] Rejected full-sequence reverse boundary
+
+**Context**
+
+- Attempt205 starts from accepted attempt204 and tests the operator-scale FLA
+  scheduling boundary requested by the campaign. It keeps attempt204's forward
+  checkpoints and separate parallel `A^T dO`, carries one FP32 reverse state
+  across all 64 chunks, publishes owner-packed BF16 dH/dZ histories, and
+  broadens the local VJP chain from eight to four 16-chunk slabs.
+- Exact-size lifetime aliases reuse the gradient-output buffers for compact
+  P/Q/W, old P bytes owner-by-owner for FP32 dZ-base then BF16 dH, and old T
+  bytes for BF16 dZ. The design remains project-owned and runtime FLA-free.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_205 \
+  --lane optimization --artifact-dir /tmp/kda-check-205-final \
+  --extension-cache /tmp/kda-ext-205-final --cuda-cache /tmp/kda-cuda-205-final
+# Two fresh-cache seed-4101 production-gradient captures.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_204 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_205 \
+  runs/kda-cuda-development/attempt-00205-fla-fullseq-reverse-intra-level1 \
+  --level2-order baseline-first
+nsys profile --trace=cuda,nvtx,osrt --sample=none --cpuctxsw=none \
+  --force-overwrite=true --output=<attempt205-profile>/trace \
+  <coordinator-python> <attempt205-profile>/runner.py
+```
+
+**Artifacts**
+
+- Pushed branch `kda-cuda/fla-fullseq-reverse-intra-205`, commit
+  `e65024c27ecfeab2d5f5fadf2d45e2fd24e1341a`; changed-source SHA-256
+  `ac978ae12d3ce182c6f25a90e41f35d6eb4454c2e1674dc7077b9ff7a6297f9a`.
+- Checker summary
+  `d3b566fa34079c496d787ace3c2e3726925dc9479945c2604cd3e77dafe50101`;
+  gradient manifest
+  `a3bb5d11862a6a8943c5a82a8b27bfea6726e8119d02f2d6d683377600491f64`;
+  Level-1 manifest
+  `3759fcc95c0b2e5fc0f23f242e62f7e79de7b7d67383af7984a3e914072d2302`;
+  profile manifest
+  `06dcfeeeab7e6effc281a0694139d9f724ea9b6e3228e7b9add70b0ddf78d2c8`.
+- Append-only development index SHA-256 after attempt205:
+  `1868389e17ee862dd64fac15c0e871b717664a3399540a677c41a99eeeb82482`.
+
+**Result**
+
+- Output, dq, and dv remain bitwise equal to attempt204. All gradients are
+  finite; maximum absolute delta is `1.0664109595381888e-09`. A fresh-cache
+  repeat is bitwise deterministic. The checker passes with ownership 1.0 and
+  no runtime FLA dependency.
+- Level 1 rejects the candidate. T=4096 forward+backward regresses
+  `8.325792 -> 9.812240 ms` (17.854%). Peak allocation improves slightly,
+  `190,319,104 -> 189,594,112` bytes (0.99619x). No Level 2 or sanitizer
+  campaign was spent after the performance gate failed.
+- The profile records 95 launches, 9.245056 ms summed kernels, and a 9.551744
+  ms span versus attempt204's 150 / 7.644896 / 8.048416. Removing 55 launches
+  did not compensate for the new full-sequence reverse kernel: its single
+  24-CTA launch costs 1.941824 ms at 127 registers/thread and 30,720 shared
+  bytes, versus only 0.413536 ms for the eight old reverse launches plus
+  0.259648 ms for their qg/kg/W packs.
+- The cause is explicit: the full scan reconstructs qg/kg exponentials in each
+  value-strip owner. The duplicated pointwise work and low-parallelism scan add
+  1.268640 ms over attempt204's prepared-operand pack+scan boundary. This is a
+  scheduling failure, not a correctness or memory failure.
+
+**Next**
+
+- Preserve attempt205 as a rejected boundary and retain attempt204 as the
+  development baseline. Do not run Level 2.
+- A successor may reuse the validated owner-packed alias and 16-chunk consumer
+  scaffold only after preparing compact qg/kg once outside the 24-CTA scan.
+  The larger remaining win must still fuse or replace the forward-history and
+  colored/intra boundaries; launch count alone is not the thesis.
