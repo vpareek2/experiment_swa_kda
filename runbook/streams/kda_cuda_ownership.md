@@ -10748,3 +10748,80 @@ uv run --no-sync python scripts/kda_cuda_development.py \
 - Remove the broad CTA's shared FP32-to-BF16 conversion boundary for `P/Q/T`.
   Build group-local BF16 operands once, load them directly in WMMA, and shrink
   shared memory/barriers without changing the validated equations.
+
+## 2026-08-10 [Codex] Attempts 146-147 isolate the remaining FLA layout gap
+
+**Context**
+
+- Attempt 146 starts from attempt 145, converts group-local `P/Q/T` to BF16
+  once, and loads those operands directly in the broad two-warp CTA. Attempt
+  147 additionally loads original BF16 `grad_output` and BF16 `H/dH` histories
+  directly from global memory, removing the inner state-copy loops and their
+  CTA-wide barriers.
+- The first attempt-147 diagnostic was invalid because the signature edit hit
+  the unused partial kernel instead of the production broad kernel. No raw
+  compiler log was saved; an explicit invalid-artifact manifest records that
+  provenance limitation. The signature correction was the only change before
+  the successful diagnostic and committed candidate.
+
+**Commands**
+
+```bash
+# One production-shape equation diagnostic per candidate, then matched Level 1.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_127 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_146 \
+  runs/kda-cuda-development/attempt-00146-fla-bf16-pqt-level1 \
+  --level2-order candidate-first
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_127 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_147 \
+  runs/kda-cuda-development/attempt-00147-fla-direct-state-loads-level1 \
+  --level2-order candidate-first
+cuobjdump --dump-resource-usage <isolated candidate libraries>
+```
+
+**Artifacts**
+
+- Attempt 146 pushed commit `f47ffefd04c42eb69950cece2baa49824ee7de6c`;
+  backward source SHA-256
+  `ff7f2a7e45a0a75e784e4064bb440000cf17169c31145cd53bab3a6c573e1549`.
+  Diagnostic manifest `dc88214502fc7163ce5547613599a1dcd4d96c5cd1fe5130301f57057d1fc6b3`;
+  Level-1 manifest `94545bb24298fe317d2f51daccec1c291f7fc2a0c58a78a160f866fed4c20e9c`.
+- Attempt 147 pushed commit `c1ff847f2c3df47cefeb3ddb572e988895dfc8da`;
+  backward source SHA-256
+  `e3bcf24b399203e8e4515410a52f77efc07f19e909d3103cccf76d373aa56c88`.
+  Invalid diagnostic manifest
+  `61cb78830fe00e606b37baa1103605a1c613bd6613f9988174022223c4b4e040`;
+  successful diagnostic manifest
+  `cf971dcbaf6e15d5cfcfe5d9d9d64afc473f28357a1cceab0efdc332a96bfc82`;
+  Level-1 manifest `aa508d5ac00808d45ac5dbba42e7a1a54cc67313cefc69d06885d09a85b34f66`.
+
+**Result**
+
+- Both successful production diagnostics are bitwise equal to attempt 145 for
+  every tensor. Their committed runtime audits completed and remained FLA-free.
+  Neither has an independent repeat or protected checker because Level 1
+  rejected both.
+- Attempt 146 shrinks the broad CTA from 33,792 to 26,624 reported shared bytes
+  at 164 registers/thread and zero local spill, but T=4096 forward+backward
+  regresses `11.465968 -> 13.903968 ms` (21.263%). Peak allocation remains
+  within the guard at 207,034,880 bytes (1.447% over accepted 127).
+- Attempt 147 shrinks reported shared memory again to 25,600 bytes, with 166
+  registers/thread and zero local spill. Direct global state loads recover
+  14.384 percentage points: T=4096 regresses only
+  `11.602400 -> 12.400576 ms` (6.879%). T=256 regresses 1.340%, T=1024 improves
+  0.649%, and peak allocation stays at the same memory-safe 1.447% ratio.
+- The direct-load result confirms shared copies and barriers were a major part
+  of the manual-WMMA gap, but it still misses the five-percent Level-1 guard.
+  Level 2, sanitizers, protected checker, and deterministic repeat did not run.
+  Neither result is statistically confirmed or an LM-quality evaluation.
+
+**Next**
+
+- Keep exact accepted attempt 127. Preserve attempts 146-147 as FLA operand-
+  boundary evidence, not accepted candidates.
+- Inspect the remaining shared `result/dW` handoff and FLA launch/layout
+  topology. The next candidate must remove one measured synchronization or
+  materialization boundary; do not merely retune register counts or rerun the
+  unchanged direct-load kernel.
