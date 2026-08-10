@@ -10420,3 +10420,72 @@ nsys export --type sqlite <trace>
   It must consume BF16 H/dH directly and remove expanded states and dense
   vector-gradient workspaces. Do not spend another profile until that complete
   boundary passes production gradients and Level 1.
+
+## 2026-08-09 [Codex] Attempt 141 partial two-warp VJP is correct but rejected
+
+**Context**
+
+- Attempt 141 extends attempt 140's validated BF16 forward/reverse boundary
+  histories with one two-warp CTA per chunk and head. It computes the three
+  boundary-state products `dR = dO H^T`, `dE = z dH^T`, and
+  `dW = -dZ H^T` directly from BF16 histories, initializes the corresponding
+  vector-gradient terms, and removes expanded FP32 H/dH plus standalone
+  dR/dE products. The existing dense matrix-adjoint chain remains downstream.
+- The first protected checker failed before runtime because the host launch
+  used the device builtin `warpSize`, producing an undefined shared-library
+  symbol. That exact invalid artifact is preserved; replacing it with the
+  literal 64-thread launch was the only correction before the valid checker.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check --lane optimization \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_141 \
+  <isolated artifact/cache arguments>
+# Repeat after replacing the invalid host-side warpSize launch expression.
+# Frozen seed-4101 production capture plus independent fresh-cache repeat.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_127 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_141 \
+  runs/kda-cuda-development/attempt-00141-two-warp-state-products-level1 \
+  --level2-order candidate-first
+```
+
+**Artifacts**
+
+- Pushed commit `abc3cc2b8804470a58180adcbe2060d9e5ccc9a5`; backward
+  source SHA-256
+  `423e189f01fcda821881e0c17258de829932d5e56bef1b2fff7842010513c5a1`.
+- Invalid first checker manifest
+  `4e1ff17ef05b2629205d77ac3255efbefe525aa68b924d1a8a05d5f5007ed69c`.
+- Passing protected checker manifest
+  `5e9831924d8c647653e64195d7fda9a17e323f74a41bba33f02e19deb2f5776b`.
+- Production comparison/repeat manifest
+  `1a04b896e3d4bf2265e3b41ca4c01225fdde8c98729aaac2fe900aa29a3493b8`.
+- Level-1 manifest
+  `ce4476656430637f7bdbf7f97cc66c9e190e1b045fe99c8cb284a592bc05870a`.
+
+**Result**
+
+- Ownership 1.0, protected runtime/profile audit, and runtime FLA freedom pass.
+  Production output is bitwise equal, maximum frozen gradient delta is
+  `2.459273673593998e-09`, and every fresh-cache repeat tensor is bitwise exact.
+- Level 1 rejects the partial boundary: T=4096 forward+backward regresses
+  `12.047328 -> 13.310016 ms` (10.481%). Peak allocation rises
+  `204,081,664 -> 214,829,568` bytes (5.266%), though this recovers about
+  13.6 MB versus attempt 140. T=256 regresses 7.588%; T=1024 improves 0.850%.
+- Static cubin inspection reports 74 registers/thread, 20,480 bytes shared,
+  and zero local bytes/thread. The kernel serializes eight key strips while
+  retaining only the three state products, then round-trips `dW` into the old
+  matrix chain. This does not reproduce FLA's 255-register complete local VJP.
+- No sanitizer, operator profile, or Level 2 ran. This is development evidence
+  only, is not statistically confirmed, and contains no LM-quality result.
+
+**Next**
+
+- Keep exact accepted attempt 127. Preserve attempt 141 as correctness and
+  resource evidence, not an accepted candidate.
+- Extend the same FLA-shaped two-warp/chunk/head boundary to the complete local
+  adjoint: retain the 64x64 matrix adjoint and vector products in the CTA,
+  consume `dW` without a global round trip, and eliminate the dense
+  `dW -> dT -> dP/dQ` workspaces and generic BMM chain before Level 1.
