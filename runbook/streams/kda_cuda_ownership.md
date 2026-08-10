@@ -8472,3 +8472,80 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_121 \
   forward producer/consumer handoff or attacking the remaining backward
   recomputation/group-GEMM boundary; do not silently compose attempts 119-121
   into the accepted baseline.
+
+## 2026-08-09 [Codex] Attempt 122 grouped cuBLAS VJP dispatch rejected
+
+**Context**
+
+- Attempt 122 starts directly from accepted attempt 100 and replaces twelve
+  independent or dependency-sequenced ATen batched-matrix-multiply submissions
+  per eight-chunk backward group with four grouped cuBLAS phases plus the
+  existing final batched multiply. One small CUDA kernel materializes 528 A/B/C
+  pointers in device memory for each reverse group.
+- The first staged design incorrectly supplied host stack pointer arrays to the
+  grouped cuBLAS API. Its protected checker passed because the small protected
+  shapes did not select the exact C64 production path, while the first
+  production capture and one bounded diagnostic repeat exited 139. That design
+  is preserved as invalid and has no timing result. The corrected design uses
+  device-resident pointer arrays as required by the API.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \\
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_122 \\
+  --lane optimization <isolated artifact/cache arguments>
+# Repeat after moving all grouped A/B/C pointer arrays to device memory.
+# Seed-4101 exact production capture and independent fresh-cache repeat.
+uv run --no-sync python scripts/kda_cuda_development.py \\
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_100 \\
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_122 \\
+  runs/kda-cuda-development/attempt-00122-grouped-gemm-vjp-level1 \\
+  --level2-order candidate-first
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_122 \\
+  push -u origin kda-cuda/wy-grouped-gemm-vjp-122
+```
+
+**Artifacts**
+
+- Pushed commit `9a0aacf5b73c269087ce5ed827c0e306cda0ef93`;
+  committed backward source SHA-256
+  `e441b173ff4af75387b116672a8f5e827445d21d62c4d707dbc6ec2962379285`.
+- Initial host-pointer design checker, source SHA-256
+  `0529bd91bc8da3356c8356eabc091d28bce723d78c6c55f6131018d89e0a2970`:
+  `runs/kda-cuda-development/diagnostics/attempt-00122-grouped-gemm-vjp-protected-checker`,
+  manifest `5a768dfebb959b8a58d460b9e67c479b1fe982c1ef9cd7feea592c16083dd4ab`.
+- Corrected device-pointer checker:
+  `runs/kda-cuda-development/diagnostics/attempt-00122-grouped-gemm-device-pointers-protected-checker-002`,
+  manifest `b2193c791b021901619fa789aa9324afbeed3e1d5b9ae7304ad6128423d35194`.
+- Production comparison/repeat and exact invalid-design incident:
+  `runs/kda-cuda-development/diagnostics/attempt-00122-grouped-gemm-vjp-gradient`,
+  manifest `156fe7a2e983df4efae91f50e82e6fdf67ae38b9f7b2e8f2ab6ab2677ac4927a`.
+- Level 1:
+  `runs/kda-cuda-development/attempt-00122-grouped-gemm-vjp-level1`,
+  manifest `5e4283ff26b96df798a2ca8685046c315c8a2b48c20952915dfab4a31b835515`.
+- Append-only attempt/reference index has 126 valid JSONL entries, SHA-256
+  `b9910bb441fb948fe79d28e36717a5eef606502a2cab2e320c1fe1ffaa080712`.
+
+**Result**
+
+- The corrected candidate passes ownership 1.0, the protected runtime/profile
+  audit, runtime FLA freedom, finite-gradient checks, and is bitwise equal to
+  attempt 100 for output and all seven gradients. Its independent fresh-cache
+  repeat is bitwise exact for all eight tensors.
+- Level 1 rejects the mechanism. T=4096 forward+backward regresses
+  `12.246784 -> 12.381328 ms` (1.099%); forward-only is neutral at a 0.006%
+  regression. T=256 forward+backward improves 2.155%, T=1024 regresses 1.259%,
+  and peak allocation increases only 12,800 bytes (0.0063%). All frozen guard
+  limits pass, but the production row does not meet the 3% advance threshold.
+- No sanitizer, Level 2, confirmation, or LM-quality evaluation ran. This is
+  development evidence only and is not statistically confirmed.
+
+**Next**
+
+- Retain attempt 100. Do not advance, retest, sanitize, or run Level 2 for
+  attempt 122. Close grouped-library dispatch for this dense WY/UT VJP: fewer
+  host submissions do not offset pointer materialization and grouped scheduling.
+- Continue from attempt 100 at a genuinely larger boundary that fuses compute
+  or removes a dependency/materialization boundary. Do not compose attempt 122
+  into the accepted baseline and do not revisit the invalid host-pointer form.
