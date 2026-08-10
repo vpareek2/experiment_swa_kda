@@ -10014,3 +10014,76 @@ nsys profile --trace=cuda,nvtx,osrt --sample=none --cpuctxsw=none \
 - After the KDA strategy boundary passes correctness and Level 1, address the
   separately measured 23.539-ms convolution gap. The target is now matching
   FLA first; exceeding it remains subsequent work.
+
+## 2026-08-09 [Codex] Attempt 136 FLA-parity local VJP rejected at Level 1
+
+**Context**
+
+- Attempt 136 starts exactly from accepted attempt 127 and tests the first
+  broad FLA-inspired backward ownership boundary. One CTA owns each local
+  chunk, eight warps compute all 16-column output tiles concurrently, and a
+  44.5-KiB shared allocation retains each right operand across four row tiles.
+- The fused local VJP directly consumes `dO H^T`, `-dZ H^T`,
+  `z dstate_next^T`, `T^T dZ`, and `T^T dW`, removing the `dR`, `dE`, `dP`,
+  and `dQ` workspaces plus four standalone BMMs. The parallel `dT`/inverse and
+  colored-pair stages remain unchanged. FLA/FlashKDA were offline equation and
+  schedule references only; the implementation is project-owned CUDA.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --config configs/research/kda_cuda_ownership.toml \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_136 \
+  --lane optimization <isolated artifact/cache arguments>
+# Seed-4101 B=2/H=3/T=4096 production capture and fresh-cache repeat.
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_136 \
+  push -u origin kda-cuda/fla-parity-backward-136
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_127 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_136 \
+  runs/kda-cuda-development/attempt-00136-fla-parity-local-vjp-level1 \
+  --level2-order baseline-first
+```
+
+**Artifacts**
+
+- Pushed commit `907ac67f237f688855d4739d0a8f8742e0f55acd`; backward
+  source SHA-256
+  `5e25169195ab132ae61519c59d23e9ef47c9449aeab8bfaed171ba24cd407c7f`.
+- Protected checker:
+  `runs/kda-cuda-development/diagnostics/attempt-00136-fla-parity-local-vjp-protected-checker`,
+  manifest `642180bd06e0b8ab10848894e60ff17f04f676725ea94fe49a3132cb18cb33f3`.
+- Production comparison/repeat:
+  `runs/kda-cuda-development/diagnostics/attempt-00136-fla-parity-local-vjp-gradient`,
+  manifest `125b8ea9e361c0315a19ad484cf5fc41d2f85284ee336ae0fca0c5fb135189cb`.
+- Level 1:
+  `runs/kda-cuda-development/attempt-00136-fla-parity-local-vjp-level1`,
+  manifest `c934b5635be36eedb0c67deac4e1825080cdce6459950748cc7b9f1e4bfda3b0`.
+
+**Result**
+
+- The protected checker passes ownership 1.0, runtime/profile audit, and
+  runtime FLA freedom. Production output is bitwise equal to the frozen
+  accepted-equivalent capture; maximum gradient delta is
+  `5.820766091346741e-11`, and a fresh-cache repeat is bitwise exact for all
+  eight tensors.
+- Level 1 rejects the schedule. T=4096 forward+backward regresses
+  `11.560592 -> 11.808432 ms` (2.144%), although peak allocation falls 3.340%
+  from 204,081,664 to 197,265,920 bytes. T=256 and T=1024 combined improve
+  3.115% and 2.357%; T=4096 forward improves 1.151%. The long backward result
+  shows that four otherwise independent dense phases remain too serialized in
+  one chunk CTA.
+- No sanitizer or Level-2 run was performed. This is development evidence
+  only, is not statistically confirmed, and contains no LM-quality result.
+
+**Next**
+
+- Keep exact `f2fa705e22fc97d2f455b4ccabcf42a6a9ab120f` as the accepted
+  development baseline. Attempt 136 is a preserved strategy-boundary failure,
+  not an accepted composition.
+- Retain chunk-by-recurrence ownership and direct result consumption, but split
+  independent products across a small number of chunk-parallel phase kernels.
+  The next candidate must restore GPU-level product concurrency without
+  recreating four full global workspaces or adding work to the low-parallelism
+  persistent reverse scan.
