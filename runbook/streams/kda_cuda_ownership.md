@@ -12543,3 +12543,76 @@ uv run --no-sync research cuda-candidate-check \
   backward schedule, prioritizing a real reduction in operand materialization
   or useful work rather than register caps, barrier substitutions, or global
   buffer lifetime changes already rejected in attempts171-174.
+
+## 2026-08-10 [Codex] Co-indexed group packing is correct but does not reduce work
+
+**Context**
+
+- Attempt177 starts from exact validated convolution parent176 and tests the
+  first post-convolution FLA-style WY fusion. The group U/W producer already
+  owns one chunk and one 16-column tile, so it additionally computes the
+  co-indexed recurrent R/E vectors and removes the two standalone pack launches
+  per eight-chunk group.
+- Equations, eight-chunk locality, FP32 values, output layouts, arithmetic
+  order within each element, and all consumer kernels are unchanged. This is
+  owned CUDA; FLA remains an offline reference only.
+
+**Commands**
+
+```bash
+# Protected runtime audit and matched Level 1 versus exact attempt176.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_176 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_177 \
+  runs/kda-cuda-development/attempt-00177-fused-group-uw-re-level1 \
+  --level2-order baseline-first
+# Exact seed-4101 production gradient captures and one warmed correlated
+# operator profile. No checker, sanitizers, or Level 2 after rejection.
+```
+
+**Artifacts**
+
+- Branch `kda-cuda/fla-fused-group-uw-re-177`, pushed commit
+  `58ed50d0e02ef4813a421994708b2d4218e53713`; changed source SHA-256
+  `eba725e083eac1541ac14796e43edd677d2d07caa205258c0a1f9048853034fc`.
+- Level-1 manifest
+  `e69df66fdc0950ae90c7c300df34f949b9896d27706e1244253d084166e3538b`;
+  gradient diagnostic
+  `ec255590990b8b39f831b11dcaa2aa40537de0262b1284798f83fea1a6a763eb`;
+  operator profile
+  `15684370f8971c2607fce441783771bae7440d63298ccc46dc3e4679f7b8bba5`.
+- Invalid first profile-path artifact
+  `41b165c81a936b5de1bdd3aa0ef8b2eb38b743b71efc44703cdc3add2a4a3c72`.
+  Its artifact directory was accidentally created relative to the candidate
+  CWD, so absolute `tee` and nsys targets were absent. Nsys fell back to
+  `/tmp/nsys-report-82d1.nsys-rep`; that report was moved intact into the
+  invalid artifact and is unscored.
+- The append-only index now has 201 rows and hashes to
+  `5640422bc555fcaa9036db8977de182b9e03d4f03f9a68d32180e968e65514da`.
+
+**Result**
+
+- Output and all seven production gradients are bitwise equal to attempt176
+  and finite. The protected runtime audit passes at ownership 1.0 and remains
+  runtime FLA-free.
+- Level 1 does not advance: T=4096 forward+backward improves
+  `9.904112 -> 9.637616 ms` (2.69%), below the 3% gate, with identical
+  allocation. No Level 2 ran.
+- The corrected profile rejects the mechanism. Launches fall `167 -> 137` and
+  summed named-kernel time falls `8.934784 -> 8.353 ms`, but GPU span regresses
+  `9.377056 -> 9.423232 ms` (0.49%). The former U/W plus pack stages cost
+  about `0.641360 + 0.481088 = 1.122448 ms/operator`; the fused producer costs
+  `1.112 ms/operator`. Exponentials and R/E stores simply move nearly all pack
+  work into U/W. The fused kernel rises to 64 registers/thread with zero spill.
+- Attempt177 is preserved and rejected. It is not statistically confirmed and
+  has no LM-quality result.
+
+**Next**
+
+- Return to exact attempt176. Do not compose producer co-scheduling that leaves
+  R/E in global memory. A useful FLA-style fusion must consume R/E on chip in
+  the boundary/reverse state kernels or eliminate their materialization.
+- The largest owned backward costs remain the complete broad VJP and the
+  group boundary/reverse scans. Concentrate on a consumer-side state fusion or
+  a compact all-chunk state schedule, while preserving the rejected global
+  pipeline evidence from attempt171.
