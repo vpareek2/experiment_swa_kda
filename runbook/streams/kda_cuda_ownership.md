@@ -11488,3 +11488,89 @@ env PYTHONPATH=/home/veer/Master/projects/experiment_swa_kda_cuda_attempt_161 \
 - After that kernel-scale intervention, target the still-distributed
   boundary/reverse/pack/pair pipeline. Require a substantial Level-1 operator
   reduction before another sparse Level 2.
+
+## 2026-08-10 [Codex] FLA-style four-warp VJP is faster but misses Level 2
+
+**Context**
+
+- FLA's KDA backward uses four warps for K=V=128 and 64-wide logical
+  key/value tiling. Attempt162 ports the narrow scheduling difference into the
+  owned complete WY/UT VJP: four warps each own one 16-row tile and four live
+  adjoint fragments, replacing attempt161's two warps, two row tiles, and eight
+  live adjoint fragments per warp. Equations, histories, precision, public ABI,
+  and all other kernels remain unchanged.
+- The first precommit snapshot failed correctness because newly added threads
+  64-127 also executed scalar code written for a 64-token chunk, producing 17
+  NaNs and one infinity in `dbeta`. That capture is preserved as invalid. The
+  corrected source guards those scalar rows while all four warps participate
+  in WMMA work.
+
+**Commands**
+
+```bash
+# Two fresh-cache production captures; the first is invalid and the second is
+# bitwise exact. Commit/push corrected source, then matched Level 1 versus 161.
+# One bounded operator profile, exact staged checker with all sanitizers,
+# independent fresh-cache repeat, and one candidate-first Level-2 pair.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_161 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_162 \
+  runs/kda-cuda-development/attempt-00162-fla-four-warp-vjp-level1 \
+  --level2-order candidate-first
+```
+
+**Artifacts**
+
+- Branch `kda-cuda/fla-four-warp-vjp-162`, pushed commit
+  `fc1a77d44c216548527dd350b5d4f82f3d7ddaba`; source SHA-256
+  `5186ff9986c59cb9cadc13ad6478e104edbc1b46f84023b8320414e1a2937cff`.
+- Invalid diagnostic manifest
+  `b0f2553a664ec93b59851dbf474dc3046bc8826b327c3efc79f1b9768acbf2fe`;
+  corrected diagnostic manifest
+  `e9600b9e14b4c482fade43e70e4fb344df103ecdd09ae709a69bdb034f162627`;
+  Level-1 manifest
+  `92600791dd2b7035dc3cec411cc0c29a2749259520918b844b362d2ff5aa1f3d`;
+  checker manifest
+  `c71944a74d23b4a7a8ab9cb5e8afa7b530ebe90b570c66aa109e801f483b3f32`;
+  repeat manifest
+  `6f7970ef8eab8b423c1ebd4ca7552b650b6b711f34b3cc1d8dcd5ba411f0421a`;
+  profile manifest
+  `c0b2029378e8786dc78fa539b88c8db636b500b75e4ae281d79474d6d44bd561`;
+  Level-2 manifest
+  `19782ff51da1214e885be55705d5f9c84557b21252d17e68720a210c44f3063c`.
+- The append-only index now has 184 rows and hashes to
+  `06f7145178bf1edbdbe26996fa807089ed6bb1f1076dacb7ed5ac93dd89d74d1`.
+
+**Result**
+
+- After the scalar-row guard, output and every gradient are bitwise equal to
+  attempt161. The independent repeat is bitwise equal for all tensors. The
+  exact staged checker reports ownership 1.0, runtime/profile FLA freedom, and
+  zero-error memcheck, racecheck, synccheck, and initcheck.
+- T=4096 forward+backward improves `10.194288 -> 9.877088 ms` (3.112%)
+  with unchanged peak allocation. T=256 improves 9.842%; T=1024 regresses
+  1.639%, within the five-percent guard.
+- The profile validates the FLA scheduling mechanism. The broad VJP falls
+  `1.991584 -> 1.574304 ms` (20.95%); summed kernel time falls
+  `9.626784 -> 9.121344 ms`, and operator span falls
+  `10.134528 -> 9.611456 ms`. Launch count remains 193. The broad kernel still
+  uses 130 registers/thread and remains 1.97x FLA's preserved 0.797600 ms.
+- The candidate-first Level-2 pair is valid but below the two-percent gate.
+  Attempt162 measured `[35984,35898,35973,36011,35992]`, median 35,984 tok/s;
+  attempt161 measured `[35706,35688,35716,35553,35661]`, median 35,688 tok/s.
+  The gain is 0.829%, with identical 5,507.908 MiB peak memory.
+- Attempt161 remains the accepted development baseline at its preserved 35,521
+  tok/s pair. Attempt162 is a non-retained 35,984 tok/s current observation,
+  82.38% of FLA and 7,696 tok/s short. Neither is statistically confirmed and
+  no LM-quality evaluation ran.
+
+**Next**
+
+- Keep attempt161 as the accepted baseline, but use attempt162 as the next
+  cumulative implementation scaffold. The FLA warp decomposition is sound and
+  removes another 0.5 operator milliseconds; it simply is not sufficient by
+  itself for end-to-end retention.
+- Continue matching FLA inside the same broad boundary: increase the logical
+  BK/BV operand tile or reduce the 130-register live set, then combine that
+  with the adjacent boundary/reverse/pack pipeline before spending another
+  sparse Level 2.
