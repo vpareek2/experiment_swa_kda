@@ -13384,5 +13384,103 @@ uv run --no-sync python \
   retention threshold.
 - Apply the same isolated strategy to `dQ = T^T dW`: consume its accumulator
   directly for `dkhat`, `dprefix`, and `dbeta`, removing its shared store/read
-  and two CTA barriers per key strip. Gate the cumulative scaffold against
+  and one CTA barrier per key strip. Gate the cumulative scaffold against
   attempt189 locally and against accepted attempt176 before any retention call.
+
+## 2026-08-10 [Codex] Register-resident dQ reaches 37,519 tok/s but narrowly misses retention
+
+**Context**
+
+- Attempt190 builds on the non-retained but correct attempt189 scaffold and
+  consumes `dQ = T^T dW` directly from the fixed SM121 WMMA accumulator layout.
+  Each four-lane subgroup updates `dkhat`, `dprefix`, and `dbeta` for two rows,
+  removing the 16x16 shared-memory store/reload and one CTA barrier in each of
+  eight key strips. The barrier before the row-63 end-prefix update remains to
+  preserve cross-warp ordering. FLA is an offline scheduling reference only.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_190 \
+  --lane optimization <isolated artifact/cache arguments>
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_validation_190 \
+  --lane optimization --sanitizers <isolated artifact/cache arguments>
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_189 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_190 \
+  runs/kda-cuda-development/attempt-00190-fla-register-dq-consumer-level1 \
+  --level2-order baseline-first
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_176 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_190 \
+  runs/kda-cuda-development/attempt-00190-fla-register-dq-consumer-accepted-anchor-level1 \
+  --level2-order candidate-first
+nsys profile <bounded production chunk-forward/backward runner>
+uv run --no-sync python \
+  runs/kda-cuda-development/attempt-00190-fla-register-dq-consumer-level2/run_level2.py
+```
+
+**Artifacts**
+
+- Branch `kda-cuda/fla-register-dq-consumer-190`, pushed commit
+  `091c9e3e992567202aae736080cb85a1170ad6ce`; changed source SHA-256
+  `89ba24ec6afb72894920f73dd45826683aa13dfda538a374c4c28820fc2183d4`.
+- Checker summary
+  `9607bf9666718a0110424a609818c5a5d5faf37ee21a27e892555e52d99ec573`;
+  production-gradient manifest
+  `e1579d8a029a46eba99d61e5abe32945b6c46623cd0ffc6ad57fb9c5355087a5`;
+  isolated Level-1 manifest
+  `ee23dcfe9aaddce23da6921efe493bd51c409591baa87e436ce062b7b179d948`;
+  accepted-anchor Level-1 manifest
+  `722b60a56826c745951f3ceebe5da5f868a0144b0807a58088139a921ec6e746`.
+- Exact-source sanitizer checker summary
+  `8b848111a72369594e51dc8e57fc7637e2a869addb9f75479d61bae046c0e067`;
+  operator-profile manifest
+  `b2662bf5ec1996a86503c074efca0e2305cbdb3c5acfcbbf4318adb45cae8099`;
+  Level-2 manifest
+  `a90649edb4a12a7d7505a7c4a280e333036d01482c1ffd0034c9188cb8e5a010`.
+
+**Result**
+
+- Ownership 1.0, runtime/profile FLA freedom, memcheck, racecheck, synccheck,
+  and initcheck pass. Production output and all seven gradients are bitwise
+  equal to attempt189, finite, and bitwise equal in an independent fresh-cache
+  repeat.
+- Isolated Level 1 improves T=4096 forward+backward
+  `9.497328 -> 9.155440 ms` (3.600%) and T=1024 by 4.151%, while T=256 is
+  effectively flat. Against accepted attempt176, T=4096 improves
+  `9.637648 -> 9.160928 ms` (4.946%); T=256 regresses 3.522%, inside the 5%
+  guard, and memory is unchanged.
+- The warmed production profile attributes the gain to the intended kernel.
+  Broad VJP time falls `1.450944 -> 1.078688 ms` (25.656%) versus attempt189
+  and 31.378% versus attempt176. The complete 167-launch operator span improves
+  3.159% versus attempt189 and 4.594% versus attempt176. The broad kernel uses
+  132 registers/thread, 25,600 shared bytes/CTA, and has no stack/local spill.
+- The candidate-first Level-2 pair is valid but below the declared retention
+  gate. Candidate steps 2-6 `[37519,37680,37636,37450,37494]` have median
+  37,519 tok/s; accepted attempt176 steps `[37075,36757,36838,36816,36847]`
+  have median 36,838 tok/s. The gain is 1.849%, just below 2%, at identical
+  5,507.908 MiB peak memory.
+- Attempt190 reaches 85.90% of the 43,680 tok/s FLA target, leaving 6,161
+  tok/s to FLA and 7,481 tok/s to 45k. It is not statistically confirmed and
+  is not an LM-quality result. Attempt176 remains the accepted convolution
+  parent; attempt175 remains the latest full matched baseline.
+- Two diagnostic setup failures are preserved and excluded from evidence. The
+  first sanitizer replica omitted two blank lines and failed the byte-identical
+  source-hash check; its checker was interrupted before completion. The first
+  profile runner imported the coordinator placeholder before candidate
+  execution; its invalid trace is preserved, and explicit candidate module-path
+  precedence was the sole diagnostic-runner correction.
+
+**Next**
+
+- Preserve attempt190 as the strongest current cumulative scaffold, not an
+  accepted baseline. Its 1.849% matched gain is promising but does not clear
+  the frozen 2% gate.
+- Continue the same FLA-derived strategy on the remaining broad handoff. The
+  `dR`/`dE`/`dW` producer still stores three FP32 tiles to shared memory and a
+  scalar phase reloads them. Directly consume `dR` and `dE` in registers while
+  retaining only the cross-warp BF16 `dW` tile; preserve deterministic end-state
+  reductions and compare the cumulative candidate against attempt176.
