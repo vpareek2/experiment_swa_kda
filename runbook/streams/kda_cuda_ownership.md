@@ -9930,3 +9930,87 @@ nsys export --type sqlite --force-overwrite=true \
   fan the complete local VJP out over chunk-by-head CTAs. Separately capture
   one matched full training-step profile for accepted project and FLA backends
   before assuming the remaining end-to-end gap is inside KDA.
+
+## 2026-08-09 [Codex] Correct operator attribution and matched full-step profile
+
+**Context**
+
+- The first FLA operator comparison used GPU kernel start timestamps inside a
+  CPU NVTX interval. Because the project operator queues much more work, many
+  kernels launched inside the range began after `nvtxRangePop` and were omitted.
+  The raw traces and original summary are preserved. A new correlated summary
+  joins CUDA runtime launches inside the range to kernels by `correlationId`.
+- A predeclared matched full-step pair then ran from accepted attempt 127 with
+  identical model/data/seed/shape/training arguments. Only `project_cuda`
+  versus `fla_triton` changed. Each side ran seven steps; step zero was excluded
+  and steps one through six were selected using context-synchronization
+  boundaries. This is attribution, not a confirmation or quality run.
+
+**Commands**
+
+```bash
+# One seven-step nsys capture from accepted attempt127 for each backend:
+nsys profile --trace=cuda,nvtx,osrt --sample=none --cpuctxsw=none \
+  <coordinator-python> -m scripts.base_train --seed 42 --depth 6 \
+  --head-dim 128 --window-pattern K --kda-backend <project_cuda|fla_triton> \
+  --no-force-final-full --max-seq-len 4096 --device-batch-size 2 \
+  --total-batch-size 32768 --num-iterations 7 --eval-every -1 \
+  --core-metric-every -1 --sample-every -1 --save-every -1 --run dummy
+# Export both reports to SQLite; select steady steps between the last fourteen
+# context-synchronization boundaries and group kernels by short name.
+```
+
+**Artifacts**
+
+- Corrected operator summary:
+  `runs/kda-cuda-development/reference-benchmarks/fla-triton-operator-profile-001/correlated-summary.json`;
+  correction-manifest SHA-256
+  `c69949881580fdbbb1b0818871dfce179151cab4532f08a9344da8859e3a79de`.
+- Matched full-step pair:
+  `runs/kda-cuda-development/profiles/matched-full-step-project127-vs-fla-001`;
+  manifest SHA-256
+  `dba01a48b8c629963848b889b4734d55249606bb0609da82d479481aa416762d`.
+- The original incorrect operator summary and its manifest remain byte-for-byte
+  preserved. The append-only index records both the correction and full-step
+  evidence instead of rewriting history.
+
+**Result**
+
+- Correct isolated operator accounting is project 393 launches, 10.999328 ms
+  summed kernel time, and 11.928448-ms GPU span versus FLA 37 launches,
+  4.185632 ms summed, and 4.987712-ms span. FLA removes 90.585% of launches,
+  61.947% of summed kernel time, and 58.186% of span. The earlier 0.8344-ms
+  span-gap interpretation is invalid; the corrected gap is 6.940736 ms.
+- In the matched full step, project steady samples
+  `[34319,34423,34314,34323,34144,34248]` have median 34,316.5 tok/s; FLA
+  `[42793,42671,42825,42980,42731,42957]` has median 42,809 tok/s. Median step
+  times are 0.954871 and 0.765443 seconds. These profiled values are consistent
+  with, but do not replace, the retained five-run 34,494 and 43,680 targets.
+- Steady GPU kernel time is 917.512933 ms/step for project and 744.414155
+  ms/step for FLA, a 173.098778-ms gap. Named project KDA kernels consume
+  183.794251 ms/step, with another 27.976645 ms of MAGMA SGEMM and 18.121253
+  ms of excess `Kernel2` time attributable by matched subtraction; the
+  resulting KDA estimate is 229.892149 versus 91.372853 ms/step for FLA, a
+  138.519296-ms gap. Project convolution consumes 36.937701 versus FLA
+  13.398725 ms/step, another 23.538976 ms.
+- This reverses the prior diagnosis: KDA scheduling explains about 80% of the
+  measured GPU-kernel gap, convolution about 14%, and other interactions the
+  remainder. FLA parity is therefore the right immediate target. Its decisive
+  mechanism is the coherent pipeline: recompute `W/U` and boundary states,
+  run a compact reverse state-gradient scan, then launch one broad
+  chunk-by-recurrence WY/query/key/gate VJP plus one intra-chunk VJP. Isolated
+  launch removal or adding products to the low-parallelism persistent CTA has
+  repeatedly failed to reproduce this.
+
+**Next**
+
+- Keep attempt 127 accepted. Start the next candidate from it and treat the
+  pinned FLA equations/schedule as an offline design specification only.
+- Implement FLA parity as a coherent project-owned CUDA path, beginning with
+  the backward boundary: a compact sequential state scan followed by a
+  chunk-by-head fused local VJP. Do not replay attempt 95/116's 48-KiB
+  sequential dense-product CTA, attempt 96/97's multi-launch row subdivision,
+  or attempt 135's extra work inside the persistent reverse CTA.
+- After the KDA strategy boundary passes correctness and Level 1, address the
+  separately measured 23.539-ms convolution gap. The target is now matching
+  FLA first; exceeding it remains subsequent work.
