@@ -10489,3 +10489,72 @@ uv run --no-sync python scripts/kda_cuda_development.py \
   adjoint: retain the 64x64 matrix adjoint and vector products in the CTA,
   consume `dW` without a global round trip, and eliminate the dense
   `dW -> dT -> dP/dQ` workspaces and generic BMM chain before Level 1.
+
+## 2026-08-09 [Codex] Attempt 142 complete FLA-shaped VJP is exact but slow
+
+**Context**
+
+- Attempt 142 extends attempt 141 into the complete two-warp chunk/head local
+  adjoint. Eight 16x16 accumulator fragments retain the 64x64 inverse adjoint;
+  the CTA computes and consumes `dP = T^T dZ` and `dQ = T^T dW`, applies
+  `dM = -T^T (dZ P^T + dW Q^T) T^T`, and emits the dependent `dv`, key,
+  gate, and beta terms directly.
+- This removes six generic BMMs and the global `dW`, `dP`, `dQ`, and temporary
+  matrix workspaces. FLA is only the offline equation and scheduling reference.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check --lane optimization \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_142 \
+  <isolated artifact/cache arguments>
+# Frozen seed-4101 production capture and independent fresh-cache repeat.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_127 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_142 \
+  runs/kda-cuda-development/attempt-00142-fla-complete-two-warp-vjp-level1 \
+  --level2-order baseline-first
+cuobjdump --dump-resource-usage <isolated candidate library>
+```
+
+**Artifacts**
+
+- Pushed commit `9f1c711d255b2630dd8f49f04d8961a3b5ce915a`; backward
+  source SHA-256
+  `d6a93aef8a66e39905a3bcfc7d7aa26baa8117dafaf2a7d8137b0d67d13b360b`.
+- Protected checker manifest
+  `b4f8382f673789f0d5114c5f4c4f75118e394a3a994557c0ce7cc2a2cdd8b79e`.
+- Production comparison/repeat manifest
+  `01fb72978d226e5baca8f285da1b33ddcfefb398edb577e8e1cfdba6c105d76f`.
+- Level-1 manifest
+  `7c7ee32b9a54d4d2196c435e2aea3aa615cd5e79fc51b69b74d7480a9f50f4c2`.
+- The successful pre-commit orientation diagnostic is preserved separately,
+  manifest
+  `152f1937179b40344b129905acf90b5bd87a1f1a737dabfc8e3f46b8ab2c82db`;
+  it is not used as conclusion-bearing evidence.
+
+**Result**
+
+- Ownership 1.0, protected runtime/profile audit, and runtime FLA freedom pass.
+  Production output is bitwise equal, maximum frozen gradient delta is
+  `2.459273673593998e-09`, and all tensors repeat bitwise from a fresh cache.
+- Level 1 rejects the implementation: T=4096 forward+backward regresses
+  `11.860960 -> 16.710032 ms` (40.883%), while peak allocation rises
+  `204,081,664 -> 210,442,752` bytes (3.117%). T=256 and T=1024 improve
+  6.925% and 1.449%, respectively.
+- The complete kernel uses 166 registers/thread, 34,816 bytes shared, and zero
+  local bytes/thread. It is much closer to FLA's broad register topology than
+  attempt 141, but repeatedly converts FP32 64x16 panels into BF16 shared
+  operands and synchronizes the CTA. FLA enters the corresponding program with
+  BF16 value/upstream/local-gradient operands, so this producer/consumer format
+  boundary is now the leading measured logical difference.
+- No sanitizer, operator profile, or Level 2 ran. This is not statistically
+  confirmed and contains no LM-quality evaluation.
+
+**Next**
+
+- Keep exact accepted attempt 127. Preserve attempt 142 as a complete-equation
+  milestone, not an accepted performance candidate.
+- Move `do`, local `z/dZ`, `P/Q`, and the inverse to BF16 at their producers so
+  the broad CTA can load tensor-core operands directly, shrink shared staging,
+  and reduce barriers. Do not alter the now-validated adjoint equations.
