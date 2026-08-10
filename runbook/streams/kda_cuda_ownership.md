@@ -9430,3 +9430,125 @@ uv run --no-sync python scripts/kda_cuda_development.py \
   distinct causal short-path optimization. Continue protecting the short lane
   needed for small experiments; only a later changed candidate may establish
   whether the attempt-131 long-path mechanism composes safely.
+
+## 2026-08-09 [Codex] Attribute accepted T=256 generic training path
+
+**Context**
+
+- The fixed 43,680 tok/s FLA reference uses T=4096 and does not measure the
+  generic T=256 lane. After attempt 131 failed the short-row guard despite
+  changing only the exact T=4096 specialization, captured one bounded accepted
+  attempt-127 T=256 forward+backward profile to select a causal short-path
+  optimization for small experiments.
+
+**Commands**
+
+```bash
+PYTHONPATH=/home/veer/Master/projects/experiment_swa_kda_cuda_attempt_127 \
+TORCH_EXTENSIONS_DIR=/tmp/kda127-t256-profile-ext-002 \
+CUDA_CACHE_PATH=/tmp/kda127-t256-profile-cuda-002 \
+nsys profile --trace=cuda,nvtx,osrt --sample=none --cpuctxsw=none \
+  --output=<artifact>/trace \
+  /home/veer/Master/projects/experiment_swa_kda/.venv/bin/python \
+  <artifact>/runner.py
+```
+
+**Artifacts**
+
+- Valid profile:
+  `runs/kda-cuda-development/diagnostics/attempt-00127-t256-production-profile-001`,
+  manifest `f3820c82209635492fcc0196f752375ce0c3891bd9abf46d2faff79084128d57`.
+- Invalid first wrapper:
+  `runs/kda-cuda-development/diagnostics/attempt-00127-t256-production-profile-invalid-cwd-001`,
+  manifest `7453020e5fca5200e0629f6d20cb7d99a470f9bff85f68fb3ff1f6d8fab8686b`.
+
+**Result**
+
+- The warmed measured iteration contains 4.022208 ms of project CUDA kernels.
+  The reverse tile is 1.749280 ms (43.491%), generic forward recurrence is
+  1.229376 ms (30.565%), local history replay is 0.521600 ms (12.968%), and
+  boundary-history construction is 0.354336 ms (8.809%). Preprocessing is only
+  0.088896 ms (2.210%).
+- The first wrapper ran from the coordinator cwd and stopped at candidate-source
+  resolution before compilation or candidate GPU work. A corrected candidate-
+  cwd wrapper encountered the preserved output filename, so Nsight emitted the
+  valid process report to a temporary path; that exact report was moved into
+  the valid artifact. The measured iteration is selected from the SQLite trace
+  by its saved NVTX start timestamp.
+
+**Next**
+
+- First test a no-global-workspace short forward schedule that shares exact
+  normalization/gating/decay operands across adjacent value rows. If CTA-wide
+  synchronization costs more than the redundant scalar work, move to the
+  larger reverse/replay boundary identified by this profile.
+
+## 2026-08-09 [Codex] Attempt 132 four-row T=256 forward sharing rejected
+
+**Context**
+
+- Attempt 132 explicitly widens rejected attempt 131; it does not treat that
+  parent as accepted. For T=256 only, four adjacent value rows share one exact
+  ascending-key normalization, beta, normalized q/k, and decay calculation in
+  a 512-thread CTA. Each row retains its own exact ascending prediction/output
+  reductions, and the kernel adds no global workspace.
+- T=1024 keeps the accepted generic path. T=4096 keeps attempt 131's specialized
+  backward launch fusion and accepted attempt-127 WY forward.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_132 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact seed-4101 T=256 baseline/candidate tensor captures.
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_132 \
+  push -u origin kda-cuda/t256-forward-group4-132
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_127 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_132 \
+  runs/kda-cuda-development/attempt-00132-t256-forward-group4-level1 \
+  --level2-order baseline-first
+```
+
+**Artifacts**
+
+- Pushed commit `d61fd4ba751215cc47982b95e5d3c41d9a5447ec`;
+  `chunk.cu` SHA-256
+  `edddde85c1fbaa8a68faefaf34c48df35188ce372e6a58820476dc5ad44a58db`.
+- Invalid first and valid second protected checkers:
+  `runs/kda-cuda-development/diagnostics/attempt-00132-t256-forward-group4-protected-checker`,
+  manifest `1329ab1b1e4406cad41b3fd656d258cd6dd12e1e281a0616bd7aa340e6efe3d4`,
+  and `runs/kda-cuda-development/diagnostics/attempt-00132-t256-forward-group4-protected-checker-002`,
+  manifest `61950131fd4051797e98695acd537685cf8b94a942667ea17d54e68cdb30b95a`.
+- T=256 tensor comparison:
+  `runs/kda-cuda-development/diagnostics/attempt-00132-t256-forward-group4-gradient`,
+  manifest `f459fe82c1e253bd26ac088eadde0877cfa80bd113dd96ee0be95fbcf2e6d41f`.
+- Level 1:
+  `runs/kda-cuda-development/attempt-00132-t256-forward-group4-level1`,
+  manifest `d9b60fce57c86340954811b45771b59b989df40ec052db6104636a46c0ccd601`.
+
+**Result**
+
+- The exact T=256 output and all seven gradients are bitwise equal to accepted
+  attempt 127. The valid checker passes ownership 1.0, protected runtime/profile
+  audit, and runtime FLA freedom. The first checker is invalid only because
+  renaming the generic kernel hid the canonical symbol on the protected
+  non-256 profile shape; canonical routing was restored before the valid run.
+- Level 1 rejects the mechanism. T=256 forward regresses
+  `1.035200 -> 1.117280 ms` (7.929%), violating the 5% guard; combined
+  forward+backward regresses 2.689%. T=1024 combined improves 0.860%.
+  T=4096 combined improves `11.658656 -> 11.226880 ms` (3.703%) while peak
+  allocation falls 2.569%, preserving but not independently accepting attempt
+  131's long-path mechanism. Every allocation row passes.
+- No sanitizer or Level-2 run was performed. This is development evidence
+  only, is not statistically confirmed, and contains no LM-quality evaluation.
+
+**Next**
+
+- Keep exact `f2fa705e22fc97d2f455b4ccabcf42a6a9ab120f` as the accepted
+  development baseline. Attempt 132 is a preserved rejection.
+- Test a distinct two-row/256-thread short grouping. It halves the grouped
+  barrier domain while retaining half of the redundant normalization/gating
+  elimination. If that also loses, abandon grouped forward sharing and target
+  the profiled reverse/replay boundary. Do not retest attempt 132 unchanged.
