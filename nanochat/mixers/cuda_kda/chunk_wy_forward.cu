@@ -943,6 +943,13 @@ at::Tensor nanochat_kda_chunk_wy_forward_c64(
   constexpr int kThreads = 256;
   at::NoGradGuard no_grad;
   at::NoTF32Guard no_tf32;
+  // Pair-builder launches cover only the lower 16x16 tile triangle, while the
+  // persistent WMMA scan loads all four source tiles for every output row.
+  // Define the untouched upper tiles explicitly instead of depending on the
+  // contents returned by the caching allocator.
+  C10_CUDA_CHECK(cudaMemsetAsync(
+      A.data_ptr<at::BFloat16>(), 0,
+      static_cast<size_t>(A.numel()) * sizeof(__nv_bfloat16), stream));
   nanochat_kda_wy_preprocess_c64_kernel<<<
       kChunkRows, kDim, 0, stream>>>(
       reinterpret_cast<const __nv_bfloat16*>(q.data_ptr<at::BFloat16>()),
