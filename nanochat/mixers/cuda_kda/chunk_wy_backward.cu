@@ -857,6 +857,9 @@ __global__ void nanochat_kda_wy_backward_group_uw_wmma_c64_kernel(
     const float* Q,
     float* U,
     float* W,
+    __nv_bfloat16* P_bf16,
+    __nv_bfloat16* Q_bf16,
+    __nv_bfloat16* T_bf16,
     int group_rows) {
   namespace wmma = nvcuda::wmma;
   constexpr int kTile = 16;
@@ -895,9 +898,14 @@ __global__ void nanochat_kda_wy_backward_group_uw_wmma_c64_kernel(
     for (int element = lane; element < kTileElements; element += warpSize) {
       const int row = element / kTile;
       const int inner = element - row * kTile;
-      left[warp * kTileElements + element] = __float2bfloat16_rn(
-          T[(static_cast<int64_t>(local_n) * kChunk + row_start + row) *
-              kChunk + inner_start + inner]);
+      const int64_t source =
+          (static_cast<int64_t>(local_n) * kChunk + row_start + row) *
+              kChunk + inner_start + inner;
+      const __nv_bfloat16 rounded = __float2bfloat16_rn(T[source]);
+      left[warp * kTileElements + element] = rounded;
+      if (T_bf16 != nullptr && value_tile == 0) {
+        T_bf16[source] = rounded;
+      }
     }
     for (int element = threadIdx.x; element < kTileElements;
          element += blockDim.x) {
@@ -906,8 +914,14 @@ __global__ void nanochat_kda_wy_backward_group_uw_wmma_c64_kernel(
       const int64_t source =
           (static_cast<int64_t>(local_n) * kChunk + inner_start + inner) *
           kDim + value_start + value;
-      right[element] = __float2bfloat16_rn(P[source]);
-      right[kTileElements + element] = __float2bfloat16_rn(Q[source]);
+      const __nv_bfloat16 rounded_p = __float2bfloat16_rn(P[source]);
+      const __nv_bfloat16 rounded_q = __float2bfloat16_rn(Q[source]);
+      right[element] = rounded_p;
+      right[kTileElements + element] = rounded_q;
+      if (P_bf16 != nullptr) {
+        P_bf16[source] = rounded_p;
+        Q_bf16[source] = rounded_q;
+      }
     }
     __syncthreads();
 
@@ -2776,7 +2790,7 @@ nanochat_kda_chunk_wy_backward_c64(
         kGroupRows * (kDim / 16), 128, 0, stream>>>(
         T_group.data_ptr<float>(), P_group.data_ptr<float>(),
         Q_group.data_ptr<float>(), U_group.data_ptr<float>(),
-        W_group.data_ptr<float>(), kGroupRows);
+        W_group.data_ptr<float>(), nullptr, nullptr, nullptr, kGroupRows);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     at::Tensor R_group = at::empty_like(P_group);
     at::Tensor E_group = at::empty_like(Q_group);
@@ -2824,11 +2838,23 @@ nanochat_kda_chunk_wy_backward_c64(
     at::Tensor T_group = pack_matrices(T, chunk_start);
     at::Tensor U_group = at::empty_like(P_group);
     at::Tensor W_group = at::empty_like(Q_group);
+    at::Tensor P_group_bf16 = at::empty(
+        {kGroupRows, kChunk, kDim}, q.options());
+    at::Tensor Q_group_bf16 = at::empty_like(P_group_bf16);
+    at::Tensor T_group_bf16 = at::empty(
+        {kGroupRows, kChunk, kChunk}, q.options());
     nanochat_kda_wy_backward_group_uw_wmma_c64_kernel<<<
         kGroupRows * (kDim / 16), 128, 0, stream>>>(
         T_group.data_ptr<float>(), P_group.data_ptr<float>(),
         Q_group.data_ptr<float>(), U_group.data_ptr<float>(),
-        W_group.data_ptr<float>(), kGroupRows);
+        W_group.data_ptr<float>(),
+        reinterpret_cast<__nv_bfloat16*>(
+            P_group_bf16.data_ptr<at::BFloat16>()),
+        reinterpret_cast<__nv_bfloat16*>(
+            Q_group_bf16.data_ptr<at::BFloat16>()),
+        reinterpret_cast<__nv_bfloat16*>(
+            T_group_bf16.data_ptr<at::BFloat16>()),
+        kGroupRows);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     at::Tensor R_group = at::empty_like(P_group);
     at::Tensor E_group = at::empty_like(Q_group);
@@ -2887,24 +2913,6 @@ nanochat_kda_chunk_wy_backward_c64(
         reinterpret_cast<const __nv_bfloat16*>(
             z_group_bf16.data_ptr<at::BFloat16>()),
         dA_group.data_ptr<float>(), chunk_start, kGroupChunks);
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
-    at::Tensor P_group_bf16 = at::empty(
-        {kGroupRows, kChunk, kDim}, q.options());
-    at::Tensor Q_group_bf16 = at::empty_like(P_group_bf16);
-    at::Tensor T_group_bf16 = at::empty(
-        {kGroupRows, kChunk, kChunk}, q.options());
-    nanochat_kda_wy_backward_pack_bf16_pqt_c64_kernel<<<
-        (kGroupVectorElements + kThreads - 1) / kThreads,
-        kThreads, 0, stream>>>(
-        P_group.data_ptr<float>(), Q_group.data_ptr<float>(),
-        T_group.data_ptr<float>(),
-        reinterpret_cast<__nv_bfloat16*>(
-            P_group_bf16.data_ptr<at::BFloat16>()),
-        reinterpret_cast<__nv_bfloat16*>(
-            Q_group_bf16.data_ptr<at::BFloat16>()),
-        reinterpret_cast<__nv_bfloat16*>(
-            T_group_bf16.data_ptr<at::BFloat16>()),
-        kGroupVectorElements, kGroupMatrixElements);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     at::Tensor dqbar_group = at::empty_like(P_group);
     at::Tensor dkhat_group = at::empty_like(Q_group);
