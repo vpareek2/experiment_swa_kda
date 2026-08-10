@@ -9284,3 +9284,78 @@ uv run --no-sync python scripts/kda_cuda_development.py \
   strategy should remove launches/dependencies while retaining already
   materialized FP32 intermediates, rather than compressing them and paying to
   reconstruct exact values. Do not retest attempt 129 unchanged.
+
+## 2026-08-09 [Codex] Attempt 130 group-major backward workspace reuse subthreshold at Level 1
+
+**Context**
+
+- Attempt 130 starts directly from accepted attempt 127 and explicitly widens
+  attempt 110's useful but rejected group-major layout result. Backward
+  preprocessing constructs `P/Q/A/T` in eight-chunk group-major order, removing
+  56 `.contiguous()` packing copies.
+- After each forward boundary group forms `U/W`, the candidate overwrites that
+  group's now-idle `P/Q` backing with exact FP32 `R/E`. Reverse consumes those
+  preserved vectors and recomputes exact `P/Q` into the same per-group temporary
+  footprint formerly allocated for `R/E`. This eliminates the reverse `R/E`
+  pack with no persistent-workspace increase.
+- The candidate also explicitly zeros backward `A` before the lower tile
+  triangle is written, because the dense `A^T dO` product reads every tile.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_130 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact seed-4101 production capture and independent fresh-cache repeat.
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_130 \
+  push -u origin kda-cuda/wy-backward-group-reuse-130
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_127 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_130 \
+  runs/kda-cuda-development/attempt-00130-backward-group-reuse-level1 \
+  --level2-order baseline-first
+```
+
+**Artifacts**
+
+- Pushed commit `4d3e48d5aee7ed40b17650c7328a1f566f8981c7`;
+  backward source SHA-256
+  `0d6e130b753403172d23858cfe2f57b45716cd656da9416e3ff1e674e30a6186`.
+- Protected checker:
+  `runs/kda-cuda-development/diagnostics/attempt-00130-backward-group-reuse-protected-checker`,
+  manifest `ed2cc9e8d9d2df9d377b9d34bb3433d63d728dc62cebb676c40843a43f41884e`.
+- Production comparison/repeat:
+  `runs/kda-cuda-development/diagnostics/attempt-00130-backward-group-reuse-gradient`,
+  manifest `d64768769b4894236e0c734f47e955ee3ba84cbcdd868ad106dc918ffb5e7e86`.
+- Level 1:
+  `runs/kda-cuda-development/attempt-00130-backward-group-reuse-level1`,
+  manifest `b03dd6206551f73b74611cd7cde4a1eca02fae858b87b91dc20ee4c91060b474`.
+- Append-only attempt/reference index has 136 valid JSONL entries, SHA-256
+  `9e44e401b329f422d109c172df8f4a521e8cf27e3f4932ac9e273811fe2b95f2`.
+
+**Result**
+
+- Output and `dq` are bitwise equal to the frozen accepted-equivalent capture;
+  maximum gradient delta is `2.0559127733577043e-09`, inside the frozen
+  contract. The independent fresh-cache repeat is bitwise exact for output and
+  all seven gradients. Ownership is 1.0, protected runtime/profile audit
+  passes, and runtime remains FLA-free.
+- Level 1 is promising but subthreshold. T=4096 forward+backward improves
+  `11.816688 -> 11.480240 ms` (2.847%), narrowly below the declared 3% gate.
+  Peak allocation falls 2.569%, from 204,081,664 to 198,838,784 bytes. T=256
+  improves 2.205%; T=1024 regresses 1.748%, inside the 5% guard.
+- No retest, sanitizer, or Level-2 run was performed. This is development
+  evidence only, is not statistically confirmed, and contains no LM-quality
+  evaluation.
+
+**Next**
+
+- Keep exact `f2fa705e22fc97d2f455b4ccabcf42a6a9ab120f` as the accepted
+  development baseline. Attempt 130 is preserved subthreshold evidence and
+  must not be described as accepted.
+- The distinct follow-up should fuse reverse `P/Q` recomputation with the
+  existing grad-output pack. Both traverse the identical group-major vector
+  index space; one fused producer can remove eight launches and duplicate
+  index arithmetic while retaining exact equations and attempt 130's bounded
+  workspace. Do not rerun attempt 130 unchanged.
