@@ -12687,3 +12687,69 @@ uv run --no-sync python scripts/kda_cuda_development.py \
   and transforming the full local 64x64 inverse adjoint if the colored intra
   VJP can consume a more direct factorization. Do not move or recompute the
   already-rejected `R/E` and reverse-base work unchanged.
+
+## 2026-08-10 [Codex] Parallel triangular inverse adjoint saves work but not time
+
+**Context**
+
+- Attempt180 starts from exact parent176 and exploits the lower-triangular WY
+  solve. The broad VJP emits its rounded local 64x64 adjoint, then 480
+  independent one-warp CTAs compute only the ten lower tiles of
+  `-T^T G T^T`: for tile `(r,c)`, only first-product rows `a >= r` and
+  second-product columns `k <= c` are visited.
+- This reduces nominal inverse-transform WMMA work from 128 to 55 operations
+  per chunk while preserving the established BF16 handoff. It is owned CUDA;
+  FLA remains an offline equation/schedule reference only.
+
+**Commands**
+
+```bash
+# Exact staged protected audit, commit/push, seed-4101 production comparison,
+# and one clean baseline-first Level 1 versus exact attempt176.
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_180 \
+  --lane optimization <isolated artifact/cache arguments>
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_176 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_180 \
+  runs/kda-cuda-development/attempt-00180-fla-triangular-inverse-adjoint-level1 \
+  --level2-order baseline-first
+```
+
+**Artifacts**
+
+- Branch `kda-cuda/fla-triangular-inverse-adjoint-180`, pushed commit
+  `1434068018195c2a6a66a82d27593f7d485299eb`; changed source SHA-256
+  `01d34b2d2dbded544413332494615d79e9c3280585825c5ea931f3c9b4aa0453`.
+- Checker summary
+  `2e5b41e6e6445665a1d44c692d53d646cf5933a7afd0b101e6ef587157a9d364`;
+  production-gradient manifest
+  `46b7255b3cde21bf8d0a9aa80fe338ca1102aacb6995b91bf4320882d5d966ac`;
+  Level-1 manifest
+  `1f5e7603bf379b18b38ecf53e6559be456fc589cf5356c9e5892ea5359fd3ef4`.
+- The append-only index now has 203 rows and hashes to
+  `b515ad539406e321040bc45ca7ac3873e5eae378d5d2fcfa2effccade837d4d1`.
+
+**Result**
+
+- Candidate output and all seven production gradients are bitwise equal to
+  attempt176 and finite. The protected audit passes at ownership 1.0 with
+  runtime/profile FLA freedom. The broad kernel falls to 128 registers/thread;
+  the triangular kernel uses 36 registers, 3,584 shared bytes, and no spill.
+- Level 1 is below threshold. T=4096 forward+backward improves only
+  `9.621792 -> 9.605152 ms` (0.173%) while allocation rises 0.206%. T=256 and
+  T=1024 regress 2.514% and 0.934%. The reduced arithmetic is offset by a new
+  BF16 global adjoint handoff and 480 one-warp CTAs.
+- No Level 2, sanitizer run, statistical confirmation, or LM-quality
+  evaluation ran. Attempt176 remains the development parent and attempt175
+  remains the latest matched full-throughput baseline at 36,719.5 tok/s.
+
+**Next**
+
+- Return to exact attempt176. Preserve the proven triangular dependency, but
+  apply it inside the original broad CTA: each row warp needs only output
+  columns at or below its row, first-transform tiles at or below its row, and
+  second-transform inner columns at or below the output column.
+- This in-place form should require only 40 WMMA operations per chunk and no
+  new buffer or launch. Test exact production gradients before Level 1 and do
+  not compose attempt180's global handoff.
