@@ -12616,3 +12616,74 @@ uv run --no-sync python scripts/kda_cuda_development.py \
   group boundary/reverse scans. Concentrate on a consumer-side state fusion or
   a compact all-chunk state schedule, while preserving the rejected global
   pipeline evidence from attempt171.
+
+## 2026-08-10 [Codex] Balanced eight-warp VJP is exact but rejects at Level 1
+
+**Context**
+
+- Before launching attempt178, the archive showed its group-local BF16 `R/E`
+  compression repeated already-rejected attempts129 and158. Its worktree and
+  staged idea are preserved unrun; no GPU evidence or performance conclusion
+  is assigned to it.
+- Attempt179 starts from exact convolution parent176 and extends the useful
+  resource result from attempt164. Two warps share each 16-row broad-VJP tile,
+  retain two adjoint fragments each, and alternate value/key strips so the
+  second four warps participate in the row-local products that were idle in
+  attempt164. Equations, WMMA accumulation order, buffers, precision, and ABI
+  remain unchanged. FLA is an offline schedule reference only.
+
+**Commands**
+
+```bash
+# Exact staged protected correctness/runtime/profile audit, then commit/push.
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_179 \
+  --lane optimization <isolated artifact/cache arguments>
+# Clean matched Level 1 versus exact attempt176 and one seed-4101 production
+# output/gradient capture per committed worktree. No Level 2 was launched.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_176 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_179 \
+  runs/kda-cuda-development/attempt-00179-fla-balanced-eight-warp-vjp-level1 \
+  --level2-order candidate-first
+```
+
+**Artifacts**
+
+- Branch `kda-cuda/fla-balanced-eight-warp-vjp-179`, pushed commit
+  `0bf7d1b834a2cbef36524c444cc5872b60cd0688`; changed source SHA-256
+  `9187de7a87be93d51d8e4eaebd44d6a8968a5ab59ec9ad440f99978fc0a6a9f1`.
+- Protected precommit checker summary
+  `85f2bdc8f7cecd478ba4932a3baee8ae3cfebec494f5d333c517cfa25df7fa40`;
+  production-gradient manifest
+  `fee74163e3448d46f244e77760ad5d06344a55c3c0b6ca23e7db352543b6eaf0`;
+  Level-1 manifest
+  `d848ee2223418b371cf0870459a49d3a074633b717a7451e2226b20fd1c0124b`.
+- The append-only index now has 202 rows and hashes to
+  `c993f2a64cb335db0c8e8d67e9e468cda24b9b9d147e439a10ff3e25f1ca8699`.
+
+**Result**
+
+- Candidate output and all seven production gradients are bitwise equal to
+  attempt176 and finite. The protected audit passes at ownership 1.0 with
+  runtime/profile FLA freedom. The kernel compiles to 86 registers/thread,
+  25,600 shared bytes, and zero local/stack spill.
+- Level 1 rejects the candidate. T=4096 forward+backward regresses
+  `9.553616 -> 9.573760 ms` (0.211%) at equal allocation; T=1024 regresses
+  3.973%, while T=256 improves 3.161%. The balanced schedule removes the
+  obvious idle row-local work but the 256-thread CTA and synchronization cost
+  erase the expected gain.
+- No Level 2, sanitizer run, statistical confirmation, or LM-quality
+  evaluation ran. Attempt176 remains the validated convolution development
+  parent; attempt175 remains the latest full matched throughput baseline at
+  36,719.5 tok/s, 84.06% of FLA and 6,960.5 tok/s short.
+
+**Next**
+
+- Return to exact attempt176. Close the broad-VJP warp-count/register-layout
+  axis: four, forced-four-CTA, idle-eight, and balanced-eight schedules are all
+  preserved, and none advances end-to-end development.
+- Match FLA through an equation/decomposition reduction: avoid materializing
+  and transforming the full local 64x64 inverse adjoint if the colored intra
+  VJP can consume a more direct factorization. Do not move or recompute the
+  already-rejected `R/E` and reverse-base work unchanged.
