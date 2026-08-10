@@ -11434,3 +11434,57 @@ uv run --no-sync python scripts/kda_cuda_development.py \
   still requires FLA-like generated tensor-core/register scheduling and a much
   more coherent backward pipeline; do not spend another Level 2 on isolated
   sub-percent launch removal.
+
+## 2026-08-10 [Codex] Attempt161 profile localizes fast math to the broad VJP
+
+**Context**
+
+- One bounded correlated profile was taken from committed attempt161 after it
+  became the accepted development baseline. It uses the same seed-4101 C64
+  production shape as the preserved attempt157 profile.
+
+**Commands**
+
+```bash
+env PYTHONPATH=/home/veer/Master/projects/experiment_swa_kda_cuda_attempt_161 \
+  TORCH_EXTENSIONS_DIR=/tmp/kda161-profile-ext-001 \
+  CUDA_CACHE_PATH=/tmp/kda161-profile-cuda-001 \
+  FLA_FLASH_KDA=0 FLA_TILELANG=0 \
+  nsys profile --trace=cuda,nvtx --sample=none --cpuctxsw=none \
+  --output=runs/kda-cuda-development/profiles/attempt-00161-fla-fast-math-generic512-operator/trace \
+  .venv/bin/python <bounded-runner>
+# Export to SQLite and correlate launches within the named NVTX range.
+```
+
+**Artifacts**
+
+- Profile
+  `runs/kda-cuda-development/profiles/attempt-00161-fla-fast-math-generic512-operator`;
+  manifest `a4050877fac450928677ae70d3a449791c133dee3078f18b36021f158032a4c4`.
+- The append-only index now has 182 rows and hashes to
+  `1ef629fd0a7d3d05e137f56b55cee284fc5f53d4a26530c3470252d3b99aeb1d`.
+
+**Result**
+
+- Attempt161 still executes 193 correlated launches. Fast math reduces summed
+  kernel time from attempt157's `10.513696` to `9.626784 ms` and GPU span from
+  `11.046144` to `10.134528 ms`; this is arithmetic acceleration, not launch
+  collapse.
+- The broad VJP accounts for `0.580032 ms` of the `0.886912-ms` summed
+  reduction, falling `2.571616 -> 1.991584 ms`. Forward is essentially flat at
+  `1.053056 -> 1.055648 ms`. Boundary/reverse state programs fall only
+  `1.304096 -> 1.246944 ms` combined.
+- The broad VJP remains 2.50x FLA's preserved `0.797600 ms`. Attempt161's
+  `10.134528-ms` operator span also remains 5.147 ms above FLA's preserved
+  `4.987712 ms`. This profile is attribution only, not statistical or quality
+  evidence.
+
+**Next**
+
+- Keep attempt161 as the development parent. The next candidate should replace
+  the broad VJP's scalar/vector dot schedule with an FLA-style generated
+  tensor-core/register-resident decomposition while retaining the validated
+  WY/UT equations and compact histories.
+- After that kernel-scale intervention, target the still-distributed
+  boundary/reverse/pack/pair pipeline. Require a substantial Level-1 operator
+  reduction before another sparse Level 2.
