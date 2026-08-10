@@ -10944,3 +10944,95 @@ uv run --no-sync python scripts/kda_cuda_development.py \
   reduce launches/materializations outside the broad CTA, or use an allowed
   compiler-generated tensor-core layout that can hold FLA's full program
   tensors without importing or linking FLA at runtime.
+
+## 2026-08-10 [Codex] Attempts 151-154 reduce FLA-shaped history traffic but fail Level 2
+
+**Context**
+
+- An attempt-148 operator profile localized 11.142656 ms of summed kernel time
+  across 233 launches. The broad VJP costs 2.159616 ms, the reverse-group scan
+  1.295904 ms, and 50 MAGMA calls 1.035136 ms. This motivated four isolated
+  FLA-inspired changes: a four-warp broad VJP, removal of unused FP32 reverse
+  histories, vectorized BF16 `P/Q/T` packing, and fusion of the exact state-dot
+  reduction into the broad CTA.
+- Attempt 154 crossed the three-percent Level-1 gate, so it received the full
+  protected checker with sanitizers, an independent deterministic-gradient
+  repeat, and one sparse candidate-first matched Level-2 pair.
+
+**Commands**
+
+```bash
+# One frozen production-shape diagnostic and matched Level 1 per candidate.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_127 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_<151..154> \
+  runs/kda-cuda-development/attempt-<00151..00154>-<slug>-level1 \
+  --level2-order candidate-first
+
+# Attempt 154 only: protected checker from an exact staged validation snapshot,
+# all four sanitizers, one independent fresh-cache gradient repeat, and the
+# declared seven-step candidate-first Level-2 plan followed by accepted127.
+```
+
+**Artifacts**
+
+- Attempt 151 commit `e7f6134194d60ea1637e1a358f9a68f1459c87de`;
+  diagnostic manifest `569ad5d3c39cbf825a642598a1663416ccc3d3a6afc169b3776323e59ddb22c9`;
+  Level-1 manifest `10c67c3a03d48a70279d8d70aec2eee6c0e62a1c8e1921dbb89a9979906780cb`.
+- Attempt 152 commit `db4187c9033c38f2320341dcea073eec979c7f80`;
+  diagnostic manifest `230b366c06a6fa782aca9936e1a1d6800e855dfa01d0b1252ac3c9a69774c660`;
+  Level-1 manifest `c4cca2adb7ffa9f28b23fd5ea2fb3bda47be3d360d0ed07cea7b2dc5e6faa4b4`.
+- Attempt 153 commit `11de416d1e09cdc022817fa5ce05d33d5b772940`;
+  diagnostic manifest `638566637badbf0fe58a277063dac92944830bb412578c5d236eab1bcbb3d9d9`;
+  Level-1 manifest `a5211dc0df76a6f7268068a330825f2a417eaefa15a5255e8be60f3e793e54e0`.
+- Attempt 154 commit `2aa4a3421bf4c5d838c3ec72e4dba43414ccca95`;
+  diagnostic manifest `e0fb43312f4a14f93c9b8dff2f294f8f12ed33dd064d8776e37f64109dec1915`;
+  Level-1 manifest `b50bc27fbd461c5efcef70421e846fe32df703968591ea8607d448b3e564a665`;
+  checker manifest `39bb9d2c8ac6fcbe327ce280fc9d69dd8641898cd950894bf271080717817240`;
+  repeat manifest `9064fc6b95e3c9c103bf9363cb82eea1507c13573a930d3429e568fd8c8f517b`;
+  Level-2 manifest `0d5d0330f79712c50cc634c92d29ce28a3f0ec802213fe296658b2bbb0e82d21`.
+- Attempt-148 profile manifest
+  `23299363a79afeb27ea8bd11cc08ce5ccd8d4ccce2907accd3bb3b6bd0e1509f`.
+- Two invalid attempt-154 invocations are explicitly retained: the first
+  checker was run on a clean committed worktree instead of an exact staged
+  snapshot; the first repeat resolved the coordinator source root and raised
+  `FileNotFoundError` before producing tensors. Their manifests are
+  `9c1a995e851dca282fe58ce29040bd9377c266d700588e6db75a325ee2cfb035`
+  and `bb868a7b006e097fe94cb9a2ceb9dabc157571f2860e96d21a15bb99c29a8393`.
+- The append-only index now contains 172 rows and hashes to
+  `44550f1d43d6a12bedb3cc3b45c689cbb003c379f1a80bff23721329b0e4f2f1`.
+
+**Result**
+
+- All four production diagnostics are bitwise equal to their declared parent
+  for output and every gradient tensor. Attempts 151-153 remain non-conclusion-
+  bearing diagnostics and did not receive Level 2 or sanitizers.
+- Attempt 151 reduces the broad kernel to 100 registers/thread with no local
+  spill, but regresses T=4096 forward+backward 3.965%. Attempt 152 removes
+  unread FP32 `dZ` writes and the unused FP32 incoming-state history, improving
+  T=4096 by 2.205% and lowering peak allocation 2.954%; attempt 153's vector
+  pack is effectively neutral at 2.223%. Both remain below the Level-1 gate.
+- Attempt 154 removes eight standalone state-dot launches. Level 1 improves
+  `11.643072 -> 11.223296 ms` (3.605%) while lowering peak allocation 3.051%.
+  The valid protected audit reports ownership 1.0, runtime FLA freedom, and
+  clean memcheck, racecheck, synccheck, and initcheck. The independent repeat
+  is bitwise identical and all tensors are finite.
+- The Level-1 win does not survive end-to-end training. Candidate measured
+  `[34468,34472,34378,34413,34618]`, median 34,468 tok/s; matched accepted127
+  measured `[34619,34750,34795,34668,34675]`, median 34,675 tok/s. This is a
+  0.597% regression with identical 5,507.908 MiB peak memory, so attempt 154 is
+  rejected as a development baseline.
+- Accepted attempt127 remains 34,494 tok/s on its retained pair: 78.97% of the
+  external 43,680 tok/s FLA target and 9,186 tok/s behind it. Attempt 154's
+  current pair is 78.91% of FLA and 9,212 tok/s behind. No result is
+  statistically confirmed and no LM-quality evaluation ran.
+
+**Next**
+
+- Retain exact accepted attempt127. Preserve attempt152 as the useful compact
+  BF16-history mechanism and attempt154 as proof that a small exact launch
+  fusion can clear Level 1 yet vanish in full-model noise/overhead.
+- The next FLA-inspired intervention must be materially larger: collapse the
+  reverse scan and local VJP scheduling boundary, or eliminate a whole family
+  of MAGMA/pack launches while preserving the validated WY/UT equations. Do
+  not spend another Level 2 on an isolated sub-percent launch reduction.
