@@ -10558,3 +10558,70 @@ cuobjdump --dump-resource-usage <isolated candidate library>
 - Move `do`, local `z/dZ`, `P/Q`, and the inverse to BF16 at their producers so
   the broad CTA can load tensor-core operands directly, shrink shared staging,
   and reduce barriers. Do not alter the now-validated adjoint equations.
+
+## 2026-08-10 [Codex] Attempt 143 validates BF16 operand boundary but remains rejected
+
+**Context**
+
+- Attempt 143 starts from complete-equation attempt 142. It emits local `z` in
+  BF16, converts each reverse-group `dZ` once, and lets the broad two-warp VJP
+  load those BF16 tensor-core operands directly. The validated adjoint algebra
+  is unchanged.
+- The first pre-commit diagnostic failed during compilation because an edit
+  changed the unused partial-kernel signature instead of the complete-kernel
+  signature. The failed build log is preserved. The corrected diagnostic used
+  the exact source later committed and pushed.
+
+**Commands**
+
+```bash
+# Two bounded production-shape compile/capture diagnostics; the first failed.
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_143 \
+  push -u origin kda-cuda/fla-bf16-local-operands-143
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_127 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_143 \
+  runs/kda-cuda-development/attempt-00143-fla-bf16-local-operands-level1 \
+  --level2-order candidate-first
+cuobjdump --dump-resource-usage <isolated candidate library>
+```
+
+**Artifacts**
+
+- Pushed commit `e7e9ca2cf4b1f8916f9a304163d81b11b9da8962`; backward
+  source SHA-256
+  `33fbf052b582e7e406bbca51013fa0e0d5a96efc2c6ca4489102869bfd375033`.
+- Invalid first compile manifest
+  `6ac91cab38eae269a4e6457275b3b956f615a7df03de4b1ce88f44b8110efc30`.
+- Successful single pre-commit equation diagnostic manifest
+  `7357d42aaa9cad72bf8b4854f18470d66effbb3d58cca9582571c4c086421396`.
+- Level-1 manifest
+  `c621267dd25b0e631f68fff84570b3876b82c44bceafe670005668c5af051ff2`.
+
+**Result**
+
+- The corrected production diagnostic is bitwise equal to attempt 142 for
+  output and every frozen gradient. It is explicitly non-conclusion-bearing:
+  no independent repeat or protected checker was run after Level 1 rejected
+  the committed candidate. The committed Level-1 runtime audit completed and
+  remained FLA-free.
+- T=4096 forward+backward improves from attempt 142's candidate 16.710032 ms
+  to 13.391296 ms, recovering 19.861% of its time. Against accepted attempt
+  127, however, it regresses `11.667536 -> 13.391296 ms` (14.774%). Peak
+  allocation rises `204,081,664 -> 210,897,408` bytes (3.340%), also failing
+  the memory guard. T=1024 improves 2.754%; T=256 regresses 0.290%.
+- The broad kernel uses 164 registers/thread, 34,816 bytes shared, and zero
+  local bytes/thread. BF16 operand placement is materially beneficial, but the
+  transient BF16 `dZ` copy and remaining FP32 `dO/P/Q/T` staging do not yet
+  match FLA's producer/consumer boundary.
+- No sanitizer, protected checker, deterministic repeat, operator profile, or
+  Level 2 ran. This is not statistically confirmed and has no LM-quality result.
+
+**Next**
+
+- Keep exact accepted attempt 127. Preserve attempt 143 as operand-boundary
+  evidence, not an accepted candidate.
+- Produce BF16 `dZ` inside the reverse scan instead of allocating a conversion
+  copy. Fold BF16 `dO/z` and output-side `dA = dO z^T` into the broad CTA so its
+  FP32 pack/BMM/workspaces disappear. Only then extend BF16 ownership to
+  `P/Q/T`, avoiding new full-sequence workspaces.
