@@ -10383,3 +10383,40 @@ uv run --no-sync python scripts/kda_cuda_development.py \
   expanded FP32 H/dH tensors plus dense dR/dE/dW/dP/dQ workspaces. Those
   removals must recover about 24.4 MB and turn the scaffold's 2.88% gain into
   a memory-safe improvement before any Level 2 run.
+
+## 2026-08-09 [Codex] Attempt 140 profile localizes the next FLA-parity boundary
+
+**Context**
+
+- One bounded correlated operator profile was captured after attempt 140's
+  correctness and Level-1 result. Accepted 127 and FLA were not rerun.
+
+**Commands**
+
+```bash
+nsys profile --trace=cuda,nvtx,osrt --sample=none --cpuctxsw=none \
+  <attempt140 production-shape operator runner>
+nsys export --type sqlite <trace>
+# Join runtime launches inside the NVTX range to kernels by correlationId.
+```
+
+**Artifacts**
+
+- `runs/kda-cuda-development/profiles/attempt-00140-fla-boundary-histories-operator`,
+  manifest `ceeb8b9d27e4da2b82b90466c314adb0a24f0d661fdcb799be0bd54ce79a14d1`.
+
+**Result**
+
+- Attempt 140 reduces accepted 127's 393 launches, 10.999328-ms summed time,
+  and 11.928448-ms span to 361, 10.524896 ms, and 11.344384 ms.
+- The full compact reverse scan is only eight launches / 0.679360 ms. The
+  remaining duplicated/local phase includes 24 pack-group launches costing
+  0.758048 ms and 98 MAGMA SGEMMs costing 1.628800 ms. This directly supports
+  leaving the reverse scan intact and replacing the second phase.
+
+**Next**
+
+- Build the two-warp chunk-by-head local VJP on attempt 140's history boundary.
+  It must consume BF16 H/dH directly and remove expanded states and dense
+  vector-gradient workspaces. Do not spend another profile until that complete
+  boundary passes production gradients and Level 1.
