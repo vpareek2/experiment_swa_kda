@@ -10259,3 +10259,67 @@ uv run --no-sync research cuda-candidate-check \
   warp-local result scratch. Retain only a global `dP` product so `dQ` can be
   computed without CTA barriers; remove `dR/dE/dQ` workspaces and their
   standalone consumers.
+
+## 2026-08-09 [Codex] Attempt 139 column-warp direct VJP rejected at Level 1
+
+**Context**
+
+- Attempt 139 starts exactly from accepted attempt 127 and tests the final
+  manual-WMMA ownership topology suggested by attempts 137/138. Eight warps
+  each own one 16-column tile with one live accumulator. A retained global
+  `dP = T^T dZ` BMM supplies the dependent operand; the CTA directly consumes
+  `dP` and computes `dR`, `dE`, and `dQ`, removing their BMMs and workspaces.
+- FLA remains an offline equation/schedule reference only. No FLA code is
+  imported or linked.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_139 \
+  --lane optimization <isolated artifact/cache arguments>
+# Seed-4101 production capture and independent fresh-cache repeat.
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_139 \
+  push -u origin kda-cuda/fla-column-direct-vjp-139
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_127 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_139 \
+  runs/kda-cuda-development/attempt-00139-fla-column-direct-vjp-level1 \
+  --level2-order candidate-first
+```
+
+**Artifacts**
+
+- Pushed commit `28ab1815afa0a226b27157576a8f6f1130c539b3`; backward
+  source SHA-256 `dd6795a81fb26657585633ce01c5eec21ec79fb02c2167f24c165cec1d4a4392`.
+- Protected checker manifest:
+  `a4f98037fdc74312dfd4ec3ea7f26bdcd20b07ac69e9247072f7d6e725d3df9a`.
+- Production comparison/repeat manifest:
+  `2e4f92f19319f6ef6215d91f6f911c85e621208d01f9219349266c05e9cad990`.
+- Level-1 manifest:
+  `8fbbadf3ef095d2bff247a377eb3433941daf735c3021b5dec18f60f17b1ec88`.
+
+**Result**
+
+- The protected checker passes ownership 1.0, runtime/profile audit, and
+  runtime FLA freedom. Production output is bitwise equal, maximum frozen
+  gradient delta is `5.820766091346741e-11`, and every fresh-cache repeat
+  tensor is bitwise exact.
+- Level 1 rejects the topology. T=4096 forward+backward regresses
+  `11.503872 -> 11.920704 ms` (3.623%). Peak allocation rises 0.385%, within
+  the memory guard. T=256 and T=1024 forward+backward improve 0.923% and
+  1.062%, respectively, and all important-row guards pass.
+- No sanitizer, profile, or Level 2 ran. This is development evidence only,
+  is not statistically confirmed, and contains no LM-quality result.
+
+**Next**
+
+- Keep exact `f2fa705e22fc97d2f455b4ccabcf42a6a9ab120f` as the accepted
+  development baseline. Preserve attempt 139 as a correct rejection.
+- Attempts 136-139 now close the practical manual-WMMA variants of the direct
+  local VJP: shared-resident, row-owner, and column-owner schedules all cost
+  more at T=4096 than the generic products they replace. Before another
+  implementation, inspect the preserved FLA compiler output to recover its
+  actual tensor-core instruction and register topology. Use that evidence to
+  select either a measured inline-PTX path or a true compact-reverse-scan then
+  broad-local-VJP boundary; do not replay these CTA layouts unchanged.
