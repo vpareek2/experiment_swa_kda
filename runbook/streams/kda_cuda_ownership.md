@@ -11914,3 +11914,90 @@ uv run --no-sync python scripts/kda_cuda_development.py \
 - Target a cheaper adjacent boundary without exponentials, or return to the
   broad VJP's still-1.538-ms schedule with a decomposition that lowers useful
   work rather than only launch count.
+
+## 2026-08-10 [Codex] Flattened pair grids become the accepted baseline
+
+**Context**
+
+- Attempt168 restarts from attempt165. Forward and backward each constructed
+  the ten independent lower-triangular A/M tile pairs as ten serialized
+  24-CTA launches. The candidate derives `(target_tile, source_tile)` from a
+  flattened block index and exposes all 240 disjoint chunk/pair CTAs in one
+  launch per direction. Arithmetic, pair ordering within each CTA, output
+  locations, rounding, allocation, precision, and public ABI are unchanged.
+
+**Commands**
+
+```bash
+# Seed-4101 capture, incremental Level 1 versus attempt165, exact staged
+# checker with all sanitizers, independent repeat, and one bounded profile.
+# Then direct Level 1 versus accepted attempt161 and exactly one saved
+# baseline-first seven-step Level-2 pair.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_161 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_168 \
+  runs/kda-cuda-development/attempt-00168-flat-pair-grid-vs-accepted-level1 \
+  --level2-order baseline-first
+uv run --no-sync python \
+  runs/kda-cuda-development/attempt-00168-flat-pair-grid-vs-accepted-level2/run_level2.py
+```
+
+**Artifacts**
+
+- Branch `kda-cuda/flat-pair-grid-168`, pushed commit
+  `7576d021f66ea2c01dae5e41935fdc48e7f2a43c`; forward source SHA-256
+  `060a020ee06b6a0797b2f12d6743fbf3244835cceb46413cc677fa0c9ddf658e`;
+  backward source SHA-256
+  `2ed5efb0476bce985e6d308ba251064e47b50495723dbf9be4b74c74d80cba2c`.
+- Diagnostic manifest
+  `43a00d811d54e7e56eb590725f3501f548ec87b95ce9210eabe94b2796dee812`;
+  repeat manifest
+  `9c368571a2f175e973b5727b62ec8e79941460c92500c14ba36ee39a62560d04`;
+  checker manifest
+  `4b18f57e8bb1f0e55c7914dc1016b541a90ea1802cfd125bdacf2b65516037f9`.
+- Incremental Level-1 manifest
+  `bee9d6a306b74b62865c3309713378318344458a8d95745350837b88376944b9`;
+  direct accepted-baseline Level-1 manifest
+  `7d180dba74dd0f36a8c1486670abc60d0532a09991d9847f4943cc9e74bc27c1`;
+  profile manifest
+  `5d3f29f6af38815ccfb00add4449fd29ec914fef1f1dac344d29953091ac1da3`;
+  Level-2 manifest
+  `4a5aa538902b3813bbe78d8a5d3dcfff4005c82d974b3c9772197285748486f4`.
+- The append-only index now has 192 rows and hashes to
+  `a9a34cabdf4bbc01cf1704fb5b55e025365e8ab36753cd13a5525d9861d177c7`.
+
+**Result**
+
+- Output and every gradient are bitwise equal to attempt165; the independent
+  repeat is bitwise equal for all tensors and all values are finite. The exact
+  staged tree equals the candidate commit tree. The protected checker reports
+  ownership 1.0, runtime/profile FLA freedom, and zero-error memcheck,
+  racecheck, synccheck, and initcheck.
+- Incrementally versus attempt165, T=4096 forward+backward improves
+  `10.151744 -> 9.548432 ms` (5.943%) with identical allocation. Directly
+  versus accepted attempt161 it improves `10.291056 -> 9.617520 ms` (6.545%).
+  All important-shape guards pass; the incremental T=1024 comparison regresses
+  4.426%, inside but close to the five-percent limit.
+- The profile validates the launch-flattening mechanism. Launches fall
+  `185 -> 167`, summed kernel time `9.000256 -> 8.934784 ms`, and span
+  `9.478336 -> 9.377056 ms`. Forward and backward pair builders each become
+  one launch at 0.381920 and 0.385664 ms. The larger Level-1 improvement is
+  therefore treated as paired timing evidence, not wholly attributed to the
+  0.101-ms profiled span change.
+- The direct baseline-first Level-2 pair clears the declared two-percent gate.
+  Attempt168 measured `[36185,36098,36057,36217,36236]`, median 36,185 tok/s;
+  matched attempt161 measured `[35714,35485,35433,35116,35468]`, median
+  35,468 tok/s. The gain is 2.021%, with identical 5,507.908 MiB peak memory.
+- Attempt168 is the new accepted development baseline at 82.84% of FLA's
+  preserved 43,680 tok/s and 7,495 tok/s short. This is not statistically
+  confirmed and no LM-quality evaluation ran. The official retained milestone
+  remains unchanged.
+
+**Next**
+
+- Use exact attempt168 as the next development parent. Continue applying
+  flattened grids to independent launch families; do not compose rejected R/E
+  producer variants.
+- The main compute gap remains the complete VJP plus colored-pair path. Any
+  fusion there must preserve deterministic update order and demonstrate a
+  substantial operator reduction before another sparse Level 2.
