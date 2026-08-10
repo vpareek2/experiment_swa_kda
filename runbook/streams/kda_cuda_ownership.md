@@ -14226,3 +14226,93 @@ uv run --no-sync python \
   chunk-parallel. Do not replay attempt135's naive all-product fusion or
   attempt198's two-warp schedule. Spend another Level 2 only if the candidate
   crosses the Level-1 gate and marks a major strategy boundary.
+
+
+## 2026-08-10 [Codex] All-64-chunk reverse state scan is exact but subthreshold
+
+**Context**
+
+- Attempt202 starts from the non-accepted attempt201 scaffold and moves the
+  four-warp/BV32 reverse state recurrence into one 24-CTA launch. Each CTA owns
+  one batch/head/32-value strip and walks all 64 chunks backward while the
+  local WY VJP remains broad and group-parallel.
+- Group-major `P` storage is reused for the separate FP32 `A^T dO` history;
+  pre-rounded `P`/`Q`/`T` are retained for local VJP work. The final `dq`, `dk`,
+  and `draw_gate` buffers temporarily hold full-sequence `qg`, `kg`, and `W`
+  before the scan, so the longer recurrence does not require three additional
+  full BF16 vector workspaces. FLA remains an offline equation/scheduling
+  reference only.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_202 \
+  --lane optimization --artifact-dir /tmp/kda-check-202 \
+  <isolated extension/CUDA caches>
+# Exact seed-4101 production-gradient capture and independent fresh-cache repeat,
+# using the coordinator interpreter from the candidate worktree cwd.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_201 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_202 \
+  runs/kda-cuda-development/attempt-00202-fla-all64-dh-scan-level1 \
+  --level2-order baseline-first
+nsys profile <bounded production chunk-forward/backward runner>
+```
+
+**Artifacts**
+
+- Branch `kda-cuda/fla-all64-dh-scan-202`, pushed commit
+  `8eb055d0779b131c70bd35b223e87d33ad8875f5`; changed source SHA-256
+  `9ccefce29f49d002e7886eff37d35b3254dff7811fecf8d16295fdda4cd906c6`.
+- Checker summary
+  `75e687ce546cdb8114294b648eecd82a1d4aa4f668bbf3237e586914edc7c815`;
+  production-gradient manifest
+  `d061e8cf9633bce4c0d1b865247c0d3d609ccbe9fef21fd4fe6e5520d0a9bc35`;
+  Level-1 manifest
+  `4298ac4abd4b6d76e113a669b5b5ffffc64fcb9597c87b298b7a57de10faf919`;
+  operator-profile manifest
+  `07b82c29d1ae2309cdc2f5678a525b08d74b825ff2b2371215c5224fcd167c72`.
+- Append-only development index SHA-256 after attempt202:
+  `d18cbd586f33ad0c0c0734860620f2e20bbce16d7b2fd9451d4c9b8a597eec76`.
+- The diagnostic artifact preserves an excluded setup failure in
+  `invalid-coordinator-cwd.log`: the first wrapper used the coordinator cwd,
+  resolved candidate native sources against the coordinator, and stopped
+  before build or tensor execution. Valid captures used the coordinator
+  interpreter from the candidate cwd.
+
+**Result**
+
+- Ownership 1.0 and runtime/profile FLA freedom pass. Production output and all
+  seven gradients are finite, bitwise equal to attempt190, and bitwise equal
+  in an independent fresh-cache repeat.
+- Level 1 does not advance. T=4096 forward+backward improves only
+  `8.846176 -> 8.781536 ms` (0.731%), below the 3% threshold. Peak allocation
+  rises `187,173,376 -> 190,712,832` bytes (1.891%), within the 3% guard.
+  T=1024 improves 0.184%; T=256 regresses 0.721%; T=4096 forward regresses
+  0.177%. All important-shape guards pass.
+- The one-trace profile confirms the intended topology: 152 launches on one
+  stream, down from 167 for attempt201. It records 7.971296 ms summed kernel
+  time and an 8.363968 ms span, 10.339% and 10.349% lower respectively than
+  the attempt201 trace. These are mechanistic single-trace observations; the
+  matched Level-1 result remains authoritative.
+- The single all-sequence state scan takes 0.558464 ms, 27.788% longer than
+  attempt201's eight group scans summed at 0.437024 ms. It uses 146
+  registers/thread, 28,672 static shared bytes, and no local-memory spill.
+  The schedule removes seven scan launches and eight reverse group-U/W
+  launches, but the longer underfilled state kernel repays too little of the
+  operator path.
+- No Level 2, sanitizer campaign, statistical confirmation, or LM-quality
+  evaluation ran. Attempt201 remains a non-accepted mechanistic scaffold;
+  attempt176 and attempt175 remain the accepted convolution and full matched
+  development baselines.
+
+**Next**
+
+- Preserve attempt202 as an exact major scheduling boundary, not a baseline.
+  Do not spend a sparse Level 2 on a 0.731% Level-1 gain.
+- Keep attempt201 for further mechanistic work. The next candidate must reduce
+  the persistent scan's 0.558464 ms inner-loop cost rather than merely remove
+  launches—for example, match the retained FLA state's more efficient operand
+  staging/pipeline while preserving four-warp ownership, separate `A^T dO`,
+  broad local VJP work, exact rounding, and project-owned CUDA.
