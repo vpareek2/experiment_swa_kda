@@ -9688,3 +9688,89 @@ nsys profile --trace=cuda,nvtx,osrt --sample=none --cpuctxsw=none \
   group-boundary CTA. Preserve the exact FP32 update order and add only 512
   bytes of shared memory; compare the complete candidate to accepted attempt
   127 rather than treating attempt 133 as accepted.
+
+## 2026-08-09 [Codex] Attempt 134 boundary-decay cache subthreshold at Level 2
+
+**Context**
+
+- Attempt 134 explicitly widens rejected attempt 133 and compares the complete
+  candidate to accepted attempt 127. In the C64 backward group-boundary WMMA
+  kernel, 128 chunk-end `exp(prefix_g)` factors are formed once per CTA in 512
+  bytes of shared memory. The state update then reuses each key factor across
+  sixteen values instead of reevaluating it once per state element.
+- The intervention changes no global workspace, equation, FP32 update order,
+  or launch topology. It targets the 1.411616-ms kernel identified by the
+  attempt-133 production profile; attempt 133 remains rejected and is not an
+  accepted parent.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_134 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact seed-4101 production capture and independent fresh-cache repeat.
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_134 \
+  push -u origin kda-cuda/wy-boundary-decay-cache-134
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_127 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_134 \
+  runs/kda-cuda-development/attempt-00134-boundary-decay-cache-level1 \
+  --level2-order baseline-first
+# Full memcheck, racecheck, synccheck, and initcheck on an exact staged copy.
+# Execute the saved baseline-first Level-2 pair exactly once.
+```
+
+**Artifacts**
+
+- Pushed commit `04f66287fd9f632b3e92b1923af11e2d2ce441d6`;
+  backward source SHA-256
+  `31146710df70ff02808aad3a1570992d1f5070429d7aa825765d4195c1b79279`.
+- Protected checker:
+  `runs/kda-cuda-development/diagnostics/attempt-00134-boundary-decay-cache-protected-checker`,
+  manifest `54e77314190c8d22d868ae776d06c2ba412045b38338731c4eaa5dff7f2b750d`.
+- Production comparison/repeat:
+  `runs/kda-cuda-development/diagnostics/attempt-00134-boundary-decay-cache-gradient`,
+  manifest `70c93423ab6d929922c3af48d441f4a5a8c962d47473054c302d563a78f2b0cb`.
+- Level 1:
+  `runs/kda-cuda-development/attempt-00134-boundary-decay-cache-level1`,
+  manifest `e3f77a04bde78bc89e810da2321d4b317bc6903db3aefe85625be53bc3bba30a`.
+- Full sanitizer validation:
+  `runs/kda-cuda-development/validations/validation-00035-boundary-decay-cache`,
+  manifest `172ca863fe9b3f767352a20fee28e3ccbc9200ae194047a71de85b96e72c0a95`.
+- Level 2:
+  `runs/kda-cuda-development/attempt-00134-boundary-decay-cache-level2`,
+  manifest `e09538124972a8c29c43cf2dcb82f0a35fb9f49e40c1c758990b3d2e132d1dbe`.
+- Append-only attempt/reference index has 142 valid JSONL entries, SHA-256
+  `a17b69018e316b1d34bda30e374056a0a8beef125178bc9e48ea6b0ee8c1592a`.
+
+**Result**
+
+- Output and `dq` are bitwise equal to the frozen accepted-equivalent capture;
+  maximum other-gradient delta is `2.0559127733577043e-09`. The independent
+  fresh-cache repeat is bitwise exact for all eight tensors. Ownership is 1.0,
+  runtime remains FLA-free, and memcheck, racecheck, synccheck, and initcheck
+  report zero errors.
+- Level 1 advances. T=4096 forward+backward improves
+  `11.520704 -> 10.922368 ms` (5.194%) and peak allocation falls 2.569%.
+  T=256 combined improves 2.096% despite a 1.453% forward-only regression;
+  T=1024 combined improves 0.584%. Every latency and memory guard passes.
+- The exact baseline-first Level-2 pair is valid but below the retention gate.
+  Baseline samples `[34566,34275,34256,34006,34339]` have median 34,275
+  tok/s; candidate `[34411,34366,34567,34631,34549]` has median 34,549
+  tok/s. The gain is 0.799%, below 2%, and peak memory is equal at 5507.908
+  MiB. The candidate reaches 79.096% of the fixed 43,680 tok/s FLA reference,
+  leaving 9,131 tok/s to FLA and 10,451 tok/s to 45k.
+- This is development evidence only. It is not statistically confirmed and no
+  LM-quality evaluation ran.
+
+**Next**
+
+- Keep exact `f2fa705e22fc97d2f455b4ccabcf42a6a9ab120f` as the accepted
+  development baseline. Attempt 134 is a preserved Level-2 rejection and must
+  not be called accepted or silently composed.
+- Do not retest the cached-exponential change unchanged. Its isolated gain does
+  not materially reduce the full training step. Target a wider backward
+  GEMM/dependency boundary, especially the combined group-boundary/reverse scan
+  and the remaining ATen MAGMA/CUTLASS products, while retaining the T=256
+  guard.
