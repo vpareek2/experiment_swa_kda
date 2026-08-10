@@ -13094,3 +13094,70 @@ uv run --no-sync python scripts/kda_cuda_development.py \
   consumed directly from a producer-resident cooperative layout, eliminating
   rather than relocating the pack/global-memory boundary. Otherwise move to
   FLA's compact backward/state decomposition, where the measured gap is larger.
+
+## 2026-08-10 [Codex] Colored inverse-adjoint fusion is exact but moves serialization
+
+**Context**
+
+- Attempt186 returns to exact attempt176 and combines two previously validated
+  pieces without replaying either rejected schedule. The broad VJP emits its
+  rounded BF16 local adjoint, and each already-running colored intra-VJP CTA
+  computes only its own useful lower-triangular `-T^T G T^T` tile.
+- This removes the full FP32 `dM` allocation, its global write/read, and the
+  separate triangular transform launch. FLA is an offline equation/schedule
+  reference only; the implementation remains project-owned CUDA.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_186 \
+  --lane optimization <isolated artifact/cache arguments>
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_176 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_186 \
+  runs/kda-cuda-development/attempt-00186-fla-colored-inverse-adjoint-level1 \
+  --level2-order baseline-first
+```
+
+**Artifacts**
+
+- Branch `kda-cuda/fla-colored-inverse-adjoint-186`, pushed commit
+  `52e162e7ed0f74d4ddee58a51c754a8cd7ac6ecf`; changed source SHA-256
+  `4120bb4ee49a8a612910176f0cf8f47036c370aa99ed660bdb662ec742cc909f`.
+- Checker summary
+  `d21e34633048a32462e78bc3b6309551672f8e760046999abbf240a7b8393fb4`;
+  production-gradient manifest
+  `a7821abef6c9b6895c6be1c4d6d0918b9cc734126e3b652c946f0c369504a621`;
+  Level-1 manifest
+  `ee22f8d0baa9daba252a8f3bb2930f71d90837c40f0adb46dee6fb3a12cdb048`.
+
+**Result**
+
+- The protected audit passes ownership 1.0 and runtime/profile FLA freedom.
+  Production output and all seven gradients are bitwise equal to attempt176,
+  finite, and bitwise identical in a same-commit repeat.
+- Level 1 rejects the schedule. T=4096 forward+backward regresses
+  `9.634592 -> 9.673984 ms` (0.409%), and T=1024 regresses 3.140%.
+  T=256 improves 0.930%. Peak target-shape allocation falls only 0.206%, from
+  191,105,536 to 190,712,320 bytes.
+- The broad kernel falls to 128 registers/thread and 25,600 shared bytes. The
+  colored consumer uses 40 registers/thread, 43,520 shared bytes, and 16 stack
+  bytes/thread. Computing the inverse tile before each colored program moves
+  the serial work rather than hiding it behind the existing useful products.
+- The first checker invocation failed before build because `git add` ran from
+  the coordinator tree; the checker reported that no staged source existed.
+  No candidate code ran. The corrected checker used a new isolated artifact.
+- No Level 2, sanitizer run, statistical confirmation, or LM-quality
+  evaluation ran. Attempt176 remains the development parent; attempt175
+  remains the latest full matched baseline at 36,719.5 tok/s, 84.06% of FLA.
+
+**Next**
+
+- Close consumer-side inverse-transform fusion. Attempts180-182 and186 now
+  cover separate, in-place, specialized, and colored-consumer schedules; all
+  preserve exactness but fail to advance the long-sequence lane.
+- Return to exact attempt176. The next FLA-matching strategy must remove a
+  useful broad/state product or change the cooperative dataflow for the full
+  program. Moving the same inverse arithmetic across launch boundaries is a
+  measured plateau.
