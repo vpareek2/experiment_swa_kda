@@ -11036,3 +11036,85 @@ uv run --no-sync python scripts/kda_cuda_development.py \
   reverse scan and local VJP scheduling boundary, or eliminate a whole family
   of MAGMA/pack launches while preserving the validated WY/UT equations. Do
   not spend another Level 2 on an isolated sub-percent launch reduction.
+
+## 2026-08-10 [Codex] BF16 product-family fusion is correct but only adds 0.23% training throughput
+
+**Context**
+
+- Attempt 155 starts from the compact attempt-152 history scaffold and replaces
+  every paired FP32 `U=T·P` / `W=T·Q` MAGMA call with one owned four-warp WMMA
+  kernel. Attempt 156 adds a second owned eight-warp kernel that computes
+  `dstate_base=Rᵀ·dO` and `dZ=Aᵀ·dO` together. Both paths round only live BF16
+  tensor-core tiles, retain FP32 accumulation/output, and leave the existing
+  recurrence, VJP, and protected ABI unchanged.
+- This tests the remaining major FLA operand-boundary hypothesis directly:
+  whether removing two complete FP32 library-product families is large enough
+  to move six-layer training rather than only the isolated operator.
+
+**Commands**
+
+```bash
+# One frozen seed-4101 production-shape capture per candidate.
+# One matched Level 1 against accepted127 per committed candidate.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_127 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_<155|156> \
+  runs/kda-cuda-development/attempt-<00155|00156>-<slug>-level1
+
+# Attempt156 only: exact staged-snapshot protected checker with all four
+# sanitizers, one fresh-cache deterministic repeat, and one candidate-first
+# seven-step matched Level-2 pair.
+```
+
+**Artifacts**
+
+- Attempt 155 pushed commit `c58d8e8027973bd64290a1867401071cca0339eb`;
+  source SHA-256 `4ed7b47029a2cc8d95fdff259cfa9fb82ae6012b494c7b48a1b01722609460d9`;
+  diagnostic manifest `085f5ab2cba26ec6980018facf3aae4147e4a2ffd024a97dfb086c143ba3b36a`;
+  Level-1 manifest `c665c51d3c3c067cc03a5b3d1e6be21e622decc60b558986586ae3e411d3a644`.
+- Attempt 156 pushed commit `d6e3cc47fbe2b202d8e1a1f4d17606b981fd18f9`;
+  source SHA-256 `38a6210892508fc02d5847c67edb5113d9eb437c37e94513a7e50f30ae4c3eca`;
+  diagnostic manifest `90d6d4cbc9dffe458ebfd63074439259e1f74ac8126b583a12eda8c666ba3b12`;
+  Level-1 manifest `316f109e2c50c9ca4e4b6a2bde8dad952c245c720bdd649379f31581fdd71fcd`;
+  checker manifest `1c56797c3c65434b371842846fa75f68b3b5b35a251b44bc9f2db7916c008438`;
+  repeat manifest `659741d4addf9e402db346ee8bafc61493811f8f60d7ad5162c47ff107c609e3`;
+  Level-2 manifest `107c254efc8a09dbec85db2e96d90231130abfa2a776a3c0a27f9f81f18dc960`.
+- The append-only index now contains 174 rows and hashes to
+  `58afd9f1a7b97231d11ce1d3942ea7dde6d42e0fe8d37621a82b8150aae530d2`.
+
+**Result**
+
+- Attempt 155 preserves output bitwise and keeps every gradient finite; its
+  largest gradient delta from attempt152 is `1.463718e-11`. T=4096
+  forward+backward improves `11.446224 -> 11.150208 ms` (2.586%) and peak
+  allocation falls 3.597%, but it remains below the three-percent Level-1
+  advancement threshold and receives no Level 2 or sanitizer run.
+- Attempt 156 preserves output bitwise; its largest additional gradient delta
+  is `5.820766e-11`. The fresh-cache repeat is bitwise identical for every
+  tensor. The protected checker reports ownership 1.0, runtime FLA freedom,
+  and zero-error memcheck, racecheck, synccheck, and initcheck.
+- Attempt 156 clears Level 1 at `11.798144 -> 11.392112 ms` (3.441%) with the
+  same 3.597% allocation reduction. T=256 and T=1024 regress 3.331% and 2.145%,
+  respectively, remaining inside the five-percent guard.
+- The candidate-first Level-2 pair is valid but below the retention gate.
+  Candidate measured `[34513,34519,34689,34672,34778]`, median 34,672 tok/s;
+  matched accepted127 measured `[34688,34593,34596,34534,34535]`, median
+  34,593 tok/s. The gain is only 0.228%, with identical 5,507.908 MiB peak
+  memory. Attempt 156 is rejected as a development baseline.
+- Accepted attempt127 remains the exact retained development baseline at its
+  preserved 34,494 tok/s pair, 78.97% of the external 43,680 tok/s target.
+  Attempt156's non-retained current pair is 79.38% of FLA and 9,008 tok/s
+  behind. Neither result is statistically confirmed and no LM-quality
+  evaluation ran.
+
+**Next**
+
+- Retain accepted127. Preserve attempts155-156 as evidence that BF16
+  tensor-core rounding is numerically safe for these C64 WY products, but that
+  replacing isolated MAGMA families cannot close the end-to-end gap.
+- The next strategy must target the complete operator-scale difference:
+  accepted127 is about 11.9 ms / 393 launches versus FLA about 5.0 ms / 37
+  launches in the correlated profile. Pursue a broad compiler-generated or
+  register-resident C64 forward/reverse program that removes most pack,
+  history, pair-color, and library boundaries together; require a multi-ms
+  operator win before another Level 2.
