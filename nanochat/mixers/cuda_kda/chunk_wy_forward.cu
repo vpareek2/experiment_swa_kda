@@ -13,6 +13,7 @@
 #include <c10/cuda/CUDAException.h>
 
 #include <cuda_bf16.h>
+#include <cuda_pipeline_primitives.h>
 #include <cuda_runtime.h>
 #include <mma.h>
 
@@ -58,6 +59,31 @@ __device__ __forceinline__ int64_t chunk_matrix_index(
   return ((static_cast<int64_t>(n) * kChunk + row) * kChunk + column);
 }
 
+// Q retains its original FP32 allocation stride after becoming a compact BF16
+// scan view. The doubled BF16 stride keeps every chunk inside its own backing
+// range. Restored keys are packed key-major so each E^T WMMA tile is contiguous
+// and can be moved by cp.async without an intermediate transpose.
+__device__ __forceinline__ int64_t packed_strided_transpose_index(
+    int n, int d, int row) {
+  return static_cast<int64_t>(n) * kChunk * kDim * 2 + d * kChunk + row;
+}
+
+// A warp copies one contiguous 16x16 BF16 tile with 32 aligned 16-byte
+// transactions. Each lane owns one half-row; the pipeline group is committed
+// and waited by the caller so the next tile can overlap state staging + MMA.
+__device__ __forceinline__ void wy_async_copy_bf16_tile(
+    __nv_bfloat16* destination,
+    const __nv_bfloat16* source,
+    int source_stride,
+    int lane) {
+  const int row = lane / 2;
+  const int half = lane - row * 2;
+  __pipeline_memcpy_async(
+      destination + row * kMatrixTile + half * 8,
+      source + row * source_stride + half * 8,
+      16);
+}
+
 // F0: one key lane follows one channel through a complete 64-token chunk.
 // Lane zero performs every norm reduction in ascending-key order.
 __global__ void nanochat_kda_wy_preprocess_c64_kernel(
@@ -70,6 +96,7 @@ __global__ void nanochat_kda_wy_preprocess_c64_kernel(
     const float* dt_bias,
     float* qbar,
     float* khat,
+    __nv_bfloat16* qgamma,
     float* prefix_g,
     float* beta,
     float* P,
@@ -125,11 +152,13 @@ __global__ void nanochat_kda_wy_preprocess_c64_kernel(
     const float gate_input = __bfloat162float(raw_gate[source]) +
         dt_bias[h * kDim + d];
     running_g += lower_bound * wy_sigmoid(a * gate_input);
+    const float exp_g = expf(running_g);
     qbar[destination] = normalized_q;
     khat[destination] = normalized_k;
+    qgamma[destination] = __float2bfloat16_rn(normalized_q * exp_g);
     prefix_g[destination] = running_g;
     P[destination] = beta_value * __bfloat162float(v[source]);
-    Q[destination] = beta_value * expf(running_g) * normalized_k;
+    Q[destination] = beta_value * exp_g * normalized_k;
     __syncthreads();
   }
 }
@@ -218,7 +247,7 @@ __global__ void nanochat_kda_wy_build_pair_wmma_c64_kernel(
     const float* prefix_g,
     const float* beta,
     float* M,
-    float* A,
+    __nv_bfloat16* A,
     int target_start,
     int source_start) {
   namespace wmma = nvcuda::wmma;
@@ -284,7 +313,8 @@ __global__ void nanochat_kda_wy_build_pair_wmma_c64_kernel(
     const int row = target_start + local_row;
     const int source = source_start + local_source;
     const int64_t destination = chunk_matrix_index(n, row, source);
-    A[destination] = source <= row ? product[index] : 0.0f;
+    A[destination] = __float2bfloat16_rn(
+        source <= row ? product[index] : 0.0f);
     M[destination] = source < row
         ? beta[static_cast<int64_t>(n) * kChunk + row] *
             product[kMatrixTile * kMatrixTile + index]
@@ -548,6 +578,34 @@ __global__ void nanochat_kda_wy_scan_state_add_c64_kernel(
   }
 }
 
+// Q/T are dead after U/W are formed. Convert only the restored key and W into
+// those existing allocations: preprocess already emitted qgamma, and the pair
+// builder wrote A directly at its scan precision.
+__global__ void nanochat_kda_wy_pack_async_scan_vectors_c64_kernel(
+    const float* khat,
+    const float* prefix_g,
+    const float* W,
+    float* restored_storage,
+    float* W_storage) {
+  constexpr int kElements = kChunkRows * kChunk * kDim;
+  const int index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (index >= kElements) {
+    return;
+  }
+  constexpr int kChunkElements = kChunk * kDim;
+  const int n = index / kChunkElements;
+  const int within = index - n * kChunkElements;
+  const int row = within / kDim;
+  const int key = within - row * kDim;
+  const int64_t source = chunk_vector_index(n, row, key);
+  const float end_g = prefix_g[chunk_vector_index(n, kChunk - 1, key)];
+  auto* packed_k = reinterpret_cast<__nv_bfloat16*>(restored_storage);
+  auto* packed_W = reinterpret_cast<__nv_bfloat16*>(W_storage);
+  packed_k[packed_strided_transpose_index(n, key, row)] =
+      __float2bfloat16_rn(khat[source] * expf(end_g - prefix_g[source]));
+  packed_W[index] = __float2bfloat16_rn(W[source]);
+}
+
 // F4 tensor-core scan: one persistent CTA owns 32 adjacent V rows for one
 // (batch, head) recurrence.  A 32-value tile keeps the 24 CTAs large enough
 // to cover GB10 while sharing each W/qgamma/E master-operand load across two
@@ -555,12 +613,12 @@ __global__ void nanochat_kda_wy_scan_state_add_c64_kernel(
 // state, residual, output/update accumulators, and explicit BF16 cast tiles to
 // remain CTA-local without a workspace allocation.
 __global__ void nanochat_kda_chunk_wy_forward_wmma_c64_kernel(
-    const float* qbar,
-    const float* khat,
+    const __nv_bfloat16* qgamma,
+    const __nv_bfloat16* restored_k,
     const float* prefix_g,
-    const float* A,
+    const __nv_bfloat16* A,
     const float* U,
-    const float* W,
+    const __nv_bfloat16* W,
     __nv_bfloat16* output) {
   namespace wmma = nvcuda::wmma;
   constexpr int kValueTile = 32;
@@ -585,9 +643,14 @@ __global__ void nanochat_kda_chunk_wy_forward_wmma_c64_kernel(
   // CTA so row-major WMMA B tiles have unit-stride value columns.
   __shared__ float state[kDim * kValueTile];
   __shared__ float z[kChunk * kValueTile];
-  __shared__ float next_state[kDim * kValueTile];
-  __shared__ __nv_bfloat16 operand_a[kWarps * kTileElements];
-  __shared__ __nv_bfloat16 operand_b[kWarps * kTileElements];
+  __shared__ __align__(16) float next_state[kDim * kValueTile];
+  __shared__ __align__(16) __nv_bfloat16
+      operand_a[2 * kWarps * kTileElements];
+  // Each phase consumes its BF16 right tile before storing an FP32 result into
+  // next_state. Reuse the first 4 KiB across that explicit lifetime boundary,
+  // keeping double-buffered A tiles within the 48-KiB static shared limit.
+  __nv_bfloat16* operand_b =
+      reinterpret_cast<__nv_bfloat16*>(next_state);
 
   for (int index = threadIdx.x; index < kDim * kValueTile;
        index += blockDim.x) {
@@ -615,20 +678,27 @@ __global__ void nanochat_kda_chunk_wy_forward_wmma_c64_kernel(
       wmma::fill_fragment(accumulator, 0.0f);
       const int row_start = (warp / 2) * kMatrix;
       const int value_half = warp % 2;
+      int stage = 0;
+      wy_async_copy_bf16_tile(
+          operand_a + warp * kTileElements,
+          W + chunk_vector_index(n, row_start, 0), kDim, lane);
+      __pipeline_commit();
       for (int key_start = 0; key_start < kDim; key_start += kMatrix) {
-        for (int element = lane; element < kTileElements;
-             element += warpSize) {
-          const int row = element / kMatrix;
-          const int column = element - row * kMatrix;
-          const float master = W[chunk_vector_index(
-              n, row_start + row, key_start + column)];
-          operand_a[warp * kTileElements + element] =
-              __float2bfloat16_rn(master);
-        }
+        __pipeline_wait_prior(0);
         __syncwarp();
         MatrixA a_fragment;
         wmma::load_matrix_sync(
-            a_fragment, operand_a + warp * kTileElements, kMatrix);
+            a_fragment,
+            operand_a + (stage * kWarps + warp) * kTileElements,
+            kMatrix);
+        const int next_key = key_start + kMatrix;
+        if (next_key < kDim) {
+          const int next_stage = stage ^ 1;
+          wy_async_copy_bf16_tile(
+              operand_a + (next_stage * kWarps + warp) * kTileElements,
+              W + chunk_vector_index(n, row_start, next_key), kDim, lane);
+          __pipeline_commit();
+        }
         for (int element = lane; element < kTileElements;
              element += warpSize) {
           const int row = element / kMatrix;
@@ -645,6 +715,7 @@ __global__ void nanochat_kda_chunk_wy_forward_wmma_c64_kernel(
             b_fragment, operand_b + warp * kTileElements, kMatrix);
         wmma::mma_sync(
             accumulator, a_fragment, b_fragment, accumulator);
+        stage ^= 1;
       }
       wmma::store_matrix_sync(
           z + row_start * kValueTile + value_half * kMatrix,
@@ -666,21 +737,29 @@ __global__ void nanochat_kda_chunk_wy_forward_wmma_c64_kernel(
       wmma::fill_fragment(accumulator, 0.0f);
       const int row_start = (warp / 2) * kMatrix;
       const int value_half = warp % 2;
+      int stage = 0;
+      wy_async_copy_bf16_tile(
+          operand_a + warp * kTileElements,
+          qgamma + chunk_vector_index(n, row_start, 0),
+          kDim, lane);
+      __pipeline_commit();
       for (int key_start = 0; key_start < kDim; key_start += kMatrix) {
-        for (int element = lane; element < kTileElements;
-             element += warpSize) {
-          const int row = element / kMatrix;
-          const int column = element - row * kMatrix;
-          const int64_t master_offset = chunk_vector_index(
-              n, row_start + row, key_start + column);
-          const float master = qbar[master_offset] * expf(prefix_g[master_offset]);
-          operand_a[warp * kTileElements + element] =
-              __float2bfloat16_rn(master);
-        }
+        __pipeline_wait_prior(0);
         __syncwarp();
         MatrixA a_fragment;
         wmma::load_matrix_sync(
-            a_fragment, operand_a + warp * kTileElements, kMatrix);
+            a_fragment,
+            operand_a + (stage * kWarps + warp) * kTileElements,
+            kMatrix);
+        const int next_key = key_start + kMatrix;
+        if (next_key < kDim) {
+          const int next_stage = stage ^ 1;
+          wy_async_copy_bf16_tile(
+              operand_a + (next_stage * kWarps + warp) * kTileElements,
+              qgamma + chunk_vector_index(n, row_start, next_key),
+              kDim, lane);
+          __pipeline_commit();
+        }
         for (int element = lane; element < kTileElements;
              element += warpSize) {
           const int row = element / kMatrix;
@@ -697,22 +776,31 @@ __global__ void nanochat_kda_chunk_wy_forward_wmma_c64_kernel(
             b_fragment, operand_b + warp * kTileElements, kMatrix);
         wmma::mma_sync(
             accumulator, a_fragment, b_fragment, accumulator);
+        stage ^= 1;
       }
+      stage = 0;
+      wy_async_copy_bf16_tile(
+          operand_a + warp * kTileElements,
+          A + chunk_matrix_index(n, row_start, 0), kChunk, lane);
+      __pipeline_commit();
       for (int source_start = 0; source_start < kChunk;
            source_start += kMatrix) {
-        for (int element = lane; element < kTileElements;
-             element += warpSize) {
-          const int row = element / kMatrix;
-          const int column = element - row * kMatrix;
-          const float master = A[chunk_matrix_index(
-              n, row_start + row, source_start + column)];
-          operand_a[warp * kTileElements + element] =
-              __float2bfloat16_rn(master);
-        }
+        __pipeline_wait_prior(0);
         __syncwarp();
         MatrixA a_fragment;
         wmma::load_matrix_sync(
-            a_fragment, operand_a + warp * kTileElements, kMatrix);
+            a_fragment,
+            operand_a + (stage * kWarps + warp) * kTileElements,
+            kMatrix);
+        const int next_source = source_start + kMatrix;
+        if (next_source < kChunk) {
+          const int next_stage = stage ^ 1;
+          wy_async_copy_bf16_tile(
+              operand_a + (next_stage * kWarps + warp) * kTileElements,
+              A + chunk_matrix_index(n, row_start, next_source),
+              kChunk, lane);
+          __pipeline_commit();
+        }
         for (int element = lane; element < kTileElements;
              element += warpSize) {
           const int row = element / kMatrix;
@@ -729,7 +817,11 @@ __global__ void nanochat_kda_chunk_wy_forward_wmma_c64_kernel(
             b_fragment, operand_b + warp * kTileElements, kMatrix);
         wmma::mma_sync(
             accumulator, a_fragment, b_fragment, accumulator);
+        stage ^= 1;
       }
+      // operand_b aliases next_state across warps. All right fragments must be
+      // register-resident before any warp overwrites that shared region.
+      __syncthreads();
       wmma::store_matrix_sync(
           next_state + row_start * kValueTile + value_half * kMatrix,
           accumulator, kValueTile, wmma::mem_row_major);
@@ -752,27 +844,31 @@ __global__ void nanochat_kda_chunk_wy_forward_wmma_c64_kernel(
       wmma::fill_fragment(accumulators[0], 0.0f);
       wmma::fill_fragment(accumulators[1], 0.0f);
       const int key_start = warp * kMatrix;
+      int stage = 0;
+      wy_async_copy_bf16_tile(
+          operand_a + warp * kTileElements,
+          restored_k + packed_strided_transpose_index(n, key_start, 0),
+          kChunk, lane);
+      __pipeline_commit();
       for (int source_start = 0; source_start < kChunk;
            source_start += kMatrix) {
-        for (int element = lane; element < kTileElements;
-             element += warpSize) {
-          const int row = element / kMatrix;
-          const int column = element - row * kMatrix;
-          const int key = key_start + row;
-          const int source_row = source_start + column;
-          const float end_g = prefix_g[chunk_vector_index(
-              n, kChunk - 1, key)];
-          const int64_t master_offset = chunk_vector_index(
-              n, source_row, key);
-          const float master = khat[master_offset] *
-              expf(end_g - prefix_g[master_offset]);
-          operand_a[warp * kTileElements + element] =
-              __float2bfloat16_rn(master);
-        }
+        __pipeline_wait_prior(0);
         __syncwarp();
         MatrixA a_fragment;
         wmma::load_matrix_sync(
-            a_fragment, operand_a + warp * kTileElements, kMatrix);
+            a_fragment,
+            operand_a + (stage * kWarps + warp) * kTileElements,
+            kMatrix);
+        const int next_source = source_start + kMatrix;
+        if (next_source < kChunk) {
+          const int next_stage = stage ^ 1;
+          wy_async_copy_bf16_tile(
+              operand_a + (next_stage * kWarps + warp) * kTileElements,
+              restored_k + packed_strided_transpose_index(
+                  n, key_start, next_source),
+              kChunk, lane);
+          __pipeline_commit();
+        }
         for (int value_half = 0; value_half < 2; ++value_half) {
           for (int element = lane; element < kTileElements;
                element += warpSize) {
@@ -792,7 +888,10 @@ __global__ void nanochat_kda_chunk_wy_forward_wmma_c64_kernel(
               accumulators[value_half], a_fragment, b_fragment,
               accumulators[value_half]);
         }
+        stage ^= 1;
       }
+      // Preserve the same alias lifetime boundary for the Hnext stores.
+      __syncthreads();
       wmma::store_matrix_sync(
           next_state + key_start * kValueTile,
           accumulators[0], kValueTile, wmma::mem_row_major);
@@ -827,12 +926,15 @@ at::Tensor nanochat_kda_chunk_wy_forward_c64(
   const at::TensorOptions fp32 = A_log.options();
   at::Tensor qbar = at::empty({kChunkRows, kChunk, kDim}, fp32);
   at::Tensor khat = at::empty_like(qbar);
+  at::Tensor qgamma = at::empty(
+      {kChunkRows, kChunk, kDim}, q.options());
   at::Tensor prefix_g = at::empty_like(qbar);
   at::Tensor beta = at::empty({kChunkRows, kChunk}, fp32);
   at::Tensor P = at::empty_like(qbar);
   at::Tensor Q = at::empty_like(qbar);
   at::Tensor M = at::empty({kChunkRows, kChunk, kChunk}, fp32);
-  at::Tensor A = at::empty_like(M);
+  at::Tensor A = at::empty(
+      {kChunkRows, kChunk, kChunk}, q.options());
   at::Tensor T = at::empty_like(M);
   at::Tensor output = at::empty(
       {kBatch, kLength, kHeads, kDim}, v.options());
@@ -852,6 +954,7 @@ at::Tensor nanochat_kda_chunk_wy_forward_c64(
           beta_logits.data_ptr<at::BFloat16>()),
       A_log.data_ptr<float>(), dt_bias.data_ptr<float>(),
       qbar.data_ptr<float>(), khat.data_ptr<float>(),
+      reinterpret_cast<__nv_bfloat16*>(qgamma.data_ptr<at::BFloat16>()),
       prefix_g.data_ptr<float>(), beta.data_ptr<float>(),
       P.data_ptr<float>(), Q.data_ptr<float>(), lower_bound, scale);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
@@ -864,7 +967,9 @@ at::Tensor nanochat_kda_chunk_wy_forward_c64(
           kChunkRows, kThreads, 0, stream>>>(
           qbar.data_ptr<float>(), khat.data_ptr<float>(),
           prefix_g.data_ptr<float>(), beta.data_ptr<float>(),
-          M.data_ptr<float>(), A.data_ptr<float>(), target_start,
+          M.data_ptr<float>(),
+          reinterpret_cast<__nv_bfloat16*>(A.data_ptr<at::BFloat16>()),
+          target_start,
           source_start);
       C10_CUDA_KERNEL_LAUNCH_CHECK();
     }
@@ -883,13 +988,24 @@ at::Tensor nanochat_kda_chunk_wy_forward_c64(
   at::bmm_out(U, T, P);
   at::bmm_out(W, T, Q);
 
-  // The preserved tensor-core scan owns 32 adjacent value rows per CTA.
-  // It retains FP32 accumulators and uses no external workspace.
+  constexpr int kVectorElements = kChunkRows * kChunk * kDim;
+  nanochat_kda_wy_pack_async_scan_vectors_c64_kernel<<<
+      (kVectorElements + kThreads - 1) / kThreads, kThreads, 0, stream>>>(
+      khat.data_ptr<float>(), prefix_g.data_ptr<float>(), W.data_ptr<float>(),
+      Q.data_ptr<float>(), T.data_ptr<float>());
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+
+  // The tensor-core scan owns 32 adjacent value rows per CTA. It retains FP32
+  // state/accumulators and double-buffers aligned BF16 left-operand tiles.
   nanochat_kda_chunk_wy_forward_wmma_c64_kernel<<<
       kBatch * kHeads * (kDim / 32), 256, 0, stream>>>(
-      qbar.data_ptr<float>(), khat.data_ptr<float>(),
-      prefix_g.data_ptr<float>(), A.data_ptr<float>(),
-      U.data_ptr<float>(), W.data_ptr<float>(),
+      reinterpret_cast<const __nv_bfloat16*>(
+          qgamma.data_ptr<at::BFloat16>()),
+      reinterpret_cast<const __nv_bfloat16*>(Q.data_ptr<float>()),
+      prefix_g.data_ptr<float>(),
+      reinterpret_cast<const __nv_bfloat16*>(A.data_ptr<at::BFloat16>()),
+      U.data_ptr<float>(),
+      reinterpret_cast<const __nv_bfloat16*>(T.data_ptr<float>()),
       reinterpret_cast<__nv_bfloat16*>(output.data_ptr<at::BFloat16>()));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return output;
