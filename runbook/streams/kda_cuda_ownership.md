@@ -12367,3 +12367,99 @@ uv run --no-sync python scripts/kda_cuda_development.py \
 - A competitive FLA-style layout must keep the inverse handoff genuinely in
   registers or reduce useful work; moving it between global and shared storage
   is not enough.
+
+## 2026-08-10 [Codex] FLA-shaped convolution tiling advances the development baseline
+
+**Context**
+
+- Attempt175 returns to exact accepted attempt168 and revisits convolution after
+  the matched full-step trace attributed `36.937701 ms/step` to the owned
+  convolution family versus FLA's `13.398725 ms/step`.
+- The hot width-four backward keeps the proven FP32 preactivation-gradient
+  producer, but replaces separate flat `dx` and serial 256-token `dweight`
+  kernels with one owned 64-token by 32-channel CUDA tile. Each 256-thread CTA
+  stages a 67-by-32 FP32 `dz` tile, computes `dx`, and emits deterministic
+  per-tile weight partials. This mirrors FLA's observed time/channel schedule
+  without importing, linking, or executing FLA.
+- The standard KDA-only Level 1 does not time causal convolution and is recorded
+  only for audit/provenance. The decision uses the declared convolution
+  microgate, one sparse matched Level-2 pair at this strategy boundary, a
+  full-step profile, and the protected checker/sanitizers.
+
+**Commands**
+
+```bash
+# Protected runtime audit and non-applicable KDA-only Level 1.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_168 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_175 \
+  runs/kda-cuda-development/attempt-00175-fla-tiled-conv-backward-level1 \
+  --level2-order baseline-first
+# Bounded A/B/B/A convolution microgate, one baseline-first seven-step trainer
+# pair, one seven-step nsys profile, and exact staged protected checking.
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_validation_175 \
+  --lane optimization --sanitizers <isolated artifact/cache arguments>
+```
+
+**Artifacts**
+
+- Branch `kda-cuda/fla-tiled-conv-backward-175`, pushed commit
+  `aa08de1bab312bc7347ed739d8b2a0b83faef467`; changed source SHA-256
+  `101bd1a80fc2339ba5827ee0ff315cc380ae11a380919528b4b3f09c52c2bb4a`.
+- KDA-only audit/Level-1 manifest
+  `b206fd6a3db3c55e8202882371e4e92940a291e38d29d168dbe70a99d41e7bd7`;
+  convolution microgate
+  `4d585dc0f951652bd70fd7ff3b16933a4a1eae2b49dc5ec2c954fc05a90be5e6`;
+  Level 2 `791117e5daf7119ef0e07663adfaac835342f13b8c8a66524dd1bb1b2843a44d`;
+  full-step profile
+  `e0be17120ab7d427fad527578ead3acb6b6ea467ce550c3268e900de73582ebc`;
+  checker/sanitizers
+  `a2194fa1f36b7bb8294356bcdb8753b87782b985e350459f025bb7ece48b91d5`.
+- Development-baseline record
+  `runs/kda-cuda-development/baseline/aa08de1ba.json`, SHA-256
+  `b754f0ed60c218248ea19c2f52b57f625af7f3179604bfcd8f553ac5cd1ccd92`.
+- The append-only index now has 199 rows and hashes to
+  `04b2084964ce02164cacedde5ff250ff784bbc850aa648919791a1d2155ebb50`.
+
+**Result**
+
+- The protected runtime audit passes. The staged checker reports ownership 1.0,
+  runtime/profile FLA freedom, and genuine zero-error memcheck, racecheck,
+  synccheck, and initcheck. A fresh build repeats every candidate output hash.
+- At T=4096, the first convolution pair improves backward
+  `0.372480 -> 0.181600 ms` (51.25%) and forward+backward
+  `0.455312 -> 0.257040 ms` (43.55%). `dx` and forward output are bitwise equal.
+  Reassociated `dweight` differs in 2 of 1,536 BF16 values, max absolute
+  `0.03125` and max relative `0.004831`, inside the frozen tolerance. Isolated
+  peak rises 1.04%; the full-model peak is unchanged.
+- The single baseline-first Level-2 pair advances development: attempt168
+  samples `[36299,36189,36269,36337,36227,36278]`, median `36,273.5 tok/s`;
+  attempt175 samples `[36846,36844,36690,36526,36714,36725]`, median
+  `36,719.5 tok/s`, a 1.23% gain. Both peak at `5,507.908 MiB` and all printed
+  losses match. This is 84.06% of the `43,680 tok/s` FLA target, leaving
+  `6,960.5 tok/s`.
+- The full trace measures the candidate convolution family at `19.95 ms/step`
+  across all seven profiled steps, down from the prior matched project's
+  `36.937701 ms/step`. The new fused kernel is `79.454 us/call`, 38
+  registers/thread, zero local/stack spill, and 8,576 reported shared bytes.
+  The remaining convolution gap to FLA is about `6.55 ms/step`; the flat
+  preactivation-gradient producer is now the largest owned convolution stage.
+- Attempt175 becomes the accepted development baseline. The official retained
+  milestone remains `4d1a3b231da2c99882324efbda5306a1815e21c7`. This is not
+  statistical confirmation or an LM-quality result.
+- The first microgate invocation was invalid before measurement because it ran
+  from the coordinator CWD and the build helper raised `FileNotFoundError`.
+  Its exact traceback is preserved as `candidate-1.log`; the corrected
+  worktree-CWD runs are the only scored measurements.
+
+**Next**
+
+- Start from exact attempt175. Fuse the preactivation-gradient producer into
+  the same 64-by-32 CTA, staging the required input halo and `dz` on chip. This
+  should remove the 12,288-block producer, allocator-visible FP32 `dz`, and its
+  global write/read while preserving the proven activation arithmetic.
+- Continue using FLA's offline schedules as targets, not runtime dependencies.
+  After the convolution remainder plateaus, return to the much larger complete
+  WY/UT backward gap. Do not run another Level 2 until another major boundary,
+  plateau, four-hour checkpoint, or final candidate.
