@@ -11856,3 +11856,61 @@ uv run --no-sync python scripts/kda_cuda_development.py \
 - Preserve the parallel R/E pack while targeting a boundary with cheaper
   elementwise work, or redesign the producer so dedicated warps overlap R/E
   transforms with tensor-core work without adding a block-wide dependency.
+
+## 2026-08-10 [Codex] Dedicated R/E pack warps recover loss but miss the gate
+
+**Context**
+
+- Attempt167 restarts from attempt165 and revisits the exact R/E launch
+  collapse with a different schedule. Four existing warps retain the U/W WMMA
+  row tiles; four additional warps emit one quarter of the R/E slice during
+  each of the four existing WMMA phases. All warps meet at the existing phase
+  barriers, so exponential work can overlap operand loading and MMA instead of
+  running entirely before it as in rejected attempt166.
+
+**Commands**
+
+```bash
+# One fresh-cache seed-4101 capture compared bitwise to attempt165, then
+# commit/push and one matched Level 1 versus attempt165.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_165 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_167 \
+  runs/kda-cuda-development/attempt-00167-overlap-uw-re-pack-level1 \
+  --level2-order baseline-first
+```
+
+**Artifacts**
+
+- Branch `kda-cuda/overlap-uw-re-pack-167`, pushed commit
+  `136ca45ed3d9fcc4ac993c07745fa250a650eb1d`; changed source SHA-256
+  `4a52df20b2bad4b0f2359b3db0c345ff7322c518bd9b166bb21cdebebc2089ee`.
+- Diagnostic manifest
+  `abc482cf87b35576660bbff53013d12dd89b6518b68510c31196f31457207f5e`;
+  Level-1 manifest
+  `42a28281eb594bd5ed246b0a5895a384470a83d25411b781e14fa8afc993b3f4`.
+- The append-only index now has 190 rows and hashes to
+  `1e09c709b591eb7cb4db153ad7553ebd25ed4e01c83774b29d525da50ab7fc17`.
+
+**Result**
+
+- Output and all seven gradients are bitwise equal to attempt165, every tensor
+  is finite, and the committed runtime audit completes FLA-free.
+- T=4096 forward+backward improves only `9.746576 -> 9.723408 ms`
+  (0.238%) with identical allocation, below the three-percent gate. T=256 and
+  T=1024 improve 2.234% and 0.639%. T=4096 forward-only regresses 2.959%,
+  still inside the guard.
+- The phased extra warps recover essentially all of attempt166's 3.387%
+  regression, confirming that overlap matters. Doubling the CTA and waiting at
+  each phase barrier nevertheless consumes almost all of the separate-launch
+  savings. No profile, checker, sanitizers, repeat, or Level 2 ran. This is not
+  statistical or LM-quality evidence.
+
+**Next**
+
+- Return to attempt165 as the cumulative scaffold and keep attempt161 accepted.
+  Close R/E producer fusion: both serial and dedicated-warp schedules have now
+  been tested, preserved, and rejected.
+- Target a cheaper adjacent boundary without exponentials, or return to the
+  broad VJP's still-1.538-ms schedule with a decomposition that lowers useful
+  work rather than only launch count.
