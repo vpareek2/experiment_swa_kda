@@ -847,6 +847,93 @@ __global__ void nanochat_kda_wy_backward_pack_bf16_pqt_c64_kernel(
   }
 }
 
+// Compute the two group-local WY operands together. Each four-warp CTA owns
+// one chunk and one sixteen-column value tile; the FP32 source tiles are
+// rounded only at the tensor-core boundary and both products retain FP32
+// accumulators and outputs.
+__global__ void nanochat_kda_wy_backward_group_uw_wmma_c64_kernel(
+    const float* T,
+    const float* P,
+    const float* Q,
+    float* U,
+    float* W,
+    int group_rows) {
+  namespace wmma = nvcuda::wmma;
+  constexpr int kTile = 16;
+  constexpr int kTileElements = kTile * kTile;
+  constexpr int kValueTiles = kDim / kTile;
+
+  const int owner = blockIdx.x;
+  const int local_n = owner / kValueTiles;
+  const int value_tile = owner - local_n * kValueTiles;
+  if (local_n >= group_rows) {
+    return;
+  }
+  const int value_start = value_tile * kTile;
+  const int warp = threadIdx.x / warpSize;
+  const int lane = threadIdx.x % warpSize;
+  const int row_start = warp * kTile;
+
+  __shared__ __align__(16) __nv_bfloat16 left[4 * kTileElements];
+  __shared__ __align__(16) __nv_bfloat16 right[2 * kTileElements];
+
+  using MatrixA = wmma::fragment<
+      wmma::matrix_a, kTile, kTile, kTile,
+      __nv_bfloat16, wmma::row_major>;
+  using MatrixB = wmma::fragment<
+      wmma::matrix_b, kTile, kTile, kTile,
+      __nv_bfloat16, wmma::row_major>;
+  using Accumulator = wmma::fragment<
+      wmma::accumulator, kTile, kTile, kTile, float>;
+
+  Accumulator u_accumulator;
+  Accumulator w_accumulator;
+  wmma::fill_fragment(u_accumulator, 0.0f);
+  wmma::fill_fragment(w_accumulator, 0.0f);
+
+  for (int inner_start = 0; inner_start < kChunk; inner_start += kTile) {
+    for (int element = lane; element < kTileElements; element += warpSize) {
+      const int row = element / kTile;
+      const int inner = element - row * kTile;
+      left[warp * kTileElements + element] = __float2bfloat16_rn(
+          T[(static_cast<int64_t>(local_n) * kChunk + row_start + row) *
+              kChunk + inner_start + inner]);
+    }
+    for (int element = threadIdx.x; element < kTileElements;
+         element += blockDim.x) {
+      const int inner = element / kTile;
+      const int value = element - inner * kTile;
+      const int64_t source =
+          (static_cast<int64_t>(local_n) * kChunk + inner_start + inner) *
+          kDim + value_start + value;
+      right[element] = __float2bfloat16_rn(P[source]);
+      right[kTileElements + element] = __float2bfloat16_rn(Q[source]);
+    }
+    __syncthreads();
+
+    MatrixA t_fragment;
+    MatrixB p_fragment;
+    MatrixB q_fragment;
+    wmma::load_matrix_sync(
+        t_fragment, left + warp * kTileElements, kTile);
+    wmma::load_matrix_sync(p_fragment, right, kTile);
+    wmma::load_matrix_sync(q_fragment, right + kTileElements, kTile);
+    wmma::mma_sync(
+        u_accumulator, t_fragment, p_fragment, u_accumulator);
+    wmma::mma_sync(
+        w_accumulator, t_fragment, q_fragment, w_accumulator);
+    __syncthreads();
+  }
+
+  const int64_t destination =
+      (static_cast<int64_t>(local_n) * kChunk + row_start) * kDim +
+      value_start;
+  wmma::store_matrix_sync(
+      U + destination, u_accumulator, kDim, wmma::mem_row_major);
+  wmma::store_matrix_sync(
+      W + destination, w_accumulator, kDim, wmma::mem_row_major);
+}
+
 __global__ void nanochat_kda_wy_backward_sub_c64_kernel(
     float* destination, const float* source, int elements) {
   const int index = blockIdx.x * blockDim.x + threadIdx.x;
@@ -2549,8 +2636,12 @@ nanochat_kda_chunk_wy_backward_c64(
     at::Tensor T_group = pack_matrices(T, chunk_start);
     at::Tensor U_group = at::empty_like(P_group);
     at::Tensor W_group = at::empty_like(Q_group);
-    at::bmm_out(U_group, T_group, P_group);
-    at::bmm_out(W_group, T_group, Q_group);
+    nanochat_kda_wy_backward_group_uw_wmma_c64_kernel<<<
+        kGroupRows * (kDim / 16), 128, 0, stream>>>(
+        T_group.data_ptr<float>(), P_group.data_ptr<float>(),
+        Q_group.data_ptr<float>(), U_group.data_ptr<float>(),
+        W_group.data_ptr<float>(), kGroupRows);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
     at::Tensor R_group = at::empty_like(P_group);
     at::Tensor E_group = at::empty_like(Q_group);
     nanochat_kda_wy_backward_pack_group_c64_kernel<<<
@@ -2595,8 +2686,12 @@ nanochat_kda_chunk_wy_backward_c64(
     at::Tensor T_group = pack_matrices(T, chunk_start);
     at::Tensor U_group = at::empty_like(P_group);
     at::Tensor W_group = at::empty_like(Q_group);
-    at::bmm_out(U_group, T_group, P_group);
-    at::bmm_out(W_group, T_group, Q_group);
+    nanochat_kda_wy_backward_group_uw_wmma_c64_kernel<<<
+        kGroupRows * (kDim / 16), 128, 0, stream>>>(
+        T_group.data_ptr<float>(), P_group.data_ptr<float>(),
+        Q_group.data_ptr<float>(), U_group.data_ptr<float>(),
+        W_group.data_ptr<float>(), kGroupRows);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
     at::Tensor dO_group = at::empty_like(P_group);
     nanochat_kda_wy_backward_pack_group_grad_output_c64_kernel<<<
         (kGroupVectorElements + kThreads - 1) / kThreads,
