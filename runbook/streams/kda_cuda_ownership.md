@@ -10885,3 +10885,62 @@ uv run --no-sync python scripts/kda_cuda_development.py \
   two shared-memory triangular-adjoint transforms with group-local batched
   GEMMs; this directly tests whether the remaining manual-WMMA barrier path is
   slower than the tuned dense backend on GB10.
+
+## 2026-08-10 [Codex] Attempts 149-150 reject two manual-WMMA boundary changes
+
+**Context**
+
+- Attempt 149 moves the broad CTA's final two inverse-adjoint WMMA transforms
+  into a separate low-register two-warp kernel while preserving every BF16
+  conversion and operation. Attempt 150 instead keeps attempt 148 intact and
+  replaces only same-warp producer/consumer barriers with `__syncwarp`, using
+  explicit row ownership; the two cross-warp boundaries remain CTA-wide.
+
+**Commands**
+
+```bash
+# One frozen production diagnostic and matched Level 1 for each candidate.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_127 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_149 \
+  runs/kda-cuda-development/attempt-00149-fla-split-inverse-adjoint-level1 \
+  --level2-order baseline-first
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_127 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_150 \
+  runs/kda-cuda-development/attempt-00150-fla-warp-local-barriers-level1 \
+  --level2-order candidate-first
+```
+
+**Artifacts**
+
+- Attempt 149 pushed commit `e30158ff68110e4536088eb23dba6c7299f212ea`;
+  source SHA-256 `62a61bc24a33da07cbe40882533c665b29535f0ed6b0227f41788efd6a90c07f`;
+  diagnostic manifest `873ce5ed62207c2fec0677215cacd73807220fed19cb45b3e87ba22c973d9425`;
+  Level-1 manifest `036c1946810bb839fe5e66fd1f38b6dc399f4908898fb10ed4024d97581855b7`.
+- Attempt 150 pushed commit `22de5e83ca3e340a44006749e0cff3fe22a9ab08`;
+  source SHA-256 `4272db35c634dca3dc40f7e5731c7396b71940877532955871d332ddf107a695`;
+  diagnostic manifest `5f361c6e4fdef67173075c0714c7e2a98beb3390e3767e592f513955a472ed32`;
+  Level-1 manifest `1c9103f02e2c0d159bd06cefb5c89be6bdd5bd75f96b5f955c30bc24bd1f49f1`.
+
+**Result**
+
+- Both candidates are bitwise equal to attempt 148 for output and every
+  gradient tensor; committed runtime audits complete and remain FLA-free.
+- Attempt 149 is memory-safe at 201,198,080 bytes but T=4096 regresses
+  `11.461392 -> 12.003264 ms` (4.728%). The extra exact kernel boundary costs
+  more than shortening the broad producer's register lifetime saves.
+- Attempt 150 has the same memory footprint but regresses T=4096
+  `11.910000 -> 12.267664 ms` (3.003%). Explicit warp synchronization and
+  scalar row ownership are slower than the original two-warp CTA schedule.
+- Level 2, sanitizers, protected checker, and independent repeat did not run.
+  Neither result is statistically confirmed or an LM-quality evaluation.
+
+**Next**
+
+- Keep exact accepted attempt 127. Use attempt 148 only as the current
+  FLA-shaped near-parity development scaffold; reject attempts 149-150.
+- Manual WMMA boundary tuning is now at a local plateau. The next move should
+  reduce launches/materializations outside the broad CTA, or use an allowed
+  compiler-generated tensor-core layout that can hold FLA's full program
+  tensors without importing or linking FLA at runtime.
