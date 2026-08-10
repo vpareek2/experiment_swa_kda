@@ -725,6 +725,7 @@ __global__ void nanochat_kda_wy_backward_z_from_history_wmma_c64_kernel(
     const float* W,
     float* H,
     float* z_history,
+    __nv_bfloat16* z_history_bf16,
     int group_chunks) {
   namespace wmma = nvcuda::wmma;
   constexpr int kValueTile = 16;
@@ -811,9 +812,19 @@ __global__ void nanochat_kda_wy_backward_z_from_history_wmma_c64_kernel(
       const int64_t offset =
           (static_cast<int64_t>(group_n) * kChunk + row) * kDim +
           value_start + value;
-      z_history[offset] = U[offset] - z[index];
+      const float value_to_store = U[offset] - z[index];
+      z_history[offset] = value_to_store;
+      z_history_bf16[offset] = __float2bfloat16_rn(value_to_store);
     }
     __syncthreads();
+  }
+}
+
+__global__ void nanochat_kda_wy_backward_fp32_to_bf16_c64_kernel(
+    const float* source, __nv_bfloat16* destination, int elements) {
+  const int index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (index < elements) {
+    destination[index] = __float2bfloat16_rn(source[index]);
   }
 }
 
@@ -1395,8 +1406,8 @@ __global__ void nanochat_kda_wy_backward_complete_two_warp_vjp_c64_kernel(
     const float* Q,
     const float* T,
     const float* dO,
-    const float* z,
-    const float* dZ,
+    const __nv_bfloat16* z,
+    const __nv_bfloat16* dZ,
     const __nv_bfloat16* state_history,
     const __nv_bfloat16* dstate_history,
     const float* dD,
@@ -1462,15 +1473,13 @@ __global__ void nanochat_kda_wy_backward_complete_two_warp_vjp_c64_kernel(
   // Value strips contribute dZ P^T to the inverse adjoint. They also produce
   // dP = T^T dZ, which is consumed immediately by dv and dbeta.
   for (int value_start = 0; value_start < kDim; value_start += kStrip) {
-    for (int index = threadIdx.x; index < 2 * kStripElements;
+    for (int index = threadIdx.x; index < kStripElements;
          index += blockDim.x) {
-      const int matrix = index / kStripElements;
-      const int within = index - matrix * kStripElements;
-      const int row = within / kStrip;
-      const int value = value_start + within % kStrip;
+      const int row = index / kStrip;
+      const int value = value_start + index % kStrip;
       const int64_t local =
           (static_cast<int64_t>(local_n) * kChunk + row) * kDim + value;
-      left[index] = __float2bfloat16_rn(matrix == 0 ? dZ[local] : P[local]);
+      left[kStripElements + index] = __float2bfloat16_rn(P[local]);
     }
     __syncthreads();
 
@@ -1479,7 +1488,10 @@ __global__ void nanochat_kda_wy_backward_complete_two_warp_vjp_c64_kernel(
       const int row_start = (warp * 2 + owned_row) * kStrip;
       MatrixARow dz_fragment;
       wmma::load_matrix_sync(
-          dz_fragment, left + row_start * kStrip, kStrip);
+          dz_fragment,
+          dZ + (static_cast<int64_t>(local_n) * kChunk + row_start) *
+              kDim + value_start,
+          kDim);
 #pragma unroll
       for (int column_tile = 0; column_tile < 4; ++column_tile) {
         MatrixBCol p_fragment;
@@ -1506,7 +1518,10 @@ __global__ void nanochat_kda_wy_backward_complete_two_warp_vjp_c64_kernel(
         wmma::load_matrix_sync(
             t_fragment, inverse + inner_start * kChunk + row_start, kChunk);
         wmma::load_matrix_sync(
-            dz_fragment, left + inner_start * kStrip, kStrip);
+            dz_fragment,
+            dZ + (static_cast<int64_t>(local_n) * kChunk + inner_start) *
+                kDim + value_start,
+            kDim);
         wmma::mma_sync(
             dP_fragment[owned_row], t_fragment, dz_fragment,
             dP_fragment[owned_row]);
@@ -1553,18 +1568,13 @@ __global__ void nanochat_kda_wy_backward_complete_two_warp_vjp_c64_kernel(
     }
 
     for (int value_start = 0; value_start < kDim; value_start += kStrip) {
-      for (int index = threadIdx.x; index < 3 * kStripElements;
+      for (int index = threadIdx.x; index < kStripElements;
            index += blockDim.x) {
-        const int matrix = index / kStripElements;
-        const int within = index - matrix * kStripElements;
-        const int row = within / kStrip;
-        const int value = value_start + within % kStrip;
+        const int row = index / kStrip;
+        const int value = value_start + index % kStrip;
         const int64_t offset =
             (static_cast<int64_t>(local_n) * kChunk + row) * kDim + value;
-        const float value_to_store = matrix == 0
-            ? dO[offset]
-            : (matrix == 1 ? z[offset] : dZ[offset]);
-        left[index] = __float2bfloat16_rn(value_to_store);
+        left[index] = __float2bfloat16_rn(dO[offset]);
       }
       for (int index = threadIdx.x; index < kStrip * kStrip;
            index += blockDim.x) {
@@ -1589,10 +1599,15 @@ __global__ void nanochat_kda_wy_backward_complete_two_warp_vjp_c64_kernel(
         wmma::load_matrix_sync(
             do_operand, left + row_start * kStrip, kStrip);
         wmma::load_matrix_sync(
-            z_operand, left + kStripElements + row_start * kStrip, kStrip);
+            z_operand,
+            z + (static_cast<int64_t>(local_n) * kChunk + row_start) *
+                kDim + value_start,
+            kDim);
         wmma::load_matrix_sync(
-            dz_operand, left + 2 * kStripElements + row_start * kStrip,
-            kStrip);
+            dz_operand,
+            dZ + (static_cast<int64_t>(local_n) * kChunk + row_start) *
+                kDim + value_start,
+            kDim);
         wmma::load_matrix_sync(h_operand, state_right, kStrip);
         wmma::load_matrix_sync(
             dh_operand, state_right + kStrip * kStrip, kStrip);
@@ -2647,6 +2662,8 @@ nanochat_kda_chunk_wy_backward_c64(
         dO_group.data_ptr<float>(), chunk_start, kGroupChunks);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     at::Tensor z_group_flat = at::empty({kGroupRows, kChunk, kDim}, fp32);
+    at::Tensor z_group_bf16 = at::empty(
+        {kGroupRows, kChunk, kDim}, q.options());
     nanochat_kda_wy_backward_z_from_history_wmma_c64_kernel<<<
         kRecurrences * (kDim / 16), 256, 0, stream>>>(
         reinterpret_cast<const __nv_bfloat16*>(
@@ -2654,10 +2671,22 @@ nanochat_kda_chunk_wy_backward_c64(
                 .data_ptr<at::BFloat16>()),
         U_group.data_ptr<float>(), W_group.data_ptr<float>(),
         nullptr, z_group_flat.data_ptr<float>(),
+        reinterpret_cast<__nv_bfloat16*>(
+            z_group_bf16.data_ptr<at::BFloat16>()),
         kGroupChunks);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 
     at::Tensor dZ_group_flat = dZ_history.select(0, group_id);
+    at::Tensor dZ_group_bf16 = at::empty(
+        {kGroupRows, kChunk, kDim}, q.options());
+    nanochat_kda_wy_backward_fp32_to_bf16_c64_kernel<<<
+        (kGroupVectorElements + kThreads - 1) / kThreads,
+        kThreads, 0, stream>>>(
+        dZ_group_flat.data_ptr<float>(),
+        reinterpret_cast<__nv_bfloat16*>(
+            dZ_group_bf16.data_ptr<at::BFloat16>()),
+        kGroupVectorElements);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
     nanochat_kda_wy_backward_group_dD_c64_kernel<<<
         kGroupRows * kDim, kDim, 0, stream>>>(
         reinterpret_cast<const __nv_bfloat16*>(
@@ -2684,7 +2713,10 @@ nanochat_kda_chunk_wy_backward_c64(
         prefix_g.data_ptr<float>(), beta.data_ptr<float>(),
         P_group.data_ptr<float>(), Q_group.data_ptr<float>(),
         T_group.data_ptr<float>(), dO_group.data_ptr<float>(),
-        z_group_flat.data_ptr<float>(), dZ_group_flat.data_ptr<float>(),
+        reinterpret_cast<const __nv_bfloat16*>(
+            z_group_bf16.data_ptr<at::BFloat16>()),
+        reinterpret_cast<const __nv_bfloat16*>(
+            dZ_group_bf16.data_ptr<at::BFloat16>()),
         reinterpret_cast<const __nv_bfloat16*>(
             chunk_state_history.select(0, group_id)
                 .data_ptr<at::BFloat16>()),
