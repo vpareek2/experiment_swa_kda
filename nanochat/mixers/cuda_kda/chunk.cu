@@ -2055,8 +2055,10 @@ chunk_backward_cuda(
         C10_CUDA_KERNEL_LAUNCH_CHECK();
       }
     } else {
+      constexpr int generic_threads = 512;
       nanochat_kda_chunk_backward_generic_kernel<<<
-          static_cast<int>(recurrence_count), threads, shared_bytes, stream>>>(
+          static_cast<int>(recurrence_count), generic_threads,
+          shared_bytes, stream>>>(
           reinterpret_cast<const __nv_bfloat16*>(contiguous_v.data_ptr<at::BFloat16>()),
           reinterpret_cast<const __nv_bfloat16*>(contiguous_raw_gate.data_ptr<at::BFloat16>()),
           reinterpret_cast<const __nv_bfloat16*>(contiguous_beta_logits.data_ptr<at::BFloat16>()),
