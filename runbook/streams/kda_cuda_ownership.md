@@ -12112,3 +12112,71 @@ uv run --no-sync python scripts/kda_cuda_development.py \
 - Pursue a structural reduction in the broad VJP or deterministic colored-pair
   path, using the offline FLA schedule as equation and decomposition guidance
   only. Avoid adding synchronization to the already-long complete-VJP CTA.
+
+## 2026-08-10 [Codex] Global FLA-style operand lifetime loses locality
+
+**Context**
+
+- Attempt171 starts from accepted attempt168 and tests FLA's larger logical
+  difference rather than another warp micro-tune. It rounds `P/Q/T` once,
+  computes global BF16 `U/W/E` once, replaces eight forward producer/pack/state
+  rounds with one 64-chunk persistent boundary sweep, and lets reverse groups
+  reuse those compact operands while rebuilding only `R`.
+- This is an independent owned implementation. No FLA or FlashKDA source is
+  imported, linked, or used at runtime.
+
+**Commands**
+
+```bash
+# One seed-4101 production capture versus attempt168, commit/push, and one
+# matched candidate-first Level 1. Then one bounded correlated operator profile
+# because this is a major strategy boundary.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_168 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_171 \
+  runs/kda-cuda-development/attempt-00171-fla-global-bf16-state-pipeline-level1 \
+  --level2-order candidate-first
+```
+
+**Artifacts**
+
+- Branch `kda-cuda/fla-global-bf16-state-pipeline-171`, pushed commit
+  `a01e6b6da6e90572747328568018ced004c179be`; source SHA-256
+  `1d0beaa9b6b8b6ec72272e50ce149a90b051b7421075d9d3b4c87508ed4a7956`.
+- Diagnostic manifest
+  `474d90b6857f37555fc28ac202c159f5dea232d2640aafc0076698d06559c308`;
+  Level-1 manifest
+  `7b374c20fe1e2ef63b7edd121d4ed9835748b1c249fcbd067e55acbf6c9f43db`;
+  profile manifest
+  `5e0781720bc521bd8115f6a555f687e7edf08bc538bd59f46928f27a07602298`.
+- The append-only index now has 195 rows and hashes to
+  `b136b07bb0dc48db59e4f58b7cbdf9109d557b951be5eda8f36a40fd6ab95d26`.
+
+**Result**
+
+- Output, `dv`, and `dbeta` are bitwise equal to attempt168. Every tensor is
+  finite; the maximum gradient delta is `1.4551915228366852e-11`, inside the
+  frozen correctness envelope. The committed runtime audit completes
+  FLA-free.
+- Level 1 rejects the candidate. T=4096 forward+backward regresses
+  `9.825648 -> 10.088432 ms` (2.674%) while peak allocation improves 1.852%,
+  `191,105,536 -> 187,566,592` bytes. T=256 improves 9.705%, but T=1024
+  regresses 3.691%.
+- The profile shows the intended launch collapse, `167 -> 139`, but summed
+  kernel time rises `8.934784 -> 9.645792 ms` and span rises
+  `9.377056 -> 10.049088 ms`. The global U/W producer is only `0.097600 ms`;
+  the 64-chunk boundary sweep costs `1.020384 ms` versus attempt168's saved
+  eight-launch total near `0.625824 ms`. Broad VJP, reverse scan, and colored
+  pairs also rise to `1.849280`, `0.961568`, and `0.675424 ms`, exposing the
+  loss of hot group-local producer/consumer locality.
+- No checker, sanitizers, repeat, or Level 2 ran after rejection. This is not
+  statistical or LM-quality evidence.
+
+**Next**
+
+- Return to exact accepted attempt168. Do not compose the global BF16 buffer
+  lifetime by itself: FLA's compact operands are coupled to its generated
+  on-chip layouts and pipeline.
+- The next FLA-matching strategy must preserve group-local locality while
+  reducing the broad VJP/state work itself, or implement a genuinely fused
+  on-chip producer/consumer program rather than a global materialization.
