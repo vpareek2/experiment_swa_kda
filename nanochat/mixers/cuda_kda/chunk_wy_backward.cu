@@ -2587,14 +2587,11 @@ nanochat_kda_chunk_wy_backward_c64(
   at::Tensor ddt_partial = at::zeros({kRecurrences, kDim}, fp32);
   at::Tensor dD = at::empty({kChunkRows, kDim}, fp32);
   at::Tensor dstate_next = at::zeros({kRecurrences, kDim, kDim}, fp32);
-  at::Tensor dstate_next_history = at::empty(
-      {kGroups, kGroupRows, kDim, kDim}, q.options());
-  at::Tensor dZ_history = at::empty(
-      {kGroups, kGroupRows, kChunk, kDim}, q.options());
 
-  // Finish the compact reverse state scan before any local VJP. This makes
-  // every incoming chunk adjoint independently addressable by a later broad
-  // chunk-by-head launch.
+  // Process each reverse group through its local VJP before moving to the
+  // previous group. The group-local U/W and packed dO operands are therefore
+  // built once and reused by both phases, while dstate_next remains the exact
+  // sequential boundary between groups.
   for (int group_id = kGroups; group_id-- > 0;) {
     const int chunk_start = group_id * kGroupChunks;
     at::Tensor P_group = pack_vectors(P, chunk_start);
@@ -2624,44 +2621,26 @@ nanochat_kda_chunk_wy_backward_c64(
     at::Tensor dstate_base = at::empty({kGroupRows, kDim, kDim}, fp32);
     at::Tensor dZ_group_flat = at::empty(
         {kGroupRows, kChunk, kDim}, fp32);
+    at::Tensor dZ_group_bf16 = at::empty(
+        {kGroupRows, kChunk, kDim}, q.options());
     at::bmm_out(dstate_base, R_group.transpose(1, 2), dO_group);
     at::bmm_out(dZ_group_flat, A_group.transpose(1, 2), dO_group);
     at::Tensor dstate_next_group_flat = at::empty(
         {kGroupRows, kDim, kDim}, fp32);
+    at::Tensor dstate_next_group_bf16 = at::empty(
+        {kGroupRows, kDim, kDim}, q.options());
     nanochat_kda_wy_backward_reverse_group_wmma_c64_kernel<<<
         kRecurrences * (kDim / 16), 256, 0, stream>>>(
         prefix_g.data_ptr<float>(), W_group.data_ptr<float>(),
         E_group.data_ptr<float>(), dstate_base.data_ptr<float>(),
         dZ_group_flat.data_ptr<float>(),
         reinterpret_cast<__nv_bfloat16*>(
-            dZ_history.select(0, group_id).data_ptr<at::BFloat16>()),
+            dZ_group_bf16.data_ptr<at::BFloat16>()),
         dstate_next.data_ptr<float>(),
         dstate_next_group_flat.data_ptr<float>(),
         reinterpret_cast<__nv_bfloat16*>(
-            dstate_next_history.select(0, group_id)
-                .data_ptr<at::BFloat16>()),
+            dstate_next_group_bf16.data_ptr<at::BFloat16>()),
         chunk_start, kGroupChunks);
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
-  }
-  dstate_next = at::Tensor();
-
-  for (int group_id = kGroups; group_id-- > 0;) {
-    const int chunk_start = group_id * kGroupChunks;
-    at::Tensor P_group = pack_vectors(P, chunk_start);
-    at::Tensor Q_group = pack_vectors(Q, chunk_start);
-    at::Tensor A_group = pack_matrices(A, chunk_start);
-    at::Tensor T_group = pack_matrices(T, chunk_start);
-    at::Tensor U_group = at::empty_like(P_group);
-    at::Tensor W_group = at::empty_like(Q_group);
-    at::bmm_out(U_group, T_group, P_group);
-    at::bmm_out(W_group, T_group, Q_group);
-    at::Tensor dO_group = at::empty_like(P_group);
-    nanochat_kda_wy_backward_pack_group_grad_output_c64_kernel<<<
-        (kGroupVectorElements + kThreads - 1) / kThreads,
-        kThreads, 0, stream>>>(
-        reinterpret_cast<const __nv_bfloat16*>(
-            grad_output.data_ptr<at::BFloat16>()),
-        dO_group.data_ptr<float>(), chunk_start, kGroupChunks);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     at::Tensor z_group_flat = at::empty({kGroupRows, kChunk, kDim}, fp32);
     at::Tensor z_group_bf16 = at::empty(
@@ -2684,8 +2663,7 @@ nanochat_kda_chunk_wy_backward_c64(
             chunk_state_history.select(0, group_id)
                 .data_ptr<at::BFloat16>()),
         reinterpret_cast<const __nv_bfloat16*>(
-            dstate_next_history.select(0, group_id)
-                .data_ptr<at::BFloat16>()),
+            dstate_next_group_bf16.data_ptr<at::BFloat16>()),
         dD.data_ptr<float>(),
         chunk_start, kGroupChunks);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
@@ -2731,13 +2709,12 @@ nanochat_kda_chunk_wy_backward_c64(
         reinterpret_cast<const __nv_bfloat16*>(
             z_group_bf16.data_ptr<at::BFloat16>()),
         reinterpret_cast<const __nv_bfloat16*>(
-            dZ_history.select(0, group_id).data_ptr<at::BFloat16>()),
+            dZ_group_bf16.data_ptr<at::BFloat16>()),
         reinterpret_cast<const __nv_bfloat16*>(
             chunk_state_history.select(0, group_id)
                 .data_ptr<at::BFloat16>()),
         reinterpret_cast<const __nv_bfloat16*>(
-            dstate_next_history.select(0, group_id)
-                .data_ptr<at::BFloat16>()),
+            dstate_next_group_bf16.data_ptr<at::BFloat16>()),
         dD.data_ptr<float>(), dT_group.data_ptr<float>(),
         dqbar_group.data_ptr<float>(), dkhat_group.data_ptr<float>(),
         reinterpret_cast<__nv_bfloat16*>(dv.data_ptr<at::BFloat16>()),
@@ -2806,8 +2783,6 @@ nanochat_kda_chunk_wy_backward_c64(
   chunk_state_history = at::Tensor();
   dD = at::Tensor();
   dstate_next = at::Tensor();
-  dstate_next_history = at::Tensor();
-  dZ_history = at::Tensor();
   at::Tensor dA_log = at::empty_like(A_log);
   at::Tensor ddt_bias = at::empty_like(dt_bias);
   nanochat_kda_wy_backward_reduce_parameters_c64_kernel<<<
