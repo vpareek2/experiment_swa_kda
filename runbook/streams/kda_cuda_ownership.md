@@ -10689,3 +10689,62 @@ cuobjdump --dump-resource-usage <isolated candidate library>
 - Isolate the useful direct BF16 `dZ` history on attempt 143's 164-register
   broad kernel, restoring its standalone output pack and `dA` BMM. Measure that
   memory-safe boundary before changing `P/Q/T`.
+
+## 2026-08-10 [Codex] Attempt 145 isolates memory-safe dZ but profiles a 5.44-ms CTA
+
+**Context**
+
+- Attempt 145 starts from attempt 143, keeps its standalone output pack and
+  `dA` BMM, and ports only attempt 144's direct BF16 `dZ` history. The reverse
+  scan holds one FP32 group and writes the durable BF16 history directly.
+
+**Commands**
+
+```bash
+# One production-shape equation diagnostic, then matched Level 1.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_127 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_145 \
+  runs/kda-cuda-development/attempt-00145-fla-direct-bf16-dz-level1 \
+  --level2-order candidate-first
+# One bounded nsys operator profile at the strategy plateau.
+```
+
+**Artifacts**
+
+- Pushed commit `4c44a837d374a8d59f6c1a896174b4bae8550f00`; backward
+  source SHA-256
+  `489199de50f0f80d3b2a5c113f62fedb1590e167cbaf3729211183506ab8e2c0`.
+- Single pre-commit equation diagnostic manifest
+  `f9d024f72c13902016e2f27f194ed89b032aa837f4382078265054a24a368cd3`.
+- Level-1 manifest
+  `366a3a5b2e42066d2414cf78e85fe0adea8994c2b3377a26b2e490e76b7fa884`.
+- Operator-profile manifest
+  `d3ae042d334053934d33eb0f98445d0777ce1648bc6bdceb5f5b810d562fe1a5`.
+
+**Result**
+
+- The production diagnostic is bitwise equal to attempt 143 for every tensor.
+  It is non-conclusion-bearing; no independent repeat or protected checker ran
+  after Level 1 rejected the committed candidate. The committed runtime audit
+  completed and remained FLA-free.
+- Memory is safe at 207,034,880 bytes, 1.447% above accepted 127. T=4096
+  forward+backward nevertheless regresses `11.537888 -> 13.829648 ms`
+  (19.863%); T=256 also violates the five-percent guard at 5.718%.
+- The correlated operator profile contains 249 launches, 15.800736 ms summed
+  kernel time, and 16.424064 ms GPU span. The broad two-warp CTA alone costs
+  5.437120 ms across eight group launches. It uses 164 registers/thread,
+  33,792 reported shared bytes, zero local spill, and 204 static HMMA
+  instructions. FLA's preserved corresponding kernel costs 0.797600 ms with
+  180 static HMMA instructions; the 13% arithmetic-count difference cannot
+  explain the 6.82x latency gap.
+- No sanitizer or Level 2 ran. This is not statistically confirmed and has no
+  LM-quality evaluation.
+
+**Next**
+
+- Keep exact accepted attempt 127. Preserve attempt 145 as memory and profile
+  evidence, not an accepted candidate.
+- Remove the broad CTA's shared FP32-to-BF16 conversion boundary for `P/Q/T`.
+  Build group-local BF16 operands once, load them directly in WMMA, and shrink
+  shared memory/barriers without changing the validated equations.
