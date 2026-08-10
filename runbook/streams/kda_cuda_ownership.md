@@ -9552,3 +9552,93 @@ uv run --no-sync python scripts/kda_cuda_development.py \
   barrier domain while retaining half of the redundant normalization/gating
   elimination. If that also loses, abandon grouped forward sharing and target
   the profiled reverse/replay boundary. Do not retest attempt 132 unchanged.
+
+## 2026-08-09 [Codex] Attempt 133 two-row T=256 sharing subthreshold at Level 2
+
+**Context**
+
+- Attempt 133 is a distinct follow-up to rejected attempt 132 and still
+  explicitly compares against accepted attempt 127. It reduces the T=256
+  sharing domain from four value rows/512 threads to two rows/256 threads,
+  retaining exact shared normalization/gating/decay operands while halving the
+  CTA barrier domain. T=1024 is unchanged; T=4096 retains rejected attempt
+  131's launch-fused specialized backward for a new complete gate evaluation.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_133 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact seed-4101 T=256 comparison and independent production capture/repeat.
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_133 \
+  push -u origin kda-cuda/t256-forward-group2-133
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_127 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_133 \
+  runs/kda-cuda-development/attempt-00133-t256-forward-group2-level1 \
+  --level2-order candidate-first
+# Full memcheck, racecheck, synccheck, and initcheck on an exact staged copy.
+# Execute the saved candidate-first Level-2 pair exactly once.
+```
+
+**Artifacts**
+
+- Pushed commit `9a80c31da906793f86c4e00d8b31e0472a422143`;
+  `chunk.cu` SHA-256
+  `b7b4aea648c9fb352540add3ed8ef67f0e9d502c1b14004081d4ab723dbd234a`.
+- Protected checker:
+  `runs/kda-cuda-development/diagnostics/attempt-00133-t256-forward-group2-protected-checker`,
+  manifest `b3e0246125c6fe91cef4be299e764be24367586845c6ec567faa7fa559a70539`.
+- Exact T=256 comparison:
+  `runs/kda-cuda-development/diagnostics/attempt-00133-t256-forward-group2-gradient`,
+  manifest `d92e330e8e13382d35dcde8a0515d10a3808a7b9cb9c544a65bb7946a5c2dfc0`.
+- Production comparison/repeat:
+  `runs/kda-cuda-development/diagnostics/attempt-00133-t256-forward-group2-production-gradient`,
+  manifest `2dcc384523f67f570fb769e89e1d4a92e7f6c87f6cfd47b0933eb78e278ab3c0`.
+- Level 1:
+  `runs/kda-cuda-development/attempt-00133-t256-forward-group2-level1`,
+  manifest `cf448b4b2d9f0dcde26d395ddfdcd96a88b02061e62c05530637110aee90c5b0`.
+- Full sanitizer validation:
+  `runs/kda-cuda-development/validations/validation-00034-t256-forward-group2`,
+  manifest `3451ef4602e1bd3845764b4704072f59fe23d0a10630b2d0bd8392a2f972c13a`.
+- Level 2:
+  `runs/kda-cuda-development/attempt-00133-t256-forward-group2-level2`,
+  manifest `46f20abaaa9de68bde7ec395575d8ea08c9203753e12e6bfa27a95a4913eebad`.
+
+**Result**
+
+- T=256 output and all seven gradients are bitwise equal to accepted attempt
+  127. At T=4096, output and `dq` are bitwise equal to the frozen capture;
+  maximum other-gradient delta is `2.0559127733577043e-09`. The independent
+  production repeat is bitwise exact for all eight tensors. Ownership is 1.0,
+  runtime remains FLA-free, and memcheck, racecheck, synccheck, and initcheck
+  report zero errors.
+- Level 1 advances. T=256 forward regresses only 1.500% and combined
+  forward+backward improves 3.609%. T=1024 combined improves 0.073%.
+  T=4096 combined improves `11.962560 -> 11.107184 ms` (7.150%), and peak
+  allocation falls 2.569%; every important latency and memory guard passes.
+- The exact candidate-first Level-2 pair is valid but below the retention gate.
+  Candidate samples `[34956,34822,34907,34926,34943]` have median
+  34,926 tok/s; baseline `[34634,34382,34349,34514,34409]` has median
+  34,409 tok/s. The gain is 1.503%, below the declared 2% threshold, and peak
+  memory is equal at 5507.908 MiB. The candidate reaches 79.959% of the fixed
+  43,680 tok/s FLA reference, leaving 8,754 tok/s to FLA and 10,074 tok/s to
+  45k. Its raw median is the highest observed but is not an accepted result.
+- A comparison wrapper mistakenly invoked `uv` inside the candidate after the
+  valid T=256 capture. It created a 100-KiB environment and stopped because
+  Torch was unavailable, before comparison, build, or additional GPU work. The
+  environment and incident are archived in the T=256 artifact; the valid
+  comparison ran once from the coordinator.
+- This is development evidence only. It is not statistically confirmed and no
+  LM-quality evaluation ran.
+
+**Next**
+
+- Keep exact `f2fa705e22fc97d2f455b4ccabcf42a6a9ab120f` as the accepted
+  development baseline. Attempt 133 is a preserved Level-2 near miss and must
+  not be called accepted or silently composed.
+- Stop tuning the short forward grouping. The two-row schedule solves the
+  guard but contributes nothing at T=4096; closing the remaining gap requires
+  a larger specialized backward GEMM/dependency boundary. Do not retest
+  attempt 133 unchanged.
