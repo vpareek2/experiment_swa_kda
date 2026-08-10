@@ -13680,3 +13680,91 @@ uv run --no-sync python scripts/kda_cuda_development.py \
   next candidate must remove a larger useful state/intra-backward boundary or
   combine producer and consumer work without replaying the rejected global
   state, reverse-base, or incremental broad-handoff schedules.
+
+## 2026-08-10 [Codex] Register-resident state products reach 37,701 tok/s but miss retention
+
+**Context**
+
+- Attempt194 returns to exact attempt190 and directly consumes all four WMMA
+  products at the group-local state boundary: forward `W H` into `Z`, forward
+  `E^T Z` into state, reverse `E dstate` into `dZ`, and reverse `W^T dZ` into
+  the state adjoint. It removes two 8-KiB FP32 shared tiles and four product
+  store/reload phases without changing the group-local recurrence.
+- This is a project-owned translation of FLA's register-resident scheduling
+  principle. FLA remains an offline reference only and is neither imported nor
+  linked.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_194 \
+  --lane optimization <isolated artifact/cache arguments>
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_validation_194 \
+  --lane optimization --sanitizers <isolated artifact/cache arguments>
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_190 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_194 \
+  runs/kda-cuda-development/attempt-00194-fla-register-state-products-level1 \
+  --level2-order candidate-first
+nsys profile <bounded production chunk-forward/backward runner>
+uv run --no-sync python \
+  runs/kda-cuda-development/attempt-00194-fla-register-state-products-level2/run_level2.py
+```
+
+**Artifacts**
+
+- Branch `kda-cuda/fla-register-state-products-194`, pushed commit
+  `50330a4ed3ae50601ba13bab8b6e29a77269a4d8`; changed source SHA-256
+  `f4b8d0e01c234d4bd0e77ebeaf8e7afd872075895d6cb9c32f634155801fddc1`.
+- Checker summary
+  `4cfdc809764abe31fd96b8282cfe160574860a6bb212137f33583eb3afe0833c`;
+  production-gradient manifest
+  `5863b4ac6224aeb4baa9b49536dec8c81f4ef1dafa1a7be815e6d1ff75c41364`;
+  Level-1 manifest
+  `ab245b3d0100570803e565f4bbf0e7b9ab5381cb99af143ee29dd103c64e3b12`.
+- Exact-source sanitizer checker summary
+  `a7927a8477f1baed81199f94d7fc311d1842d3e11d15cabb16634596dcfa52cc`;
+  operator-profile manifest
+  `f0907959e75668838c3fbb635c9e253936f826777c7fdacb759cfd88238a61e3`;
+  Level-2 manifest
+  `7bd47aa4a68c79db274d47aa07e9d9a694d5731de938ff2905e9873b4910a629`.
+
+**Result**
+
+- Ownership 1.0, runtime/profile FLA freedom, memcheck, racecheck, synccheck,
+  and initcheck pass. Production output and all seven gradients are bitwise
+  equal to attempt190, finite, and bitwise equal in an independent fresh-cache
+  repeat.
+- Level 1 advances. T=4096 forward+backward improves
+  `9.592912 -> 9.239680 ms` (3.682%) at identical memory. T=1024 improves
+  1.547%, while T=256 regresses 2.104%, inside the five-percent guard.
+- Resource use crosses a meaningful occupancy boundary. The group-boundary
+  kernel falls from 48 registers and 29,696 shared bytes to 47 registers and
+  21,504 shared bytes; reverse-group falls from 55 registers and 30,208 shared
+  bytes to 54 registers and 22,016 shared bytes, with no stack/local spill.
+- The single warmed operator profile is mixed. Group-boundary time improves
+  `0.630176 -> 0.605152 ms` (3.971%), but reverse-group regresses
+  `0.623360 -> 0.758112 ms` (21.617%). Total span regresses 1.014%, from
+  8.946240 to 9.036928 ms, across the same 167 launches.
+- The candidate-first Level-2 pair is valid but below the declared retention
+  gate. Candidate steps 2-6 `[37732,37898,37701,37589,37578]` have median
+  37,701 tok/s; attempt190 `[37284,37579,37425,37685,37661]` has median
+  37,579 tok/s. The matched gain is 0.325%, with identical 5,507.908 MiB peak
+  memory.
+- The raw candidate median is the highest project-owned observation so far at
+  86.31% of the 43,680 tok/s FLA target, leaving 5,979 tok/s to FLA and 7,299
+  tok/s to 45k. It is not statistically confirmed and is not an LM-quality
+  result. Attempt190 remains the strongest non-retained matched scaffold;
+  attempt176 and attempt175 remain the accepted development/full baselines.
+
+**Next**
+
+- Preserve attempt194 as correct state-product scheduling evidence, not an
+  accepted baseline. Do not repeat its Level-2 pair.
+- Return to attempt190 and isolate the two profitable forward-boundary direct
+  consumers while leaving the measured-regressive reverse scan unchanged.
+  Only compose further state work after the isolated boundary survives Level 1;
+  keep seeking the larger FLA-style reverse/intra decomposition needed to close
+  the remaining 5,979 tok/s raw gap.
