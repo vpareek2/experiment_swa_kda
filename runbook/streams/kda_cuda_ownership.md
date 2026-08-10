@@ -12881,3 +12881,88 @@ uv run --no-sync python scripts/kda_cuda_development.py \
 - Return to FLA's larger compact state decomposition. Attribute and redesign
   the forward boundary plus reverse state programs as one strategy boundary;
   do not move existing `R/E`, reverse-base, or full-history work unchanged.
+
+## 2026-08-10 [Codex] Global V32 state pipeline is correct but regresses the target shape
+
+**Context**
+
+- Attempt183 starts from exact attempt176 and tests a direct FLA-inspired
+  schedule boundary. It recovers attempt171's complete-sequence BF16 `P/Q/T`,
+  one-time BF16 `U/W/E`, and global forward state sweep, then widens the
+  forward and reverse persistent state CTAs from 16 to 32 adjacent value
+  columns. Each warp retains two 16-column accumulator fragments so the state
+  sweeps launch half as many CTAs.
+- This retains project-owned equations and the frozen ABI. FLA is used only as
+  an offline schedule/equation reference and is neither imported nor linked.
+
+**Commands**
+
+```bash
+# Exact staged protected checks in separate artifacts/caches; the first build
+# failure is preserved and the second check is authoritative.
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_183 \
+  --lane optimization <isolated artifact/cache arguments>
+
+# Candidate-only production capture and deterministic repeat versus the
+# preserved attempt176 seed-4101 tensor, followed by one candidate-first L1.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_176 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_183 \
+  runs/kda-cuda-development/attempt-00183-fla-global-v32-state-pipeline-level1 \
+  --level2-order candidate-first
+```
+
+**Artifacts**
+
+- Branch `kda-cuda/fla-global-v32-state-pipeline-183`, pushed commit
+  `b04e7e15327fd3df59eb3d3aaf17120096354420`; changed source SHA-256
+  `5d2b8090234119172167ff257edebf07d967c1f5b1c19ad09459b85fe6918c01`.
+- The first protected build is preserved with summary hash
+  `b8a75504f5da3c3276f588d17136a28167245887abda326e7e21b64e4514ac32`;
+  the passing checker summary hashes to
+  `b1d850f705934798ed352181d34d9e4146031943761b4ad23b293d7411c399fb`.
+  Production-gradient manifest
+  `793e7d98cb7396c8e8f23094b36f3f0d8e19ff3a15c99c802dd655d7d7c1bc7d`;
+  Level-1 manifest
+  `e831a08ee09d7c2b939169d1e438d6b83d1137a7e09ede6ca4176ddadb85b4ce`.
+- The append-only index now has 206 rows and hashes to
+  `1ebbff8b35a445d221bcc73ca0734c427d74c00e142042d164e1dcbea38d9460`.
+
+**Result**
+
+- The first staged build was invalid because the reverse CTA required
+  `0xc200` shared bytes against a `0xc000` static limit. Reusing `local_dZ`
+  as the product workspace after all eight warps finish reading it removed
+  the redundant 128x32 FP32 allocation. The second protected audit passes at
+  ownership 1.0 with runtime/profile FLA freedom.
+- Production output is bitwise equal to attempt176; all outputs and seven
+  gradients are finite. `dv` and `dbeta` are bitwise equal. Other gradient
+  deltas are at most `1.4551915228366852e-11`. A same-commit seed-4101 repeat
+  is bitwise equal for output and all seven gradients.
+- Resource inspection reports the forward state CTA at 56 registers/thread
+  and 50,176 shared bytes, and reverse at 61 registers/thread and 34,304
+  shared bytes, with no local or stack spill.
+- Level 1 rejects the strategy. T=4096 forward+backward regresses
+  `9.610208 -> 10.515952 ms` (9.425%) while peak allocation falls from
+  191,105,536 to 187,566,592 bytes. T=1024 improves 2.858%, but T=256
+  regresses 1.049%; T=4096 forward alone regresses 0.464%.
+- No Level 2, sanitizer run, statistical confirmation, or LM-quality
+  evaluation ran. Attempt176 remains the validated convolution development
+  parent; attempt175 remains the latest full matched throughput baseline at
+  36,719.5 tok/s, 84.06% of FLA and 6,960.5 tok/s short.
+- Two candidate-capture invocation failures are preserved in the diagnostic:
+  one imported the coordinator placeholder without candidate `PYTHONPATH`,
+  and one resolved build paths from the coordinator working directory. Neither
+  reached model execution; the successful capture used candidate
+  `PYTHONPATH`, candidate cwd, and isolated caches.
+
+**Next**
+
+- Return to exact attempt176. Close the direct global-BF16 plus wider-state-CTA
+  translation: attempt171's V16 global pipeline already regressed, and V32
+  amplifies the target-shape regression.
+- Re-attribute accepted-project versus FLA time by kernel family. The next
+  strategy must remove state-history/local-VJP traffic or fuse a true producer
+  and consumer boundary; merely moving operands global or widening the
+  persistent scan does not reproduce FLA's advantage.
