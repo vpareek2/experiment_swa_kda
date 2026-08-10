@@ -12180,3 +12180,59 @@ uv run --no-sync python scripts/kda_cuda_development.py \
 - The next FLA-matching strategy must preserve group-local locality while
   reducing the broad VJP/state work itself, or implement a genuinely fused
   on-chip producer/consumer program rather than a global materialization.
+
+## 2026-08-10 [Codex] Four-warp local barriers regress the long sequence
+
+**Context**
+
+- Attempt172 returns to accepted attempt168 and ports FLA-style warp-owned row
+  consumption into the current four-warp complete VJP. Same-warp `dP`, `dW`,
+  and `dQ` handoffs use warp synchronization, while the two true cross-warp
+  dependencies retain CTA-wide barriers. Equations, arithmetic order, group
+  locality, allocations, precision, and ABI are unchanged.
+- This is an independent owned implementation. No FLA or FlashKDA source is
+  imported, linked, or used at runtime.
+
+**Commands**
+
+```bash
+# One seed-4101 production capture versus attempt168, commit/push, and one
+# matched candidate-first Level 1.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_168 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_172 \
+  runs/kda-cuda-development/attempt-00172-fla-four-warp-local-barriers-level1 \
+  --level2-order candidate-first
+```
+
+**Artifacts**
+
+- Branch `kda-cuda/fla-four-warp-local-barriers-172`, pushed commit
+  `fefead9497518074dc1871e9f5bc2d62e06099fa`; changed source SHA-256
+  `10722520e3256e4e092ad5427503f5551fabbe26ee686776835faa6f3639049e`.
+- Diagnostic manifest
+  `ec59e9f43efbc91fbf40ac0f490350a1c873b17bd8eae61476487bb7d7634acf`;
+  Level-1 manifest
+  `1e29f9a52b5d594697b2b9a16e223ccc1692c76cfbb74948740d9034bc740540`.
+- The append-only index now has 196 rows and hashes to
+  `f42a4a8c620be2c7564ccc54e64f2b5dca6c77eea231fa3358606eecc92e3ca3`.
+
+**Result**
+
+- Output and all seven gradients are bitwise equal to attempt168 and every
+  tensor is finite. The committed runtime audit completes FLA-free.
+- Level 1 rejects the candidate. T=4096 forward+backward regresses
+  `9.610864 -> 10.150592 ms` (5.616%) with identical allocation. T=256 and
+  T=1024 improve 7.673% and 3.452%, respectively, but the long-sequence result
+  violates the five-percent important-shape guard.
+- Warp-owned scalar traversal and synchronization are not a win at the long
+  sequence even on the four-warp topology. No profile, checker, sanitizers,
+  repeat, or Level 2 ran after rejection. This is not statistical or
+  LM-quality evidence.
+
+**Next**
+
+- Return to exact accepted attempt168. Barrier-only scheduling is now closed
+  on both the older two-warp and current four-warp broad kernels.
+- Continue matching FLA through a structural reduction in useful broad-VJP or
+  colored-pair work while preserving attempt168's group-local lifetime.
