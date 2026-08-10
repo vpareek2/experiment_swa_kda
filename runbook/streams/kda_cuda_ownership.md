@@ -10825,3 +10825,63 @@ cuobjdump --dump-resource-usage <isolated candidate libraries>
   topology. The next candidate must remove one measured synchronization or
   materialization boundary; do not merely retune register counts or rerun the
   unchanged direct-load kernel.
+
+## 2026-08-10 [Codex] Attempt 148 reaches memory-safe Level-1 parity
+
+**Context**
+
+- The bounded attempt-147 operator profile showed the direct-load broad VJP at
+  2.404896 ms, down from attempt 145's 5.437120 ms. The host still built `U/W`
+  and packed `dO` in a reverse-scan loop, discarded them, and rebuilt them in a
+  separate local-VJP loop.
+- Attempt 148 interleaves those phases per reverse group, reuses the exact
+  group-local operands, and replaces full multi-group BF16 `dZ/dH` histories
+  with group-local buffers. Kernel equations and precision are unchanged.
+
+**Commands**
+
+```bash
+# One bounded nsys profile of committed attempt 147.
+# One frozen seed-4101 production-shape diagnostic for attempt 148.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_127 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_148 \
+  runs/kda-cuda-development/attempt-00148-fla-reuse-reverse-operands-level1 \
+  --level2-order candidate-first
+```
+
+**Artifacts**
+
+- Attempt-147 profile manifest
+  `208a22d0985efce7fbed77eab46175eaf0b7b9509e680ca0561c3f222c5c6cf5`.
+- Attempt 148 pushed commit `99b2e47f2ca03bc3f72266c58af2b4339082cfb7`;
+  backward source SHA-256
+  `af4a37109c955837a6df4537190172dd108ee303b64b9f5aa8e56cf74226e675`.
+- Attempt-148 diagnostic manifest
+  `74986b2e48e9a4643f6ade7d2b65cbee2cf8ba50bc633db94e4977b5c98bb640`;
+  Level-1 manifest `83838ff3c8b4a51e31152eb3054acbf0629a78591c11ebfabe29d00aaaac5bb6`.
+
+**Result**
+
+- Attempt 148 is bitwise equal to attempt 147 for output and every gradient
+  tensor at the frozen production shape; all tensors are finite. The committed
+  runtime audit completed and remained FLA-free.
+- T=4096 forward+backward is effectively at accepted-127 parity:
+  `11.874512 -> 11.925888 ms`, a 0.433% regression. Peak allocation improves
+  from 204,081,664 to 201,198,080 bytes (1.413% lower). T=256 improves 0.242%;
+  T=1024 regresses 0.208%. All important regression and memory guards pass,
+  but the candidate does not meet the three-percent advancement threshold.
+- The attempt-147 profile has 257 launches, 11.563104 ms summed kernel time,
+  and 12.201024 ms GPU span. Its broad VJP is still 3.02x the preserved FLA
+  broad kernel (`2.404896` versus `0.797600 ms`).
+- Level 2, sanitizer, protected checker, and independent repeat did not run.
+  This is not statistically confirmed and has no LM-quality evaluation.
+
+**Next**
+
+- Keep exact accepted attempt 127. Preserve attempt 148 as the new near-parity
+  FLA-shaped development scaffold, not an accepted baseline.
+- Retain its group reuse and compact histories. Replace the broad CTA's final
+  two shared-memory triangular-adjoint transforms with group-local batched
+  GEMMs; this directly tests whether the remaining manual-WMMA barrier path is
+  slower than the tuned dense backend on GB10.
