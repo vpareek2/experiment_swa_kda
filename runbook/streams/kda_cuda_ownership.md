@@ -12001,3 +12001,58 @@ uv run --no-sync python \
 - The main compute gap remains the complete VJP plus colored-pair path. Any
   fusion there must preserve deterministic update order and demonstrate a
   substantial operator reduction before another sparse Level 2.
+
+## 2026-08-10 [Codex] Eight-warp inline-dD boundary is below the gate
+
+**Context**
+
+- Attempt169 starts from accepted attempt168 and combines two operations at the
+  same complete-VJP ownership boundary. Eight warps split the persistent 64x64
+  adjoint into two fragments per warp, while the owning chunk CTA reconstructs
+  `dD` from BF16 state/dstate histories in exact FP32 order. This removes the
+  separate eight-launch, 6,144-block-per-group `dD` reduction and its full
+  FP32 output buffer.
+
+**Commands**
+
+```bash
+# One fresh-cache seed-4101 capture versus attempt168, then commit/push and
+# one matched candidate-first Level 1.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_168 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_169 \
+  runs/kda-cuda-development/attempt-00169-eight-warp-inline-dd-level1 \
+  --level2-order candidate-first
+```
+
+**Artifacts**
+
+- Branch `kda-cuda/eight-warp-inline-dd-169`, pushed commit
+  `a65e82eadb189022df245c8e1f5b0408a4480bb6`; changed source SHA-256
+  `6169d25eda9c0b6e843ad12b04e30268ce4de519e0829b8071ab44d01f5c6966`.
+- Diagnostic manifest
+  `16001154f4253e035f795b8634baf37e7094ba5d2504343191cc6ce8922b4042`;
+  Level-1 manifest
+  `0b962e23327680167a2c67583099f6c8db7edd862b4ed07e9a6ce8aac4a8f3f8`.
+- The append-only index now has 193 rows and hashes to
+  `3cf21b12583dbcd1f33befda67c5ee0b8b0a213efaf5b91407ddbb5f699e6b0d`.
+
+**Result**
+
+- Output and every gradient are bitwise equal to accepted attempt168 and all
+  tensors are finite. The committed runtime audit completes FLA-free.
+- T=4096 forward+backward improves only `9.602752 -> 9.569936 ms`
+  (0.342%), below the three-percent gate. Peak allocation falls
+  `191,105,536 -> 190,908,928` bytes. T=1024 improves 0.129%; T=256
+  regresses 1.265%, within the guard.
+- Inline `dD` fixes the prior eight-warp candidate's small-shape guard and
+  removes memory/launches, but its per-key serial reconstruction consumes the
+  occupancy benefit. No profile, checker, sanitizers, repeat, or Level 2 ran
+  after the Level-1 rejection. This is not statistical or LM-quality evidence.
+
+**Next**
+
+- Return to accepted attempt168. Do not compose inline `dD` unless its in-CTA
+  reduction is parallelized without changing FP32 addition order.
+- The next candidate should reduce useful broad-VJP or colored-pair work, not
+  merely move a reduction into an already long critical path.
