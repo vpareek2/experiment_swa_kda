@@ -13161,3 +13161,71 @@ uv run --no-sync python scripts/kda_cuda_development.py \
   useful broad/state product or change the cooperative dataflow for the full
   program. Moving the same inverse arithmetic across launch boundaries is a
   measured plateau.
+
+## 2026-08-10 [Codex] Parallel tensor-core forward U/W remains below tuned BMM
+
+**Context**
+
+- Attempt187 returns to exact attempt176 and isolates a forward mechanism not
+  covered by attempt107 or185. It replaces the two FP32 `bmm_out` calls for
+  `U=T*P` and `W=T*Q` with 3,072 independent four-warp tensor-core CTAs while
+  retaining FP32 output buffers and the accepted persistent FP32 scan.
+- Earlier attempt107 used only one CTA per chunk and also changed compact
+  operands and inter-chunk state. Attempt185 fused the direct residual into
+  the scan. This candidate tests only whether broad producer parallelism can
+  beat the tuned BMM boundary. FLA remains offline-only.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_187 \
+  --lane optimization <isolated artifact/cache arguments>
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_176 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_187 \
+  runs/kda-cuda-development/attempt-00187-fla-parallel-forward-uw-level1 \
+  --level2-order candidate-first
+```
+
+**Artifacts**
+
+- Branch `kda-cuda/fla-parallel-forward-uw-187`, pushed commit
+  `85679d3f2f8e7d126033bb601eeab2abc1dc4b79`; changed source SHA-256
+  `b258e8719f5fb141a9d65125f0bd75be1dfc2494b4efaa3dac45d8d5b8bc8f88`.
+- Checker summary
+  `94220ff2b9dc6393964b7690558c90dc318803df6a00decb0012609003c0caf8`;
+  production-gradient manifest
+  `32a8d0df4114a3ae23b75b902c69df166f9c01c065c52b1166516133dd4d27f5`;
+  Level-1 manifest
+  `56b4e5fa143697b9270c166cfa3d5dc338b87372069c1e4f02d11a1ef9ab7b3c`.
+
+**Result**
+
+- Ownership 1.0 and runtime/profile FLA freedom pass. Production output and
+  all seven gradients are finite; maximum output delta is `0.00048828125` and
+  maximum gradient delta is `1.7253114492632449e-09`, inside the frozen
+  tolerances. The same-commit repeat is bitwise equal for every tensor.
+- Level 1 does not advance. T=4096 forward+backward improves
+  `9.671088 -> 9.598864 ms` (0.747%), but forward alone regresses
+  `16.587632 -> 16.695360 ms` (0.649%). T=1024 combined regresses 0.623%, and
+  T=256 combined regresses `3.614464 -> 3.858208 ms` (6.744%), violating the
+  important-shape guard. Target allocation falls 4.184%, from 191,105,536 to
+  183,110,144 bytes.
+- The producer uses 48 registers/thread, 4,096 shared bytes, and no spill.
+  Broad CTA parallelism avoids attempt107's chunk-local serialization, but its
+  FP32-to-BF16 operand conversion and global FP32 output path still lose to
+  tuned BMM for forward execution.
+- No Level 2, sanitizer run, statistical confirmation, or LM-quality
+  evaluation ran. Attempt176 remains the development parent; attempt175 is
+  still the latest full matched baseline at 36,719.5 tok/s, 84.06% of FLA.
+
+**Next**
+
+- Close standalone global forward U/W replacement. Attempts107,185, and187
+  cover low-parallel compact preparation, direct residual fusion, and broad
+  FP32-output production; none advances while preserving the short lane.
+- Return to exact attempt176. A future forward retry must keep operands
+  producer-resident into their state consumer. Otherwise concentrate on the
+  training-only state/broad backward program where FLA's fused decomposition
+  remains materially different.
