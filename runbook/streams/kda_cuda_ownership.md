@@ -10625,3 +10625,67 @@ cuobjdump --dump-resource-usage <isolated candidate library>
   copy. Fold BF16 `dO/z` and output-side `dA = dO z^T` into the broad CTA so its
   FP32 pack/BMM/workspaces disappear. Only then extend BF16 ownership to
   `P/Q/T`, avoiding new full-sequence workspaces.
+
+## 2026-08-10 [Codex] Attempt 144 matches FLA register topology but rejects fused dA
+
+**Context**
+
+- Attempt 144 starts from attempt 143 and makes two separable boundary changes.
+  The reverse scan retains only one group's FP32 `dZ` and writes the durable
+  history directly in BF16. The broad two-warp CTA reads original BF16
+  `grad_output`, holds eight additional `dO z^T` fragments, and emits `dA`,
+  removing the second output pack and standalone output-adjoint BMM.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check --lane optimization \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_144 \
+  <isolated artifact/cache arguments>
+# Frozen seed-4101 production capture plus independent fresh-cache repeat.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_127 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_144 \
+  runs/kda-cuda-development/attempt-00144-fla-direct-bf16-dz-da-level1 \
+  --level2-order baseline-first
+cuobjdump --dump-resource-usage <isolated candidate library>
+```
+
+**Artifacts**
+
+- Pushed commit `2bd5bbfff4470b9c24d302c4c986e5081161afe9`; backward
+  source SHA-256
+  `9ac3ef21037d4d59eab0758bd2ce202bd536a1644d40b6c754a6f9f5bdf5d063`.
+- Protected checker manifest
+  `bf0d1c514172f8cb2f69326a93cb3a5346060b837498baac722d9f1f66dbeb40`.
+- Production comparison/repeat manifest
+  `a95b91a093a508324d0d82a25382f28d541db6d0eca6052239b16365875a581c`.
+- Level-1 manifest
+  `1999ba5bfd5f087f0ba2a4a002d3383405cf72958ca5054e5de7b6e0ed5a3235`.
+- Successful pre-commit equation diagnostic manifest
+  `de740b43bdcf4642cdf3189585c3da0ff139b28c4112412350a2ff9bb8f33b0b`.
+
+**Result**
+
+- Ownership 1.0, protected runtime/profile audit, and runtime FLA freedom pass.
+  Production output is bitwise equal, maximum frozen gradient delta is
+  `2.459273673593998e-09`, and every fresh-cache repeat tensor is bitwise exact.
+- The complete CTA now exactly matches the preserved FLA kernel's 255
+  registers/thread and has zero local spill. This numerical topology match does
+  not imply a performance match: T=4096 forward+backward regresses
+  `11.741728 -> 14.395088 ms` (22.598%).
+- Direct BF16 `dZ` history restores the memory guard: peak allocation is
+  `207,034,880` bytes, only 1.447% over accepted 127. T=256 and T=1024 improve
+  2.800% and 1.918%, respectively.
+- The fused output-adjoint fragments are the rejected component. Holding 16
+  matrix fragments raises register pressure from attempt 143's 164 to 255 and
+  costs more than the removed SGEMM on GB10. No sanitizer, operator profile, or
+  Level 2 ran; there is no confirmation or LM-quality result.
+
+**Next**
+
+- Keep exact accepted attempt 127. Preserve attempt 144 as proof that raw
+  register-count parity is insufficient.
+- Isolate the useful direct BF16 `dZ` history on attempt 143's 164-register
+  broad kernel, restoring its standalone output pack and `dA` BMM. Measure that
+  memory-safe boundary before changing `P/Q/T`.
