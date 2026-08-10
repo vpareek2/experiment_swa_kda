@@ -8713,3 +8713,110 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_124 \\
 - A further candidate must remove GPU work or expose more parallelism at a
   strategy boundary. Do not compose attempt 124 merely to rescue a marginal
   mechanism.
+
+## 2026-08-09 [Codex] Attempt 125 asynchronous forward operand pipeline remains subthreshold
+
+**Context**
+
+- Attempt 125 starts directly from accepted attempt 100 and implements the
+  previously untested part of the offline FlashKDA scheduling mechanism without
+  importing or linking reference code. It packs the four value-independent
+  forward left operands (`W`, qgamma, restored keys, and `A`) into aligned BF16
+  views after their FP32 sources become dead, then double-buffers 16x16 tiles
+  with `cp.async` while the persistent C64 scan stages its right operand and
+  executes the current FP32-accumulating WMMA.
+- The second async tile raises shared scratch by 4 KiB. The implementation
+  aliases the BF16 right-operand scratch with `next_state` across an explicit
+  lifetime boundary, keeping static shared memory at 48 KiB. Forward equations,
+  FP32 inter-chunk state, accumulation order, backward, and allocation sizes are
+  otherwise unchanged.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_125 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact seed-4101 production comparison and independent fresh-cache repeat.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_100 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_125 \
+  runs/kda-cuda-development/attempt-00125-async-scan-operands-level1-valid-001 \
+  --level2-order candidate-first
+# Exact final source staged in validation worktree 125; run all sanitizers.
+# Execute the saved candidate-first Level-2 pair exactly once.
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_125 \
+  push -u origin kda-cuda/wy-async-scan-operands-125
+```
+
+**Artifacts**
+
+- Pushed final commit `6220c6573a8493161f607aff6c62e8c9735edeb3`
+  after preserved non-finite pre-fix commit
+  `8608b4b58e5edfc26860f8de4a0bbfa050263e02`; final forward source SHA-256
+  `25904a21ca6c9e322911832d978d9df3135775731e52a11c22c8083509c327d6`.
+- Initial over-limit build failure:
+  `runs/kda-cuda-development/diagnostics/attempt-00125-async-scan-operands-protected-checker`,
+  manifest `6642c820a3683336f9352c084c502161e7e77102c0617d4d08970ccfdd32306f`.
+- Pre-barrier protected pass and non-finite production evidence:
+  `runs/kda-cuda-development/diagnostics/attempt-00125-async-scan-operands-protected-checker-002`,
+  manifest `432c15c840320b66d08447f59d6d094ea2ab4be9cab44ece2fcacee6ea894e05`,
+  and `runs/kda-cuda-development/diagnostics/attempt-00125-async-scan-operands-gradient`,
+  manifest `889ae59f74c3552dabf86e1f4a1086a1f1257f0c4ba0532940d9456a91592a57`.
+- Final protected checker:
+  `runs/kda-cuda-development/diagnostics/attempt-00125-async-scan-operands-protected-checker-003`,
+  manifest `ceb1810ace0bb660b5fce867fc7bd15cb021bb1f191f737c1870e84a28320ed2`.
+- Final production comparison/repeat:
+  `runs/kda-cuda-development/diagnostics/attempt-00125-async-scan-operands-gradient-valid-001`,
+  manifest `c32f28882a3db84fc618095a879b66b4b720167eaf09324704a26abd60dfc28e`.
+- Excluded pre-barrier Level 1:
+  `runs/kda-cuda-development/attempt-00125-async-scan-operands-level1`,
+  manifest `78e43c497daa31c8227125a4c7cbff907d0cc200388d171e3a034665ad8a19c3`.
+- Valid Level 1:
+  `runs/kda-cuda-development/attempt-00125-async-scan-operands-level1-valid-001`,
+  manifest `cc8e701bd3ae2c02c1a77a26fecd4f99fd4a65779207e2a62fc32048f35e91c9`.
+- Full sanitizer validation:
+  `runs/kda-cuda-development/validations/validation-00030-async-scan-operands`,
+  manifest `a933bd141c8e86a5d8fe106706d5fc2fb845c626e030fab31cc1192a90ee1beb`.
+- Level 2:
+  `runs/kda-cuda-development/attempt-00125-async-scan-operands-level2`,
+  manifest `ab8160a86c9d3637ff2753baca08e390c1685d405586985a949c8f066a092b17`.
+- Append-only attempt/reference index has 129 valid JSONL entries, SHA-256
+  `5d14e2ee5579defffcea85f05605d01e5b4d0ec01a97f9279603f221ea7a0edc`.
+
+**Result**
+
+- The first double-buffered kernel required 52 KiB of static shared memory and
+  failed compilation against the 48-KiB static limit before runtime. Aliasing
+  right-operand scratch with `next_state` restored 48 KiB, but the first alias
+  realization lacked a CTA-wide barrier before FP32 stores. Its production
+  output and all gradients were non-finite in two fresh-cache captures. That
+  commit and its apparent 6.31% Level-1 timing are invalid and excluded.
+- The final barrier-corrected source passes ownership 1.0, protected runtime and
+  profile audits, runtime FLA freedom, and the frozen numerical contract.
+  Output and all seven gradients are bitwise equal to attempt 100, and the
+  independent fresh-cache repeat is bitwise exact for all eight tensors.
+  Memcheck, racecheck, initcheck, and synccheck all pass with zero errors.
+- Valid Level 1 advances: T=4096 forward+backward improves
+  `12.358608 -> 11.663696 ms` (5.623%), forward-only improves 1.691%, T=256
+  improves 4.650%, and T=1024 improves 1.718%. Peak allocation is unchanged.
+- The exact candidate-first Level-2 pair is directionally positive but narrowly
+  below the declared 2% retention gate. Candidate samples
+  `[34436,34182,34245,34413,34600]` have median 34,413 tok/s; baseline samples
+  `[33732,33807,33783,33761,33756]` have median 33,761 tok/s. The gain is
+  1.931%, both peak at 5508.533 MiB, and the candidate reaches 78.784% of the
+  fixed 43,680 tok/s FLA reference. Its remaining gaps are 9,267 tok/s to FLA
+  and 10,587 tok/s to 45k.
+- This is development evidence only. It is not statistically confirmed and no
+  LM-quality evaluation ran.
+
+**Next**
+
+- Retain attempt 100 as the accepted development baseline. Do not retest or
+  silently compose attempt 125 merely to cross the threshold; its 34,413 tok/s
+  absolute result is preserved but subthreshold.
+- The async operand mechanism is valid and directionally useful. A future
+  forward strategy must widen the boundary to dedicated load/store warp
+  specialization or remove the separate packing pass while preserving the
+  proven CTA alias barriers. The independent alternative remains a backward
+  dependency/ownership redesign that removes generic GEMM/global handoffs.
