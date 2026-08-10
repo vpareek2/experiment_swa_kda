@@ -487,6 +487,39 @@ __global__ void nanochat_kda_wy_backward_pack_group_c64_kernel(
   E[index] = khat[source] * expf(end_g - g);
 }
 
+// The direct state scan has four independent value owners.  Pack qg/kg once
+// so those owners do not redundantly evaluate the same exponentials, matching
+// the lifetime of FLA's recomputed compact operands without retaining FP32
+// R/E workspaces.
+__global__ void nanochat_kda_wy_backward_pack_group_qgkg_bf16_c64_kernel(
+    const float* qbar,
+    const float* khat,
+    const float* prefix_g,
+    __nv_bfloat16* qg,
+    __nv_bfloat16* kg,
+    int chunk_start,
+    int group_chunks) {
+  const int index = blockIdx.x * blockDim.x + threadIdx.x;
+  const int elements = kRecurrences * group_chunks * kChunk * kDim;
+  if (index >= elements) {
+    return;
+  }
+  const int local_n = index / (kChunk * kDim);
+  const int recurrence = local_n / group_chunks;
+  const int local_chunk = local_n - recurrence * group_chunks;
+  const int within = index - local_n * kChunk * kDim;
+  const int row = within / kDim;
+  const int key = within - row * kDim;
+  const int chunk_id = chunk_start + local_chunk;
+  const int n = recurrence * kChunks + chunk_id;
+  const int64_t source = chunk_vector_index(n, row, key);
+  const float g = prefix_g[source];
+  const float end_g =
+      prefix_g[chunk_vector_index(n, kChunk - 1, key)];
+  qg[index] = __float2bfloat16_rn(qbar[source] * expf(g));
+  kg[index] = __float2bfloat16_rn(khat[source] * expf(end_g - g));
+}
+
 __global__ void nanochat_kda_wy_backward_sub_z_c64_kernel(
     const float* U, const float* wh, float* z, int chunk_id) {
   const int index = blockIdx.x * blockDim.x + threadIdx.x;
@@ -1483,8 +1516,8 @@ __global__ void nanochat_kda_wy_backward_reverse_group_wmma_c64_kernel(
 // dZ and incoming per-chunk dh are the only histories published.  In
 // particular, R/E, A^T dO, and R^T dO never become global workspaces.
 __global__ void nanochat_kda_wy_backward_register_dh_group_c64_kernel(
-    const float* qbar,
-    const float* khat,
+    const __nv_bfloat16* qg,
+    const __nv_bfloat16* kg,
     const float* prefix_g,
     const float* W,
     const float* A,
@@ -1618,14 +1651,9 @@ __global__ void nanochat_kda_wy_backward_register_dh_group_c64_kernel(
                element += warpSize) {
             const int row = element / kTile;
             const int column = element - row * kTile;
-            const int64_t vector_source = chunk_vector_index(
-                n, row_start + row, key_start + column);
-            const float end_g = prefix_g[
-                chunk_vector_index(n, kChunk - 1, key_start + column)];
-            operand_a[warp * kTileElements + element] =
-                __float2bfloat16_rn(
-                    khat[vector_source] *
-                    expf(end_g - prefix_g[vector_source]));
+            operand_a[warp * kTileElements + element] = kg[
+                (static_cast<int64_t>(group_n) * kChunk + row_start + row) *
+                    kDim + key_start + column];
             operand_b[warp * kTileElements + element] =
                 __float2bfloat16_rn(
                     dh_shared[(key_start + row) * kValueStrip +
@@ -1678,11 +1706,9 @@ __global__ void nanochat_kda_wy_backward_register_dh_group_c64_kernel(
                element += warpSize) {
             const int row = element / kTile;
             const int column = element - row * kTile;
-            const int64_t vector_source = chunk_vector_index(
-                n, source_start + column, key_start + row);
-            operand_a[warp * kTileElements + element] =
-                __float2bfloat16_rn(
-                    qbar[vector_source] * expf(prefix_g[vector_source]));
+            operand_a[warp * kTileElements + element] = qg[
+                (static_cast<int64_t>(group_n) * kChunk +
+                 source_start + column) * kDim + key_start + row];
             operand_b[warp * kTileElements + element] = grad_output[
                 input_vector_index(
                     b, token_start + source_start + row, h,
@@ -3181,9 +3207,26 @@ nanochat_kda_chunk_wy_backward_c64(
         {kGroupRows, kChunk, kDim}, q.options());
     at::Tensor dstate_next_group_bf16 = at::empty(
         {kGroupRows, kDim, kDim}, q.options());
+    at::Tensor qg_group_bf16 = at::empty(
+        {kGroupRows, kChunk, kDim}, q.options());
+    at::Tensor kg_group_bf16 = at::empty_like(qg_group_bf16);
+    nanochat_kda_wy_backward_pack_group_qgkg_bf16_c64_kernel<<<
+        (kGroupVectorElements + kThreads - 1) / kThreads,
+        kThreads, 0, stream>>>(
+        qbar.data_ptr<float>(), khat.data_ptr<float>(),
+        prefix_g.data_ptr<float>(),
+        reinterpret_cast<__nv_bfloat16*>(
+            qg_group_bf16.data_ptr<at::BFloat16>()),
+        reinterpret_cast<__nv_bfloat16*>(
+            kg_group_bf16.data_ptr<at::BFloat16>()),
+        chunk_start, kGroupChunks);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
     nanochat_kda_wy_backward_register_dh_group_c64_kernel<<<
         kRecurrences * (kDim / 32), 64, 0, stream>>>(
-        qbar.data_ptr<float>(), khat.data_ptr<float>(),
+        reinterpret_cast<const __nv_bfloat16*>(
+            qg_group_bf16.data_ptr<at::BFloat16>()),
+        reinterpret_cast<const __nv_bfloat16*>(
+            kg_group_bf16.data_ptr<at::BFloat16>()),
         prefix_g.data_ptr<float>(), W_group.data_ptr<float>(),
         A_group.data_ptr<float>(),
         reinterpret_cast<const __nv_bfloat16*>(
