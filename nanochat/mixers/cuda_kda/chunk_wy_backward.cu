@@ -1010,10 +1010,9 @@ __global__ void nanochat_kda_wy_backward_reverse_group_wmma_c64_kernel(
     const float* W,
     const float* E,
     const float* dstate_base,
-    float* dZ_group,
+    const float* dZ_group,
     __nv_bfloat16* dZ_history,
     float* dstate_next,
-    float* dstate_next_group,
     __nv_bfloat16* dstate_next_history,
     int chunk_start,
     int group_chunks) {
@@ -1068,9 +1067,6 @@ __global__ void nanochat_kda_wy_backward_reverse_group_wmma_c64_kernel(
          index += blockDim.x) {
       const int key = index / kValueTile;
       const int value = index - key * kValueTile;
-      dstate_next_group[
-          (static_cast<int64_t>(group_n) * kDim + key) * kDim +
-          value_start + value] = local_state[index];
       dstate_next_history[
           (static_cast<int64_t>(group_n) * kDim + key) * kDim +
           value_start + value] = __float2bfloat16_rn(local_state[index]);
@@ -1119,7 +1115,6 @@ __global__ void nanochat_kda_wy_backward_reverse_group_wmma_c64_kernel(
           (static_cast<int64_t>(group_n) * kChunk + row) * kDim +
           value_start + value;
       local_dZ[index] += dZ_group[offset];
-      dZ_group[offset] = local_dZ[index];
       dZ_history[offset] = __float2bfloat16_rn(local_dZ[index]);
     }
     if (threadIdx.x < kDim) {
@@ -2625,8 +2620,6 @@ nanochat_kda_chunk_wy_backward_c64(
         {kGroupRows, kChunk, kDim}, q.options());
     at::bmm_out(dstate_base, R_group.transpose(1, 2), dO_group);
     at::bmm_out(dZ_group_flat, A_group.transpose(1, 2), dO_group);
-    at::Tensor dstate_next_group_flat = at::empty(
-        {kGroupRows, kDim, kDim}, fp32);
     at::Tensor dstate_next_group_bf16 = at::empty(
         {kGroupRows, kDim, kDim}, q.options());
     nanochat_kda_wy_backward_reverse_group_wmma_c64_kernel<<<
@@ -2637,7 +2630,6 @@ nanochat_kda_chunk_wy_backward_c64(
         reinterpret_cast<__nv_bfloat16*>(
             dZ_group_bf16.data_ptr<at::BFloat16>()),
         dstate_next.data_ptr<float>(),
-        dstate_next_group_flat.data_ptr<float>(),
         reinterpret_cast<__nv_bfloat16*>(
             dstate_next_group_bf16.data_ptr<at::BFloat16>()),
         chunk_start, kGroupChunks);
