@@ -9774,3 +9774,77 @@ uv run --no-sync python scripts/kda_cuda_development.py \
   GEMM/dependency boundary, especially the combined group-boundary/reverse scan
   and the remaining ATen MAGMA/CUTLASS products, while retaining the T=256
   guard.
+
+## 2026-08-09 [Codex] Attempt 135 reverse-base fusion rejected at Level 1
+
+**Context**
+
+- Attempt 135 explicitly widens rejected attempt 134 while continuing to use
+  accepted attempt 127 as the comparator. It moves `A^T dO` and `R^T dO` into
+  the existing persistent reverse-group CTA, reusing its shared product buffer
+  and removing two standalone FP32 batched GEMMs plus the global `dstate_base`
+  intermediate for each of eight groups.
+- The fused products round operands to BF16 for WMMA and accumulate in FP32,
+  matching the persistent kernel's existing product convention. This was a
+  deliberate test of a larger producer-consumer boundary, not acceptance of
+  attempts 133 or 134.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_135 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact seed-4101 production capture and independent fresh-cache repeat.
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_135 \
+  push -u origin kda-cuda/wy-reverse-base-fusion-135
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_127 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_135 \
+  runs/kda-cuda-development/attempt-00135-reverse-base-fusion-level1 \
+  --level2-order candidate-first
+```
+
+**Artifacts**
+
+- Pushed commit `424991f3fd33f3648b8c5b2f32ea775a4394fb60`;
+  backward source SHA-256
+  `212dd4007d8a62fb6373ac4e622f6f43cec46b7abdfbe3373f199c3d83e6cc22`.
+- Protected checker:
+  `runs/kda-cuda-development/diagnostics/attempt-00135-reverse-base-fusion-protected-checker`,
+  manifest `adbfdf4376c7f6a8b52387c605671ca363ca6c8d1d07bfb93d5d3e01b1d3b0ff`.
+- Production comparison/repeat:
+  `runs/kda-cuda-development/diagnostics/attempt-00135-reverse-base-fusion-gradient`,
+  manifest `c0ec89f5bad456b59b7df317cfc69e974beb188ddde884997cc039a832faa7ee`.
+- Level 1:
+  `runs/kda-cuda-development/attempt-00135-reverse-base-fusion-level1`,
+  manifest `5cfe10c98b204551392ce505e5df9061ce3ed2a8083f8b5d2704e98995191c0f`.
+- Append-only attempt/reference index has 143 valid JSONL entries, SHA-256
+  `43d9e2ff176bee24fbfc04a2a96b5483ff82c8984ec1ad90a7553e1004af133b`.
+- The first artifact-finalizer invocation used one too-small parent index and
+  stopped with `FileNotFoundError` on a nonexistent `runs/runs/...` path before
+  writing comparison, summary, invocation, or manifests. The exact incident is
+  preserved in `finalize-incident.txt`; the corrected finalizer then completed.
+
+**Result**
+
+- Output and `dq` are bitwise equal to the frozen accepted-equivalent capture;
+  maximum other-gradient delta is `2.055458026006818e-09`. The independent
+  fresh-cache repeat is bitwise exact for all eight tensors. Ownership is 1.0,
+  protected runtime/profile audit passes, and runtime remains FLA-free.
+- Level 1 rejects the fused schedule. T=4096 forward+backward regresses
+  `11.524160 -> 11.998320 ms` (4.114%), despite peak allocation falling 4.110%
+  from 204,081,664 to 195,693,056 bytes. T=256 and T=1024 combined improve
+  4.136% and 2.479%, and every guard remains within its cap, but the primary
+  three-percent advancement criterion fails.
+- No sanitizer or Level-2 run was performed. This is development evidence
+  only, is not statistically confirmed, and contains no LM-quality evaluation.
+
+**Next**
+
+- Keep exact `f2fa705e22fc97d2f455b4ccabcf42a6a9ab120f` as the accepted
+  development baseline. Attempt 135 is a preserved Level-1 rejection.
+- Do not retest unchanged. The additional serial WMMA phases cost more than the
+  two parallel GEMMs and global intermediate they remove at T=4096. Restore
+  parallel reverse-base products and target launch/global-round-trip overhead
+  without lengthening the low-parallelism persistent reverse scan.
