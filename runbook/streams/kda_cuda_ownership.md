@@ -11347,3 +11347,90 @@ uv run --no-sync python scripts/kda_cuda_development.py \
   tensor-core dot/register scheduling or a new VJP decomposition, not more
   cached operands. This is not statistically confirmed and has no LM-quality
   evaluation.
+
+## 2026-08-10 [Codex] Fast math establishes a 35,521 tok/s development baseline
+
+**Context**
+
+- Attempt160 applies NVCC `--use_fast_math` to all owned CUDA sources on top of
+  attempt157. Its production capture is numerically within the frozen
+  tolerances, but the protected runtime audit exposes a previously safe generic
+  backward fallback whose 1,024-thread block now requires 73,728 registers,
+  above the device's 65,536-register block limit.
+- Attempt161 changes only that generic fallback to 512 block-stride threads.
+  The production C64 path and equations are unchanged. This separates the
+  launch-validity repair from the arithmetic compiler intervention and makes
+  the full protected suite authoritative before performance is interpreted.
+
+**Commands**
+
+```bash
+# One production-shape tensor capture and matched Level 1 per committed candidate.
+# Attempt160: two bounded launch-blocking diagnostics after the runtime failure.
+# Attempt161: exact staged-snapshot checker with all sanitizers, fresh-cache
+# deterministic repeat, and one saved baseline-first seven-step Level-2 pair.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_127 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_161 \
+  runs/kda-cuda-development/attempt-00161-fla-fast-math-generic512-level1 \
+  --level2-order baseline-first
+```
+
+**Artifacts**
+
+- Attempt160 branch `kda-cuda/fla-fast-math-160`, pushed commit
+  `a83097451b35a5b74d89b05283a170e9719481d3`; diagnostic manifest
+  `4c3b18a6f49cc8d0db67f237ba24695a2c09d5da5e48883f358ba94cc86c2d00`;
+  invalid Level-1 manifest
+  `d2cca418dbfe8d3a52979ec6f9d618173cbb6c535dfccaa48ecbcb574a31f8fb`;
+  launch-failure manifest
+  `aab5f2837e7ebe99b58ec6080a7ffed7b39bdff7ff3a0f963dcc30078156fc84`.
+- Attempt161 branch `kda-cuda/fla-fast-math-generic512-161`, pushed commit
+  `ec44cba1f02f230ea991b940a95dc1b1f4e8d95c`; `chunk.cu` SHA-256
+  `dbd622432f6704ac45236568ca42f50f4f516a49c67dc16081320f173dbb6746`;
+  diagnostic manifest
+  `f90140bd7919f607f04eabecaec09c379108d507b9063fa326f852b42f1f9806`;
+  Level-1 manifest
+  `306215b8b0babd18f90cb07670175c55573232d1691d0b411ee4824c0dd11d2b`;
+  checker manifest
+  `f79f1ba9f8914ee30efb2e434a20145d9ab6797fa519346d8479709b7bf5e415`;
+  repeat manifest
+  `28e0640bb565c5594c73566527014b485815994ec5d51e13ad909ed7d8d67ad7`;
+  Level-2 manifest
+  `87b78e1c425ae3603dd3fe31cf4cd98c161562da973e82dc56b4fa220069d468`.
+- The append-only index now has 181 rows and hashes to
+  `92d181929d055b30ff0080181053f23ed0bc7b066496d29f1e23d7c67bc26e43`.
+
+**Result**
+
+- Attempt160's capture differs from attempt157 by at most
+  `1.220703125e-4` in output and `7.7726914e-10` across gradients, but its
+  Level 1 is invalid because the protected runtime audit cannot launch the
+  generic K=V=16 backward check. Its diagnostic timings are not treated as a
+  conclusion.
+- Attempt161 is bitwise equal to attempt160 in the production capture and in a
+  fresh-cache deterministic repeat. The protected checker reports ownership
+  1.0, runtime/profile FLA freedom, and zero-error memcheck, racecheck,
+  synccheck, and initcheck.
+- Valid T=4096 forward+backward improves `11.562688 -> 10.464992 ms`
+  (9.493%) and peak allocation falls 6.358%. Forward-only improves 15.167%; the
+  T=256 and T=1024 forward+backward cases improve 17.814% and 18.293%.
+- The baseline-first Level-2 pair clears the declared two-percent development
+  gate. Accepted127 measured `[34836,34670,34588,34464,34441]`, median 34,588
+  tok/s; attempt161 measured `[35636,35599,35443,35521,35482]`, median 35,521
+  tok/s, a 2.697% gain. Both peak at 5,507.908 MiB.
+- Attempt161 is the new accepted development baseline at 81.32% of the
+  external 43,680 tok/s FLA target, 8,159 tok/s short. The official retained
+  milestone remains `4d1a3b231da2c99882324efbda5306a1815e21c7` pending human
+  retention. This pair is not statistically confirmed and no LM-quality
+  evaluation ran.
+
+**Next**
+
+- Profile the committed attempt161 operator once. Attribute fast math across
+  the forward recurrence, boundary/reverse state programs, and broad VJP before
+  choosing the next FLA-inspired mechanism.
+- Use attempt161 as the development parent. The remaining 18.68% target gap
+  still requires FLA-like generated tensor-core/register scheduling and a much
+  more coherent backward pipeline; do not spend another Level 2 on isolated
+  sub-percent launch removal.
