@@ -9207,3 +9207,80 @@ uv run --no-sync python scripts/kda_cuda_development.py \
   diminishing-return boundary and use the saved profiles to select a larger
   backward dependency, state-history, or dense-matmul boundary. Do not retest
   attempt 128 unchanged.
+
+## 2026-08-09 [Codex] Attempt 129 backward BF16 restored-key boundary rejected at Level 1
+
+**Context**
+
+- Attempt 129 starts directly from accepted attempt 127 and targets the saved
+  backward profile: group-boundary, reverse-group, and restored-key packing
+  account for 24.9% of the captured GPU time. Both persistent WMMA kernels
+  immediately round FP32 restored keys `E` to BF16.
+- The candidate stores `E` as BF16 once in the group pack and loads it directly
+  in both WMMA kernels. It keeps `R`, `dE`, and all analytic VJP work in FP32.
+  The final vector VJP recomputes exact FP32 `E` from `khat` and `prefix_g`, so
+  compression is limited to the WMMA operand lifetime and does not alter the
+  FP32 chain rule.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_129 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact seed-4101 production capture and independent fresh-cache repeat.
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_129 \
+  push -u origin kda-cuda/wy-backward-bf16-e-129
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_127 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_129 \
+  runs/kda-cuda-development/attempt-00129-backward-bf16-e-level1 \
+  --level2-order candidate-first
+```
+
+**Artifacts**
+
+- Pushed commit `c7f85ebe1ae291fc3bd2553459609d11f5ffb7aa`;
+  backward source SHA-256
+  `67a9f5ec204b789d516596888056b24c9db64f2e6b711aafee97248cc9ecbc3b`.
+- Protected checker:
+  `runs/kda-cuda-development/diagnostics/attempt-00129-backward-bf16-e-protected-checker`,
+  manifest `c2f70282d8f8b52eaf54c5f466e0ea3cb83b168180c5397e110258238e9b1e08`.
+- Production comparison/repeat:
+  `runs/kda-cuda-development/diagnostics/attempt-00129-backward-bf16-e-gradient`,
+  manifest `a028bdc02956a6ca791f8cc0953d51e737aba6d821fd3cc1bc89b0e9bb9ee911`.
+- Level 1: `runs/kda-cuda-development/attempt-00129-backward-bf16-e-level1`,
+  manifest `183e2bcd9b2406d0154002fc0d0c33b9b187d223098781c17bc1c7a0ac83ab23`.
+- Append-only attempt/reference index has 135 valid JSONL entries, SHA-256
+  `e5c7741b9c2fd1fc9134c5cc060197bef7a9d8a242375501ae175721218dc7cd`.
+
+**Result**
+
+- Output and all seven gradients are bitwise equal to the frozen
+  accepted-equivalent production capture. The independent fresh-cache repeat
+  is also bitwise exact for all eight tensors. Ownership is 1.0, protected
+  runtime/profile audit passes, and runtime remains FLA-free.
+- Level 1 rejects the mechanism. T=4096 forward+backward regresses
+  `11.561600 -> 11.699072 ms` (1.189%). T=256 and T=1024 regress 4.440% and
+  2.504%, inside the 5% guard. T=4096 peak allocation improves 0.385%, from
+  204,081,664 to 203,295,232 bytes, but timing misses the 3% advance gate.
+  No sanitizer or Level-2 run was performed.
+- The first checker wrapper mistakenly ran `uv` inside the candidate, created a
+  92-KiB local environment, and stopped because the `research` executable was
+  unavailable. It performed no checker, build, Python candidate, or GPU work.
+  The environment was moved out of the candidate and archived with the exact
+  incident record in the production-comparison artifact before the one valid
+  checker launch from the coordinator.
+- This is development evidence only. It is not statistically confirmed and no
+  LM-quality evaluation ran.
+
+**Next**
+
+- Keep exact `f2fa705e22fc97d2f455b4ccabcf42a6a9ab120f` as the accepted
+  development baseline. Attempt 129 is a preserved negative result and must not
+  be composed into later candidates.
+- The memory reduction confirms `E` traffic is material, but recomputing exact
+  `E` in the final VJP costs more than direct BF16 loads save. The next backward
+  strategy should remove launches/dependencies while retaining already
+  materialized FP32 intermediates, rather than compressing them and paying to
+  reconstruct exact values. Do not retest attempt 129 unchanged.
