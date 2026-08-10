@@ -11175,3 +11175,65 @@ env PYTHONPATH=/home/veer/Master/projects/experiment_swa_kda_cuda_attempt_156 \
   state reconstruction with a chunk-parallel broad VJP and eliminate the
   repeated pack/pair boundaries. It must save multiple operator milliseconds
   before Level 2 is warranted.
+
+## 2026-08-10 [Codex] Attempt 157 validates forward-intermediate reuse
+
+**Context**
+
+- Attempt156 still rebuilt `Z = U - W H` during backward, packed BF16
+  `grad_output` into a group-local FP32 tensor, and used the final two MAGMA
+  calls for `dA = dO Z^T`. Attempt157 adopts the FLA-style lifetime instead:
+  the forward boundary sweep writes a compact BF16 `Z` history, and reverse
+  products consume both that history and original BF16 `grad_output` directly.
+- Candidate scope is only
+  `nanochat/mixers/cuda_kda/chunk_wy_backward.cu`. The public ABI, recurrence,
+  runtime ownership, and FLA-free routing are unchanged.
+
+**Commands**
+
+```bash
+# One seed-4101 production-shape tensor capture versus attempt156.
+# One matched Level 1 versus accepted attempt127; no Level 2 was launched.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_127 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_157 \
+  runs/kda-cuda-development/attempt-00157-fla-forward-z-reuse-level1 \
+  --level2-order baseline-first
+```
+
+**Artifacts**
+
+- Attempt157 branch `kda-cuda/fla-forward-z-reuse-157`, pushed commit
+  `b282f245ee26be627006fe1e4bc09d43e0a7ff10`; source SHA-256
+  `43de1b6d5c6ad35aaeb69d5b0a62dd7a3c065fdd941ac84bbb0230073446cb95`.
+- Production diagnostic manifest
+  `ae7e84d89846826cff258cfef5a91affa3b834cc6bb79e0c1cf10d15a63ab944`;
+  Level-1 manifest
+  `59de48973ed7153045ad7b5395030910f95cfdcf72706d3a3b59db37096a67e2`.
+- The initial wrapper used the coordinator cwd and stopped before compilation
+  with `FileNotFoundError`; its invalid-artifact manifest is
+  `1d9493b812e62d356e65934ab371545233ea7af82411b6f26000c1a402856dd1`.
+- The append-only index now has 176 rows and hashes to
+  `d194bd2ac84485d72862bedc8009e2669986f766464e8d4cfb83dd94f7b7756e`.
+
+**Result**
+
+- Output remains bitwise equal to attempt156 and all tensors are finite. The
+  largest gradient delta is `1.750777300912887e-11`; `dv` and `dbeta` are also
+  bitwise equal. The committed runtime audit completes and remains FLA-free.
+- T=4096 forward+backward improves `11.421728 -> 10.533376 ms`, or 7.778%.
+  Peak allocation falls from 204,081,664 to 191,105,536 bytes, or 6.358%.
+  T=256 and T=1024 regress 2.983% and 1.435%, within the five-percent guard.
+- Level 2, sanitizers, and independent deterministic repeat did not run. The
+  result is not statistically confirmed and has no LM-quality evaluation.
+  Accepted attempt127 remains the development baseline at 34,494 tok/s,
+  78.97% of the external 43,680 tok/s FLA target and 9,186 tok/s behind it.
+
+**Next**
+
+- Preserve attempt157 as the next FLA-shaped implementation scaffold, not an
+  accepted baseline. Its 0.888-ms operator reduction validates cross-phase
+  intermediate reuse but is not the required multi-ms strategy boundary.
+- Remove the remaining packed `R/E` family by deriving those scaled operands
+  inside the persistent forward/reverse state programs. Profile before any
+  Level 2 and retain all correctness and memory gates.
