@@ -13833,3 +13833,70 @@ uv run --no-sync python scripts/kda_cuda_development.py \
   decomposition. The next candidate must preserve cooperative product
   consumption or remove a larger kernel boundary; isolated accumulator-to-state
   handoffs have now reached a measured plateau.
+
+## 2026-08-10 [Codex] Reverse product scratch alias is exact but subthreshold
+
+**Context**
+
+- Attempt196 returns to exact attempt190 and preserves its cooperative FP32
+  `W^T dZ` store and CTA-wide state-adjoint consumer. After every warp has
+  loaded its final WMMA operands, the now-dead 8-KiB BF16 operand scratch is
+  reused for the FP32 product tile behind an explicit CTA barrier.
+- This isolates shared-capacity occupancy from attempt194's measured-bad
+  lane-local reverse fragment traversal. Equations, FP32 accumulation order,
+  launch geometry, public ABI, and every other kernel remain unchanged.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_196 \
+  --lane optimization <isolated artifact/cache arguments>
+# Exact seed-4101 production capture and independent fresh-cache repeat.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_190 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_196 \
+  runs/kda-cuda-development/attempt-00196-fla-reverse-product-alias-level1 \
+  --level2-order candidate-first
+```
+
+**Artifacts**
+
+- Branch `kda-cuda/fla-reverse-product-alias-196`, pushed commit
+  `3a660c170cf8c366600c7472e2fe68adaff518ff`; changed source SHA-256
+  `bf1f95dcc160de5c88f8231af92e13b782fba541d41fec4044a6320012b0f711`.
+- Checker summary
+  `b3aaf6456f382bdfa804a8afb25aa01963353eaf8cf15afe4730c6dec6c1467f`;
+  production-gradient manifest
+  `8ba9d0b02778947ebda30a6fa926b85e05285658e53016a537de9a7322f3a74a`;
+  Level-1 manifest
+  `b9520811807b09aae424b2ef45cde7dd42cbd7f603b7ee03a1accbc155244526`.
+- The first diagnostic wrapper ran from the coordinator and stopped at source
+  path resolution before build or GPU work. Its exact traceback is preserved
+  as `invalid-coordinator-cwd.log`; the valid captures used the coordinator
+  interpreter from the candidate worktree without changing candidate source.
+
+**Result**
+
+- Ownership 1.0 and runtime/profile FLA freedom pass. Production output and
+  all seven gradients are finite and bitwise equal to attempt190; the
+  independent fresh-cache repeat is bitwise equal for every tensor.
+- The reverse-group kernel retains 54 registers/thread and no stack/local
+  spill while static shared memory falls `30,208 -> 22,016` bytes per CTA.
+- Level 1 rejects the candidate. T=4096 forward+backward improves only
+  `9.122432 -> 9.099216 ms` (0.254%), below the 3% gate. T=1024 combined
+  improves 4.840%, T=256 combined regresses 1.885%, and memory is identical.
+- No Level 2, sanitizer, statistical confirmation, or LM-quality evaluation
+  ran. Attempt190 remains the strongest non-retained matched scaffold at
+  37,519 tok/s; attempt194 remains the highest raw observation at 37,701 tok/s,
+  and attempt176/175 remain the accepted development/full baselines.
+
+**Next**
+
+- Preserve attempt196 as a correct occupancy observation, not a new baseline.
+  The extra lifetime barrier avoids attempt194's reverse regression but the
+  shared-capacity reduction is not sufficient at T=4096.
+- Close state-scan shared-capacity and register-handoff tuning. Return to exact
+  attempt190 and require a broader reverse/intra decomposition that removes a
+  material kernel/global-workspace boundary rather than only changing local
+  scratch lifetime.
