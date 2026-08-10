@@ -71,30 +71,10 @@ constexpr int64_t kHotConvolutionWidth = 4;
 constexpr int64_t kFusedTimeTile = 64;
 constexpr int64_t kFusedChannelTile = 32;
 
-__global__ void nanochat_kda_causal_convolution_preactivation_gradient_kernel(
-    const __nv_bfloat16* x,
-    const __nv_bfloat16* weight,
-    const __nv_bfloat16* grad_output,
-    float* dz,
-    int64_t length,
-    int64_t channels,
-    int64_t element_count) {
-  const int64_t index = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (index >= element_count) {
-    return;
-  }
-  const int64_t c = index % channels;
-  const int64_t token_index = (index / channels) % length;
-  const int64_t b = index / (length * channels);
-  dz[index] = preactivation_gradient(
-      x, weight, nullptr, grad_output, b, token_index, c, length, channels,
-      kHotConvolutionWidth);
-}
-
 __global__ void nanochat_kda_causal_convolution_tiled_dx_dweight_kernel(
     const __nv_bfloat16* x,
     const __nv_bfloat16* weight,
-    const float* dz,
+    const __nv_bfloat16* grad_output,
     __nv_bfloat16* dx,
     float* partials,
     int64_t length,
@@ -119,7 +99,9 @@ __global__ void nanochat_kda_causal_convolution_tiled_dx_dweight_kernel(
     const int64_t c = channel_base + local_channel;
     float value = 0.0f;
     if (token_index < length && c < channels) {
-      value = dz[(b * length + token_index) * channels + c];
+      value = preactivation_gradient(
+          x, weight, nullptr, grad_output, b, token_index, c, length,
+          channels, kHotConvolutionWidth);
     }
     shared_dz[local_index] = value;
   }
@@ -385,7 +367,6 @@ causal_convolution_backward_cuda(
       width == kHotConvolutionWidth && !initial_state.has_value() &&
       !grad_final_state.has_value();
   if (use_factored_width_four_path) {
-    at::Tensor dz = at::empty(x.sizes(), x.options().dtype(at::kFloat));
     const int64_t time_tile_count =
         (length + kFusedTimeTile - 1) / kFusedTimeTile;
     const int64_t tile_count = batch * time_tile_count;
@@ -394,23 +375,6 @@ causal_convolution_backward_cuda(
         x.options().dtype(at::kFloat));
 
     if (dx_elements > 0) {
-      const int blocks =
-          static_cast<int>((dx_elements + threads - 1) / threads);
-      nanochat_kda_causal_convolution_preactivation_gradient_kernel
-          <<<blocks, threads, 0,
-             at::cuda::getCurrentCUDAStream(x.get_device())>>>(
-              reinterpret_cast<const __nv_bfloat16*>(
-                  x.data_ptr<at::BFloat16>()),
-              reinterpret_cast<const __nv_bfloat16*>(
-                  weight.data_ptr<at::BFloat16>()),
-              reinterpret_cast<const __nv_bfloat16*>(
-                  grad_output.data_ptr<at::BFloat16>()),
-              dz.data_ptr<float>(),
-              length,
-              channels,
-              dx_elements);
-      C10_CUDA_KERNEL_LAUNCH_CHECK();
-
       const int channel_tiles = static_cast<int>(
           (channels + kFusedChannelTile - 1) / kFusedChannelTile);
       const dim3 fused_grid(
@@ -423,7 +387,8 @@ causal_convolution_backward_cuda(
                   x.data_ptr<at::BFloat16>()),
               reinterpret_cast<const __nv_bfloat16*>(
                   weight.data_ptr<at::BFloat16>()),
-              dz.data_ptr<float>(),
+              reinterpret_cast<const __nv_bfloat16*>(
+                  grad_output.data_ptr<at::BFloat16>()),
               reinterpret_cast<__nv_bfloat16*>(
                   dx.data_ptr<at::BFloat16>()),
               dweight_partials.data_ptr<float>(),
