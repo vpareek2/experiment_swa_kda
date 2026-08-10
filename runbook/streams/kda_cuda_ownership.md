@@ -9848,3 +9848,85 @@ uv run --no-sync python scripts/kda_cuda_development.py \
   two parallel GEMMs and global intermediate they remove at T=4096. Restore
   parallel reverse-base products and target launch/global-round-trip overhead
   without lengthening the low-parallelism persistent reverse scan.
+
+## 2026-08-09 [Codex] Matched FLA C64 operator profile narrows the logical gap
+
+**Context**
+
+- The retained 43,680 tok/s FLA reference is a complete six-layer K-only
+  training run, not a forward-only FlashKDA number. To separate the KDA kernel
+  difference from the full-step difference, one warmed FLA Triton C64
+  forward-plus-backward operator iteration was profiled at the exact accepted
+  project shape `(B=2,T=4096,H=3,K=V=128)`, seed, loss, and compilation setting
+  used by the accepted-attempt-127 operator profile.
+- This is reference-only attribution. FLA remains forbidden as a candidate
+  runtime dependency, and the existing five-run 43,680 tok/s reference was not
+  rerun.
+
+**Commands**
+
+```bash
+env FLA_FLASH_KDA=0 FLA_TILELANG=0 TORCH_COMPILE_DISABLE=1 \
+  TRITON_CACHE_DIR=/tmp/fla-triton-operator-profile-001 \
+  PYTHONPATH=/home/veer/Master/projects/experiment_swa_kda \
+  nsys profile --trace=cuda,nvtx,osrt --sample=none --cpuctxsw=none \
+  --force-overwrite=true \
+  --output=runs/kda-cuda-development/reference-benchmarks/fla-triton-operator-profile-001/trace \
+  .venv/bin/python \
+  runs/kda-cuda-development/reference-benchmarks/fla-triton-operator-profile-001/runner.py
+nsys export --type sqlite --force-overwrite=true \
+  --output runs/kda-cuda-development/reference-benchmarks/fla-triton-operator-profile-001/trace.sqlite \
+  runs/kda-cuda-development/reference-benchmarks/fla-triton-operator-profile-001/trace.nsys-rep
+```
+
+**Artifacts**
+
+- Reference profile:
+  `runs/kda-cuda-development/reference-benchmarks/fla-triton-operator-profile-001`;
+  manifest SHA-256
+  `19023e76112087754cab5e99d32687784523dfe9bde81741ce2ee89fb853d3bb`.
+- Comparator profile:
+  `runs/kda-cuda-development/diagnostics/attempt-00127-production-profile`,
+  accepted project commit `f2fa705e22fc97d2f455b4ccabcf42a6a9ab120f`.
+- Pinned FLA version is 0.5.2; the offline reference repository is at
+  `a3edffc39eb5a3d45e9deab5ff9ec4f14f88474d`.
+
+**Result**
+
+- FLA launches 25 kernels with 3.179648 ms of summed kernel execution and a
+  3.960384-ms GPU span. Accepted attempt 127 launches 74 kernels with 4.536736
+  ms summed and a 4.794784-ms span. On this capture FLA therefore removes
+  66.216% of launches, 29.913% of summed kernel time, and 17.402% of GPU span;
+  the direct operator-span gap is 0.8344 ms.
+- FLA's dominant backward stage is one 0.797600-ms
+  `chunk_kda_bwd_kernel_wy_dqkg_fused` launch over the two-dimensional
+  chunk-by-recurrence grid. It recomputes `W/U` and boundary state, performs a
+  separate reverse state-gradient scan, then computes most WY/query/key/gate
+  VJP terms chunk-parallel in one fused kernel. Accepted attempt 127 instead
+  builds pair tiles through repeated launches and drives forward-boundary and
+  reverse-boundary work through low-CTA persistent scans plus host-side group
+  loops and generic batched GEMMs.
+- The equations and chunk size are materially the same. Other important
+  differences are scheduling and storage: FLA uses broad chunk-level Triton
+  grids and BF16 tensor-core operands with FP32 accumulation, while the project
+  path retains more FP32 intermediates and serial state ownership. FlashKDA's
+  C16, TMA-heavy two-kernel forward is inference-only and is not the measured
+  43,680 tok/s training backend.
+- At six layers and four accumulation microsteps, the measured 0.8344-ms
+  per-call KDA span gap accounts for only about 20.0 ms of the approximately
+  200-ms full-step gap between 34,494 and 43,680 tok/s. Thus KDA still needs a
+  FLA-like parallel backward, but most of the end-to-end difference must be
+  located elsewhere in the matched step, including the project-owned causal
+  convolution and framework/launch schedule. This is an inference from the
+  two preserved traces, not a throughput confirmation.
+
+**Next**
+
+- Preserve attempt 127 as the accepted baseline. Do not repeat attempts 93,
+  95, 97, 122, or 135, which fused work into insufficiently parallel persistent
+  CTAs or merely regrouped generic GEMMs.
+- Implement a distinct chunk-parallel WY/UT backward boundary modeled on FLA's
+  decomposition: keep the necessary sequential reverse state scan small, then
+  fan the complete local VJP out over chunk-by-head CTAs. Separately capture
+  one matched full training-step profile for accepted project and FLA backends
+  before assuming the remaining end-to-end gap is inside KDA.
