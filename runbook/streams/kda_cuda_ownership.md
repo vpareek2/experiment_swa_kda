@@ -13768,3 +13768,68 @@ uv run --no-sync python \
   Only compose further state work after the isolated boundary survives Level 1;
   keep seeking the larger FLA-style reverse/intra decomposition needed to close
   the remaining 5,979 tok/s raw gap.
+
+## 2026-08-10 [Codex] Isolated forward-boundary register products fail the combined gate
+
+**Context**
+
+- Attempt195 returns to exact attempt190 and isolates only the two locally
+  profitable forward-boundary consumers from attempt194: direct `W H` into
+  `Z` and direct `E^T Z` into the recurrent state. The reverse-group scan is
+  unchanged from attempt190.
+- This tests whether attempt194's measured boundary improvement survives the
+  production forward-plus-backward path without its regressive reverse-side
+  register traversal. FLA remains an offline scheduling reference only.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_195 \
+  --lane optimization <isolated artifact/cache arguments>
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_190 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_195 \
+  runs/kda-cuda-development/attempt-00195-fla-register-boundary-products-level1 \
+  --level2-order baseline-first
+```
+
+**Artifacts**
+
+- Branch `kda-cuda/fla-register-boundary-products-195`, pushed commit
+  `138c861a1ba42a277e6826436398b9b66a277792`; changed source SHA-256
+  `41f0fd5eda584ea15861eea5fc4aed9cfc0562841c6df39b22ebe638bcde889a`.
+- Checker summary
+  `396c8510c1f222ec5abf993f9dc9e49adad8a499e656450d39c5d5e5b4c3904d`;
+  production-gradient manifest
+  `7219c749341fd41377c1090d6f9adb1c4954a793affe7185b4af1bb6f5b339ee`;
+  Level-1 manifest
+  `7375cabce1976cbba4d1aa22691e1259f8a436fc706f4f4d95d749cf18f5bbaa`.
+
+**Result**
+
+- Ownership 1.0 and runtime/profile FLA freedom pass. Production output and
+  all seven gradients are finite and bitwise equal to attempt190; the
+  independent fresh-cache repeat is bitwise equal for every tensor.
+- The isolated forward observation remains favorable at T=4096:
+  `16.597615 -> 16.383184 ms` (1.292%). T=1024 forward+backward improves
+  `15.360960 -> 14.739168 ms` (4.048%).
+- Level 1 rejects the candidate because the target T=4096 forward+backward
+  path regresses `9.141344 -> 9.374896 ms` (2.555%). T=256 combined regresses
+  1.878%; memory is identical throughout.
+- The group-boundary kernel falls from 48 registers and 29,696 shared bytes to
+  47 registers and 21,504 shared bytes per CTA with no stack/local spill, but
+  the resource reduction does not translate into a stable end-to-end gain.
+- No Level 2, sanitizer, statistical confirmation, or LM-quality evaluation
+  ran. Attempt190 remains the strongest non-retained matched scaffold at
+  37,519 tok/s; attempt176 and attempt175 remain the accepted development/full
+  baselines.
+
+**Next**
+
+- Preserve attempt195 as a correct scheduling observation, not a new baseline.
+  Do not compose attempt193 or repeat this direct state-product family.
+- Return to exact attempt190 and pursue a larger reverse/intra-backward
+  decomposition. The next candidate must preserve cooperative product
+  consumption or remove a larger kernel boundary; isolated accumulator-to-state
+  handoffs have now reached a measured plateau.
