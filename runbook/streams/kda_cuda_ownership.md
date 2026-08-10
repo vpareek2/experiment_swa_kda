@@ -14712,3 +14712,92 @@ nsys profile --trace=cuda,nvtx,osrt --sample=none --cpuctxsw=none \
   consumer groups. The next change must remove a producer/consumer boundary,
   preferably by preparing W once, producing U inside checkpoint-local history
   CTAs, and reusing the already-prepared qg/kg across history and reverse state.
+
+
+## 2026-08-10 [Codex] Corrected invalid full-sequence evidence and rejected complete attempt209
+
+**Context**
+
+- An implementation audit found that attempts205-208 used the host constant
+  `kVectorElements = kRecurrences * kChunk * kDim = 49,152` for kernels that
+  require `kChunkRows * kChunk * kDim = 3,145,728` elements. The profiles
+  confirm `grid_x=192` for the alleged full qg/kg pack instead of 12,288.
+  Thus 63/64 of qg/kg was uninitialized in attempts206-208, and P/Q compact
+  conversion was under-launched in attempts205-208. Stable CUDA allocator reuse
+  from the preceding per-group temporaries made fresh-process gradients appear
+  deterministic; this is not valid correctness evidence.
+- The same lineage compacted T after its backing had been overwritten by BF16
+  dZ, and left P/Q compact operands in public-gradient buffers overwritten by
+  earlier consumer finalizers. Attempts205-208 are therefore corrected from
+  “correct scheduling failures” to **invalid candidates**. Their raw timing and
+  profiles remain preserved only as mechanistic observations.
+- Attempt209 repairs all three defects, then measures the intended full-sequence
+  V16 architecture once: a broad full U/W producer, one complete qg/kg pack,
+  eight checkpoint-local histories, and the V16 reverse-state scan.
+
+**Commands**
+
+```bash
+# Fresh staged checker before commit, two fresh-cache production-gradient runs,
+# clean-commit protected Level 1, and clean-commit Nsys operator profile.
+uv run --no-sync research cuda-candidate-check \
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_209 \
+  --lane optimization --artifact-dir /tmp/kda-check-209-final \
+  --extension-cache /tmp/kda-ext-209-final \
+  --cuda-cache /tmp/kda-cuda-209-final
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_204 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_209 \
+  runs/kda-cuda-development/attempt-00209-complete-forward-history-level1 \
+  --level2-order baseline-first
+# All configured sanitizer tools on the staged candidate, plus production-shape
+# initcheck, memcheck, synccheck, and both unfiltered/filtered racecheck.
+```
+
+**Artifacts**
+
+- Attempt209 branch `kda-cuda/fla-fused-forward-history-209`, commit
+  `14f2dc6894020e8e6f8c2278f8f199c175e6d81a`; source SHA-256
+  `ec4c9afc6c185848992e4bd5af9991e926f90e05b02bd5d02108957e6dad2a98`.
+- Checker summary
+  `29750f19020afbb188c910c46f700d5c638a485947147e8211eb59c405952f57`; production-gradient
+  manifest `a121eb03338ea1f083d8baaab6a33f44d2f995b12bf83a714596ac127fdf5320`;
+  Level-1 manifest
+  `998e19d5806d5e23e98fa07fa8c60ae292f77464a3e066696082d0065befb3fd`;
+  profile manifest
+  `b7c71e95ee7ef9f157fdd20b78623c68ef90fbe625ab491124b2ad2d066a2b23`;
+  production hot-path sanitizer manifest
+  `cf890f49b40fda503e928cee654b348aa03a8652f7e331acad48489e2cc2f668`.
+- Append-only index SHA-256 after the correction and attempt209:
+  `ddf45f5b7204405c7c70b3e1f459685c95ad840ec57d5226b984860f1e0e31dc`.
+
+**Result**
+
+- Attempt209 initializes all 3,145,728 qg/kg values. Compact P lives in dead M
+  backing; compact Q and T live in non-overlapping regions of Q's dead FP32
+  backing. No finalizer or dZ publication can overwrite them. The mandatory
+  V16 owner alias consumes all FP32 dZ-base, synchronizes, then writes BF16 dH.
+- Two fresh-cache runs are bitwise deterministic. Output, dq, dk, dv,
+  draw_gate, dbeta, and ddt_bias are bitwise equal to attempt204; only dA_log
+  differs by `1.4210854715202004e-13`.
+- Standard configured memcheck/racecheck/synccheck/initcheck all complete with
+  return code 0. Production-shape initcheck, memcheck, and synccheck report zero
+  errors. Production racecheck is preserved with warnings rather than called a
+  pass: unfiltered warnings are in the inherited forward WMMA kernel; a
+  backward-filtered run reports WMMA shared-operand warnings in the V16 dZ-base
+  kernel (0 errors, nonzero because warnings use error-exitcode 99).
+- The corrected profile is 79 launches / 7.909600 ms summed kernels /
+  8.221664 ms span. Correct full qg/kg alone costs 0.220512 ms; full U/W costs
+  0.274656 ms; histories 0.738976 ms; full-sequence state 0.537920 ms.
+- Level 1 rejects: T=4096 forward+backward is
+  `8.317584 -> 8.768384 ms`, a 5.420% regression, and the important-lane guard
+  fails. No Level 2 was launched. Attempt204 remains the accepted baseline.
+
+**Next**
+
+- Do not use attempts205-208 as correct scaffolds. Attempt209 closes the valid
+  full-sequence V16/history family on performance: launch count alone cannot
+  offset complete operand preparation and the serial recurrence. Return to
+  attempt204 and target a different dense boundary, while preserving separate
+  A^T dO, FP32 group checkpoints, stable compact operands, and full production
+  initialization bounds.
