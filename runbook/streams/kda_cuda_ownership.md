@@ -11789,3 +11789,70 @@ uv run --no-sync python \
   16 group-pack launches and roughly 0.458 ms of profiled work.
 - Run narrow bitwise correctness and Level 1 first. Do not run another Level 2
   unless that broader fusion clears the declared gate and shape guards.
+
+## 2026-08-10 [Codex] R/E producer fusion is exact but extends the critical path
+
+**Context**
+
+- Attempt166 starts from attempt165 and makes the existing group U/W/P/Q/T
+  producer emit its owned 64-by-16 R/E value slice. Both the forward-boundary
+  and reverse-group loops remove their separate R/E pack launch. Equations,
+  rounding, buffers, precision, and ABI remain unchanged.
+- The first source snapshot failed to compile because the device kernel
+  referenced the host-local `kGroupChunks` constant. No CUDA or model execution
+  occurred. The corrected snapshot passes `group_chunks` explicitly, matching
+  the removed pack kernel's mapping. An accidental candidate-local environment
+  created by one comparison command was moved intact to
+  `/tmp/kda166-accidental-candidate-venv-001`; it never affected source or a
+  run and the candidate worktree is clean.
+
+**Commands**
+
+```bash
+# Two fresh-cache seed-4101 captures; the first is an invalid compile and the
+# corrected second is compared bitwise to attempt165.
+# Commit/push exact source, then one matched Level 1 versus attempt165.
+uv run --no-sync python scripts/kda_cuda_development.py \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_165 \
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_166 \
+  runs/kda-cuda-development/attempt-00166-fused-uw-re-pack-level1 \
+  --level2-order candidate-first
+```
+
+**Artifacts**
+
+- Branch `kda-cuda/fused-uw-re-pack-166`, pushed commit
+  `a12d0d6f11baac5f79004e5b2b2c37ed71e37bf5`; changed source SHA-256
+  `c84d92fc5b7e69e478c1cfaa16a692b6a54c473ed1dc1601b95b643128ca5f2c`.
+- Invalid compile manifest
+  `169d953ab90d9a2675ddc330be13f45bb9b4261c86c91c215a1ae2ef983999b6`;
+  corrected diagnostic manifest
+  `4c9e87ceba27a4d1c7a4e12dd0d0d7692787b7c71a220b5d3bb8f9eaa850c905`;
+  Level-1 manifest
+  `65b89c71a25766a8a00f5708f5026816c7964ce2d561989c33dfc6a15a236883`.
+- The append-only index now has 189 rows and hashes to
+  `36236ee0fd827bb6f8a6739a775ae1fd3af658de709e827f76329f3639a594a4`.
+
+**Result**
+
+- The corrected output and all seven gradients are bitwise equal to attempt165
+  and all tensors are finite. The committed runtime audit completes and remains
+  FLA-free.
+- T=4096 forward+backward regresses `9.754240 -> 10.084608 ms` (3.387%)
+  with identical peak allocation. T=256 improves 2.430% and T=1024 improves
+  0.253%; forward-only regressions remain inside the five-percent guard.
+- The removed pack exposed many independent blocks for the two exponentials per
+  R/E element. The fused producer has only 192 CTAs per group and makes each
+  thread execute eight elements before entering the WMMA loop, extending the
+  critical path instead of hiding that work. No profile, checker, sanitizers,
+  repeat, or Level 2 ran after the Level-1 rejection. This is neither
+  statistical nor LM-quality evidence.
+
+**Next**
+
+- Return to attempt165 as the cumulative scaffold and keep attempt161 as the
+  accepted development baseline. Do not serialize R/E exponentials inside the
+  U/W producer again.
+- Preserve the parallel R/E pack while targeting a boundary with cheaper
+  elementwise work, or redesign the producer so dedicated warps overlap R/E
+  transforms with tensor-core work without adding a block-wide dependency.
