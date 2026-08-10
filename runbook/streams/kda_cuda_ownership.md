@@ -8640,3 +8640,76 @@ git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_123 \\
 - Close compressed full chunk-state history as a strategy. The next candidate
   must reduce end-to-end scheduling variance or remove work visible in the full
   training block; do not optimize further against attempt 123's Level-1 result.
+
+## 2026-08-09 [Codex] Attempt 124 reusable group workspace rejected at Level 1
+
+**Context**
+
+- Attempt 124 starts directly from accepted attempt 100 and targets host-side
+  allocator/metadata work visible across full training. The eight forward and
+  eight reverse groups execute serially on one CUDA stream and have identical
+  shapes, so one preallocated workspace is reused for all group gathers,
+  boundary scratch, dense WY/UT VJP outputs, downstream vector gradients, and
+  parameter partials.
+- The intervention preserves every copy, kernel, equation, precision, and
+  dependency order; it removes repeated tensor allocation/handle construction
+  without adopting attempt 110's group-major arithmetic layout.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check \\
+  --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_124 \\
+  --lane optimization <isolated artifact/cache arguments>
+# Seed-4101 production comparison and independent fresh-cache repeat.
+uv run --no-sync python scripts/kda_cuda_development.py \\
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_100 \\
+  /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_124 \\
+  runs/kda-cuda-development/attempt-00124-group-workspace-reuse-level1 \\
+  --level2-order baseline-first
+git -C /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_124 \\
+  push -u origin kda-cuda/wy-group-workspace-reuse-124
+```
+
+**Artifacts**
+
+- Pushed commit `96b1d6f16e354ec334b382a6490a4dbfe994906b`;
+  backward source SHA-256
+  `955144504436fe01921f1cc31987dc4892e7294d5d54dff8570aed69688c493b`.
+- Protected checker:
+  `runs/kda-cuda-development/diagnostics/attempt-00124-group-workspace-reuse-protected-checker`,
+  manifest `ca79585a619fb63842fdd491d6155758e996fd25ac31403d42eb592733caabb2`.
+- Production comparison/repeat:
+  `runs/kda-cuda-development/diagnostics/attempt-00124-group-workspace-reuse-gradient`,
+  manifest `8734dc9d4dd48b1230e816f91425eac259c31d54a943c8bbe7181ac97363b62e`.
+- Level 1:
+  `runs/kda-cuda-development/attempt-00124-group-workspace-reuse-level1`,
+  manifest `9aa83b3fb931b58736953282a50401a72155c05a8da1d352f03b31b8ac2ed74b`.
+- Invalid coordinator-relative staging wrapper:
+  `runs/kda-cuda-development/diagnostics/attempt-00124-group-workspace-reuse-invalid-stage-001`,
+  manifest `c2ea003d06e21ff0fdd4b79344090b8f9bc920ca35d51df0e81750e5183daca5`.
+- Append-only attempt/reference index has 128 valid JSONL entries, SHA-256
+  `d613a53015b5a59b5396f62dae9c931707af95909287b70530815b6dbb1bfaad`.
+
+**Result**
+
+- The candidate passes ownership 1.0, protected runtime/profile audit, runtime
+  FLA freedom, finite-gradient checks, and is bitwise equal to attempt 100 for
+  output and all seven gradients. Its independent fresh-cache repeat is also
+  bitwise exact for all eight tensors.
+- Level 1 rejects the isolated allocator axis. T=4096 forward+backward improves
+  `12.354400 -> 12.166784 ms` (1.519%), below the 3% gate, while peak
+  allocation falls 0.517%. T=256 regresses 0.438% and T=1024 regresses 2.648%;
+  all frozen important-row and memory guards pass.
+- The first staging wrapper ran from the coordinator and stopped at a missing
+  pathspec before checker, build, or GPU work. It is preserved as invalid and
+  excluded. No sanitizer, Level 2, confirmation, or LM-quality evaluation ran.
+
+**Next**
+
+- Retain attempt 100. Do not advance, retest, sanitize, or run Level 2 for
+  attempt 124. Preallocation is safe and modestly useful, but not large enough
+  alone; close allocator/workspace reuse as an isolated axis.
+- A further candidate must remove GPU work or expose more parallelism at a
+  strategy boundary. Do not compose attempt 124 merely to rescue a marginal
+  mechanism.
