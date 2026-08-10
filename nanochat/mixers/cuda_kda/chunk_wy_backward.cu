@@ -495,8 +495,10 @@ __global__ void nanochat_kda_wy_backward_pack_group_qgkg_bf16_c64_kernel(
     const float* qbar,
     const float* khat,
     const float* prefix_g,
+    const float* W,
     __nv_bfloat16* qg,
     __nv_bfloat16* kg,
+    __nv_bfloat16* W_bf16,
     int chunk_start,
     int group_chunks) {
   const int index = blockIdx.x * blockDim.x + threadIdx.x;
@@ -518,6 +520,7 @@ __global__ void nanochat_kda_wy_backward_pack_group_qgkg_bf16_c64_kernel(
       prefix_g[chunk_vector_index(n, kChunk - 1, key)];
   qg[index] = __float2bfloat16_rn(qbar[source] * expf(g));
   kg[index] = __float2bfloat16_rn(khat[source] * expf(end_g - g));
+  W_bf16[index] = __float2bfloat16_rn(W[index]);
 }
 
 __global__ void nanochat_kda_wy_backward_sub_z_c64_kernel(
@@ -1601,7 +1604,7 @@ __global__ void nanochat_kda_wy_backward_register_dh_group_c64_kernel(
     const __nv_bfloat16* qg,
     const __nv_bfloat16* kg,
     const float* prefix_g,
-    const float* W,
+    const __nv_bfloat16* W,
     const float* dZ_base,
     const __nv_bfloat16* grad_output,
     __nv_bfloat16* dZ_history,
@@ -1612,7 +1615,6 @@ __global__ void nanochat_kda_wy_backward_register_dh_group_c64_kernel(
   namespace wmma = nvcuda::wmma;
   constexpr int kTile = 16;
   constexpr int kValueStrip = 32;
-  constexpr int kTileElements = kTile * kTile;
   constexpr int kValueTiles = kValueStrip / kTile;
   constexpr int kWarps = 4;
 
@@ -1627,14 +1629,15 @@ __global__ void nanochat_kda_wy_backward_register_dh_group_c64_kernel(
   const int lane = threadIdx.x % warpSize;
 
   __shared__ float dh_shared[kDim * kValueStrip];
+  __shared__ __align__(16) __nv_bfloat16 dh_bf16[kDim * kValueStrip];
   __shared__ __align__(16) __nv_bfloat16 dz_shared[kChunk * kValueStrip];
-  __shared__ __align__(16) __nv_bfloat16 operand_a[kWarps * kTileElements];
-  __shared__ __align__(16) __nv_bfloat16 operand_b[kWarps * kTileElements];
-
-  using MatrixA = wmma::fragment<
+  using MatrixARow = wmma::fragment<
       wmma::matrix_a, kTile, kTile, kTile,
       __nv_bfloat16, wmma::row_major>;
-  using MatrixB = wmma::fragment<
+  using MatrixACol = wmma::fragment<
+      wmma::matrix_a, kTile, kTile, kTile,
+      __nv_bfloat16, wmma::col_major>;
+  using MatrixBRow = wmma::fragment<
       wmma::matrix_b, kTile, kTile, kTile,
       __nv_bfloat16, wmma::row_major>;
   using Accumulator = wmma::fragment<
@@ -1682,9 +1685,11 @@ __global__ void nanochat_kda_wy_backward_register_dh_group_c64_kernel(
          index += blockDim.x) {
       const int key = index / kValueStrip;
       const int value = index - key * kValueStrip;
+      const __nv_bfloat16 rounded = __float2bfloat16_rn(dh_shared[index]);
+      dh_bf16[index] = rounded;
       dstate_next_history[
           (static_cast<int64_t>(group_n) * kDim + key) * kDim +
-          value_start + value] = __float2bfloat16_rn(dh_shared[index]);
+          value_start + value] = rounded;
     }
     __syncthreads();
 
@@ -1699,25 +1704,17 @@ __global__ void nanochat_kda_wy_backward_register_dh_group_c64_kernel(
         const int row_start = row_tile * kTile;
         const int local_value_start = value_tile * kTile;
         for (int key_start = 0; key_start < kDim; key_start += kTile) {
-          for (int element = lane; element < kTileElements;
-               element += warpSize) {
-            const int row = element / kTile;
-            const int column = element - row * kTile;
-            operand_a[warp * kTileElements + element] = kg[
-                (static_cast<int64_t>(group_n) * kChunk + row_start + row) *
-                    kDim + key_start + column];
-            operand_b[warp * kTileElements + element] =
-                __float2bfloat16_rn(
-                    dh_shared[(key_start + row) * kValueStrip +
-                              local_value_start + column]);
-          }
-          __syncwarp();
-          MatrixA kg_operand;
-          MatrixB dh_operand;
+          MatrixARow kg_operand;
+          MatrixBRow dh_operand;
           wmma::load_matrix_sync(
-              kg_operand, operand_a + warp * kTileElements, kTile);
+              kg_operand,
+              kg + (static_cast<int64_t>(group_n) * kChunk + row_start) *
+                      kDim + key_start,
+              kDim);
           wmma::load_matrix_sync(
-              dh_operand, operand_b + warp * kTileElements, kTile);
+              dh_operand,
+              dh_bf16 + key_start * kValueStrip + local_value_start,
+              kValueStrip);
           wmma::mma_sync(kg_dh, kg_operand, dh_operand, kg_dh);
         }
 
@@ -1755,46 +1752,31 @@ __global__ void nanochat_kda_wy_backward_register_dh_group_c64_kernel(
         const int local_value_start = value_tile * kTile;
         for (int source_start = 0; source_start < kChunk;
              source_start += kTile) {
-          for (int element = lane; element < kTileElements;
-               element += warpSize) {
-            const int row = element / kTile;
-            const int column = element - row * kTile;
-            operand_a[warp * kTileElements + element] = qg[
-                (static_cast<int64_t>(group_n) * kChunk +
-                 source_start + column) * kDim + key_start + row];
-            operand_b[warp * kTileElements + element] = grad_output[
-                input_vector_index(
-                    b, token_start + source_start + row, h,
-                    value_start + local_value_start + column)];
-          }
-          __syncwarp();
-          MatrixA qg_operand;
-          MatrixB do_operand;
+          MatrixACol qg_operand;
+          MatrixBRow do_operand;
           wmma::load_matrix_sync(
-              qg_operand, operand_a + warp * kTileElements, kTile);
+              qg_operand,
+              qg + (static_cast<int64_t>(group_n) * kChunk + source_start) *
+                       kDim + key_start,
+              kDim);
           wmma::load_matrix_sync(
-              do_operand, operand_b + warp * kTileElements, kTile);
+              do_operand,
+              grad_output + input_vector_index(
+                  b, token_start + source_start, h,
+                  value_start + local_value_start),
+              kHeads * kDim);
           wmma::mma_sync(qg_do, qg_operand, do_operand, qg_do);
-
-          for (int element = lane; element < kTileElements;
-               element += warpSize) {
-            const int row = element / kTile;
-            const int column = element - row * kTile;
-            operand_a[warp * kTileElements + element] =
-                __float2bfloat16_rn(W[
-                    (static_cast<int64_t>(group_n) * kChunk +
-                     source_start + column) * kDim + key_start + row]);
-            operand_b[warp * kTileElements + element] =
-                dz_shared[(source_start + row) * kValueStrip +
-                          local_value_start + column];
-          }
-          __syncwarp();
-          MatrixA w_operand;
-          MatrixB dz_operand;
+          MatrixACol w_operand;
+          MatrixBRow dz_operand;
           wmma::load_matrix_sync(
-              w_operand, operand_a + warp * kTileElements, kTile);
+              w_operand,
+              W + (static_cast<int64_t>(group_n) * kChunk + source_start) *
+                      kDim + key_start,
+              kDim);
           wmma::load_matrix_sync(
-              dz_operand, operand_b + warp * kTileElements, kTile);
+              dz_operand,
+              dz_shared + source_start * kValueStrip + local_value_start,
+              kValueStrip);
           wmma::mma_sync(w_dz, w_operand, dz_operand, w_dz);
         }
 #pragma unroll
@@ -3265,15 +3247,18 @@ nanochat_kda_chunk_wy_backward_c64(
     at::Tensor qg_group_bf16 = at::empty(
         {kGroupRows, kChunk, kDim}, q.options());
     at::Tensor kg_group_bf16 = at::empty_like(qg_group_bf16);
+    at::Tensor W_group_bf16 = at::empty_like(qg_group_bf16);
     nanochat_kda_wy_backward_pack_group_qgkg_bf16_c64_kernel<<<
         (kGroupVectorElements + kThreads - 1) / kThreads,
         kThreads, 0, stream>>>(
         qbar.data_ptr<float>(), khat.data_ptr<float>(),
-        prefix_g.data_ptr<float>(),
+        prefix_g.data_ptr<float>(), W_group.data_ptr<float>(),
         reinterpret_cast<__nv_bfloat16*>(
             qg_group_bf16.data_ptr<at::BFloat16>()),
         reinterpret_cast<__nv_bfloat16*>(
             kg_group_bf16.data_ptr<at::BFloat16>()),
+        reinterpret_cast<__nv_bfloat16*>(
+            W_group_bf16.data_ptr<at::BFloat16>()),
         chunk_start, kGroupChunks);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     nanochat_kda_wy_backward_group_dz_base_wmma_c64_kernel<<<
@@ -3289,7 +3274,9 @@ nanochat_kda_chunk_wy_backward_c64(
             qg_group_bf16.data_ptr<at::BFloat16>()),
         reinterpret_cast<const __nv_bfloat16*>(
             kg_group_bf16.data_ptr<at::BFloat16>()),
-        prefix_g.data_ptr<float>(), W_group.data_ptr<float>(),
+        prefix_g.data_ptr<float>(),
+        reinterpret_cast<const __nv_bfloat16*>(
+            W_group_bf16.data_ptr<at::BFloat16>()),
         dZ_base.data_ptr<float>(),
         reinterpret_cast<const __nv_bfloat16*>(
             grad_output.data_ptr<at::BFloat16>()),
