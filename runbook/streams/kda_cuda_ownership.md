@@ -15339,3 +15339,24 @@ nsys profile --trace=cuda,nvtx,osrt --sample=none --cpuctxsw=none <matched synch
 **Next**
 
 - Keep attempt231 accepted. Pipelined serial norms, dual-team groupUW packing, and forward BV16 splitting are insufficient alone.
+
+
+## 2026-08-11 [Codex] Reject attempt239 token-parallel normalization split
+
+**Context**
+
+- Attempt239 parallelizes the exact per-token serial q/k reductions into 24,576 CTAs, then runs a barrier-free recurrence consumer for vector outputs.
+
+**Artifacts**
+
+- Branch `kda-cuda/split-token-norm-preprocess-239`, commit `b991631471d401a0e444943fcba57dd7cfa66a28`, parent attempt231; manifest `97bb5974363b1bbdebb6394dadbf63a36a5c9fdcda3b6b155dd5b2eb93a97159`.
+- Append-only development index SHA-256 after attempt239: `79c7e7fbe2d9e23805ba704f1b3ca84d9110bce28343a7e24e1cb7fae21076e7`.
+
+**Result**
+
+- Independent random-upstream and fallback comparisons are bitwise; synccheck reports zero errors and all four kernels have zero spill.
+- Scalar producers cost 0.133792 ms and recurrence consumers 0.910400 ms, **1.044192 ms** combined versus attempt231's ~0.833 ms. Whole kernel sum regresses to 5.566848 ms. No Level 1/2.
+
+**Next**
+
+- Preserve attempt231 accepted; close token-parallel scalar materialization because extra scalar traffic and consumer register pressure dominate.
