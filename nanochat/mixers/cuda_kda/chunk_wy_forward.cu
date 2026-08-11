@@ -84,8 +84,9 @@ __device__ __forceinline__ void wy_async_copy_bf16_tile(
       16);
 }
 
-// F0: one key lane follows one channel through a complete 64-token chunk.
-// Four fixed warp reductions publish norm partials for lane zero to combine.
+// F0: one CTA advances four rows at a time. Four warps retain the exact
+// channel-to-partial association for each row, while 128 channel owners retain
+// running_g locally across the complete 64-token chunk.
 __global__ void nanochat_kda_wy_preprocess_c64_kernel(
     const __nv_bfloat16* q,
     const __nv_bfloat16* k,
@@ -109,8 +110,7 @@ __global__ void nanochat_kda_wy_preprocess_c64_kernel(
     float lower_bound,
     float scale) {
   const int n = blockIdx.x;
-  const int d = threadIdx.x;
-  if (n >= kChunkRows || d >= kDim) {
+  if (n >= kChunkRows) {
     return;
   }
   const int chunk_id = n % kChunks;
@@ -122,21 +122,30 @@ __global__ void nanochat_kda_wy_preprocess_c64_kernel(
   const int b = recurrence / kHeads;
   const int token_start = chunk_id * kChunk;
 
-  __shared__ float q_warp_sums[4];
-  __shared__ float k_warp_sums[4];
-  __shared__ float q_inverse;
-  __shared__ float k_inverse;
-  __shared__ float beta_value;
+  __shared__ float q_warp_sums[4][4];
+  __shared__ float k_warp_sums[4][4];
+  __shared__ float q_inverse[4];
+  __shared__ float k_inverse[4];
+  __shared__ float beta_value[4];
+  __shared__ float normalized_q_shared[4][kDim];
+  __shared__ float normalized_k_shared[4][kDim];
+  __shared__ float gate_input_shared[4][kDim];
 
-  const int lane = d & 31;
-  const int warp = d >> 5;
+  const int lane = threadIdx.x & 31;
+  const int warp = threadIdx.x >> 5;
+  const int row_in_batch = warp >> 2;
+  const int warp_in_row = warp & 3;
+  const int d = warp_in_row * 32 + lane;
   const float a = expf(A_log[h]);
   float running_g = 0.0f;
-  for (int row = 0; row < kChunk; ++row) {
+  for (int r0 = 0; r0 < kChunk; r0 += 4) {
+    const int row = r0 + row_in_batch;
     const int token = token_start + row;
     const int64_t source = input_vector_index(b, token, h, d);
     const float q_value = __bfloat162float(q[source]);
     const float k_value = __bfloat162float(k[source]);
+    const float v_value = __bfloat162float(v[source]);
+    const float raw_gate_value = __bfloat162float(raw_gate[source]);
     float q_square = q_value * q_value;
     float k_square = k_value * k_value;
     for (int offset = 16; offset > 0; offset >>= 1) {
@@ -144,66 +153,87 @@ __global__ void nanochat_kda_wy_preprocess_c64_kernel(
       k_square += __shfl_down_sync(0xffffffffu, k_square, offset);
     }
     if (lane == 0) {
-      q_warp_sums[warp] = q_square;
-      k_warp_sums[warp] = k_square;
+      q_warp_sums[row_in_batch][warp_in_row] = q_square;
+      k_warp_sums[row_in_batch][warp_in_row] = k_square;
     }
     __syncthreads();
 
-    if (d == 0) {
-      float q_sum = q_warp_sums[0];
-      float k_sum = k_warp_sums[0];
-      q_sum += q_warp_sums[1];
-      k_sum += k_warp_sums[1];
-      q_sum += q_warp_sums[2];
-      k_sum += k_warp_sums[2];
-      q_sum += q_warp_sums[3];
-      k_sum += k_warp_sums[3];
-      q_inverse = rsqrtf(fmaxf(q_sum, 1.0e-24f));
-      k_inverse = rsqrtf(fmaxf(k_sum, 1.0e-24f));
-      beta_value = wy_sigmoid(__bfloat162float(
+    if (warp_in_row == 0 && lane == 0) {
+      float q_sum = q_warp_sums[row_in_batch][0];
+      float k_sum = k_warp_sums[row_in_batch][0];
+      q_sum += q_warp_sums[row_in_batch][1];
+      k_sum += k_warp_sums[row_in_batch][1];
+      q_sum += q_warp_sums[row_in_batch][2];
+      k_sum += k_warp_sums[row_in_batch][2];
+      q_sum += q_warp_sums[row_in_batch][3];
+      k_sum += k_warp_sums[row_in_batch][3];
+      const float row_q_inverse = rsqrtf(fmaxf(q_sum, 1.0e-24f));
+      const float row_k_inverse = rsqrtf(fmaxf(k_sum, 1.0e-24f));
+      const float row_beta = wy_sigmoid(__bfloat162float(
           beta_logits[input_scalar_index(b, token, h)]));
+      q_inverse[row_in_batch] = row_q_inverse;
+      k_inverse[row_in_batch] = row_k_inverse;
+      beta_value[row_in_batch] = row_beta;
       const int64_t scalar_offset =
           static_cast<int64_t>(n) * kChunk + row;
-      beta[scalar_offset] = beta_value;
-      retained_beta[scalar_offset] = beta_value;
-      retained_q_inverse[scalar_offset] = q_inverse;
-      retained_k_inverse[scalar_offset] = k_inverse;
+      beta[scalar_offset] = row_beta;
+      retained_beta[scalar_offset] = row_beta;
+      retained_q_inverse[scalar_offset] = row_q_inverse;
+      retained_k_inverse[scalar_offset] = row_k_inverse;
     }
     __syncthreads();
 
     const int64_t destination = chunk_vector_index(n, row, d);
-    const float normalized_q = (q_value * q_inverse) * scale;
-    const float normalized_k = k_value * k_inverse;
-    const float gate_input = __bfloat162float(raw_gate[source]) +
-        dt_bias[h * kDim + d];
-    running_g += lower_bound * wy_sigmoid(a * gate_input);
-    const float exp_g = expf(running_g);
+    const float normalized_q =
+        (q_value * q_inverse[row_in_batch]) * scale;
+    const float normalized_k = k_value * k_inverse[row_in_batch];
+    const float gate_input = raw_gate_value + dt_bias[h * kDim + d];
     qbar[destination] = normalized_q;
     khat[destination] = normalized_k;
-    qgamma[destination] = __float2bfloat16_rn(normalized_q * exp_g);
-    prefix_g[destination] = running_g;
-    retained_prefix[destination] = __float2half_rn(running_g);
-    const __nv_bfloat16 rounded_P = __float2bfloat16_rn(
-        beta_value * __bfloat162float(v[source]));
-    const __nv_bfloat16 rounded_Q = __float2bfloat16_rn(
-        beta_value * exp_g * normalized_k);
-    P[destination] = rounded_P;
-    retained_Q[chunk_vector_index(grouped_n, row, d)] = rounded_Q;
+    P[destination] = __float2bfloat16_rn(
+        beta_value[row_in_batch] * v_value);
+    normalized_q_shared[row_in_batch][d] = normalized_q;
+    normalized_k_shared[row_in_batch][d] = normalized_k;
+    gate_input_shared[row_in_batch][d] = gate_input;
+    __syncthreads();
+
+    if (threadIdx.x < kDim) {
+      const int owner_d = threadIdx.x;
+#pragma unroll
+      for (int batch_row = 0; batch_row < 4; ++batch_row) {
+        const int owner_row = r0 + batch_row;
+        const int64_t owner_destination =
+            chunk_vector_index(n, owner_row, owner_d);
+        running_g += lower_bound * wy_sigmoid(
+            a * gate_input_shared[batch_row][owner_d]);
+        const float exp_g = expf(running_g);
+        qgamma[owner_destination] = __float2bfloat16_rn(
+            normalized_q_shared[batch_row][owner_d] * exp_g);
+        prefix_g[owner_destination] = running_g;
+        retained_prefix[owner_destination] = __float2half_rn(running_g);
+        retained_Q[chunk_vector_index(grouped_n, owner_row, owner_d)] =
+            __float2bfloat16_rn(
+                beta_value[batch_row] * exp_g *
+                normalized_k_shared[batch_row][owner_d]);
+      }
+    }
     __syncthreads();
   }
 
   // The recurrence-major compact Q operand is no longer consumed: W reads the
   // group-major retained Q published above. Reuse Q's FP32 backing for the
-  // key-major restored-k scan operand once this CTA has finished its producer
-  // loop. Each channel follows rows in the same fixed ascending order.
-  __syncthreads();
-  const float end_g = running_g;
+  // key-major restored-k scan operand. Channel owners preserve their local
+  // end_g and follow rows in the same fixed ascending order.
+  if (threadIdx.x < kDim) {
+    const int owner_d = threadIdx.x;
+    const float end_g = running_g;
 #pragma unroll
-  for (int row = 0; row < kChunk; ++row) {
-    const int64_t source = chunk_vector_index(n, row, d);
-    Q[packed_strided_transpose_index(n, d, row)] =
-        __float2bfloat16_rn(
-            khat[source] * expf(end_g - prefix_g[source]));
+    for (int row = 0; row < kChunk; ++row) {
+      const int64_t source = chunk_vector_index(n, row, owner_d);
+      Q[packed_strided_transpose_index(n, owner_d, row)] =
+          __float2bfloat16_rn(
+              khat[source] * expf(end_g - prefix_g[source]));
+    }
   }
 }
 
@@ -1591,7 +1621,7 @@ at::Tensor nanochat_kda_chunk_wy_forward_c64(
       static_cast<size_t>(kRetainedMatrixElements) * sizeof(__nv_bfloat16),
       stream));
   nanochat_kda_wy_preprocess_c64_kernel<<<
-      kChunkRows, kDim, 0, stream>>>(
+      kChunkRows, 512, 0, stream>>>(
       reinterpret_cast<const __nv_bfloat16*>(q.data_ptr<at::BFloat16>()),
       reinterpret_cast<const __nv_bfloat16*>(k.data_ptr<at::BFloat16>()),
       reinterpret_cast<const __nv_bfloat16*>(v.data_ptr<at::BFloat16>()),
