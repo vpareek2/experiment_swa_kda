@@ -135,7 +135,9 @@ __global__ void nanochat_kda_wy_preprocess_build_solve_wmma_c64_kernel(
     float* retained_beta,
     float* retained_q_inverse,
     float* retained_k_inverse,
-    __nv_bfloat16* P,
+    __nv_bfloat16* retained_qbar,
+    __nv_bfloat16* retained_khat,
+    __nv_bfloat16* retained_P,
     __nv_bfloat16* restored_k,
     __nv_bfloat16* retained_Q,
     __nv_bfloat16* A,
@@ -227,10 +229,13 @@ __global__ void nanochat_kda_wy_preprocess_build_solve_wmma_c64_kernel(
     const float normalized_k =
         k_value * preprocess->k_inverse[row_in_batch];
     const float gate_input = raw_gate_value + dt_bias[h * kDim + d];
+    retained_qbar[destination] = __float2bfloat16_rn(normalized_q);
+    retained_khat[destination] = __float2bfloat16_rn(normalized_k);
+    retained_P[chunk_vector_index(grouped_n, row, d)] =
+        __float2bfloat16_rn(
+            preprocess->beta_value[row_in_batch] * v_value);
     shared_qbar[local_destination] = __float2half_rn(normalized_q);
     shared_khat[local_destination] = __float2half_rn(normalized_k);
-    P[destination] = __float2bfloat16_rn(
-        preprocess->beta_value[row_in_batch] * v_value);
     preprocess->normalized_q[row_in_batch][d] = normalized_q;
     preprocess->normalized_k[row_in_batch][d] = normalized_k;
     preprocess->gate_input[row_in_batch][d] = gate_input;
@@ -754,7 +759,7 @@ __global__ void nanochat_kda_wy_scan_state_add_c64_kernel(
 // visited in fixed K order.
 __global__ void nanochat_kda_wy_forward_uw_wmma_c64_kernel(
     const __nv_bfloat16* retained_T,
-    const __nv_bfloat16* P,
+    const __nv_bfloat16* grouped_retained_P,
     const __nv_bfloat16* grouped_retained_Q,
     __nv_bfloat16* U_bf,
     __nv_bfloat16* grouped_retained_W) {
@@ -797,8 +802,8 @@ __global__ void nanochat_kda_wy_forward_uw_wmma_c64_kernel(
   Accumulator accumulator;
   wmma::fill_fragment(accumulator, 0.0f);
   const __nv_bfloat16* vector_operand =
-      product == 0 ? P : grouped_retained_Q;
-  const int vector_n = product == 0 ? n : grouped_n;
+      product == 0 ? grouped_retained_P : grouped_retained_Q;
+  const int vector_n = grouped_n;
 
   for (int inner_start = 0; inner_start < kChunk; inner_start += kTile) {
     for (int element = lane; element < kTileElements; element += warpSize) {
@@ -1596,7 +1601,10 @@ at::Tensor nanochat_kda_chunk_wy_forward_c64(
   const at::TensorOptions fp32 = A_log.options();
   at::Tensor qgamma = at::empty(
       {kChunkRows, kChunk, kDim}, q.options());
-  at::Tensor P = at::empty({kChunkRows, kChunk, kDim}, fp32);
+  // This producer-complete FP32-sized backing is reserved exclusively for the
+  // later BF16 z history; forward P is published directly into the sidecar.
+  at::Tensor z_history_backing = at::empty(
+      {kChunkRows, kChunk, kDim}, fp32);
   at::Tensor Q = at::empty({kChunkRows, kChunk, kDim}, fp32);
   at::Tensor M = at::empty({kChunkRows, kChunk, kChunk}, fp32);
   at::Tensor A = at::empty(
@@ -1613,10 +1621,11 @@ at::Tensor nanochat_kda_chunk_wy_forward_c64(
       static_cast<int64_t>(kChunkRows) * kChunk;
   // The visible tensor is a contiguous prefix. Its backing is, in order:
   // visible BF16 output | FP32 checkpoints | grouped BF16 A/T/W/Q |
+  // recurrence-major BF16 qbar/khat | grouped BF16 P |
   // recurrence-major FP16 prefix | recurrence-major FP32 beta/qinv/kinv.
   at::Tensor output_storage = at::empty(
       {kOutputElements + 2 * kCheckpointElements +
-       2 * kRetainedMatrixElements + 3 * kRetainedVectorElements +
+       2 * kRetainedMatrixElements + 6 * kRetainedVectorElements +
        6 * kRetainedScalarElements},
       v.options());
   at::Tensor output = output_storage.narrow(0, 0, kOutputElements).view(
@@ -1630,8 +1639,11 @@ at::Tensor nanochat_kda_chunk_wy_forward_c64(
   __nv_bfloat16* retained_T = retained_A + kRetainedMatrixElements;
   __nv_bfloat16* retained_W = retained_T + kRetainedMatrixElements;
   __nv_bfloat16* retained_Q = retained_W + kRetainedVectorElements;
+  __nv_bfloat16* retained_qbar = retained_Q + kRetainedVectorElements;
+  __nv_bfloat16* retained_khat = retained_qbar + kRetainedVectorElements;
+  __nv_bfloat16* retained_P = retained_khat + kRetainedVectorElements;
   __half* retained_prefix = reinterpret_cast<__half*>(
-      retained_Q + kRetainedVectorElements);
+      retained_P + kRetainedVectorElements);
   float* retained_beta = reinterpret_cast<float*>(
       retained_prefix + kRetainedVectorElements);
   float* retained_q_inverse = retained_beta + kRetainedScalarElements;
@@ -1655,7 +1667,7 @@ at::Tensor nanochat_kda_chunk_wy_forward_c64(
       A_log.data_ptr<float>(), dt_bias.data_ptr<float>(),
       reinterpret_cast<__nv_bfloat16*>(qgamma.data_ptr<at::BFloat16>()),
       retained_prefix, retained_beta, retained_q_inverse, retained_k_inverse,
-      reinterpret_cast<__nv_bfloat16*>(P.data_ptr<float>()),
+      retained_qbar, retained_khat, retained_P,
       reinterpret_cast<__nv_bfloat16*>(Q.data_ptr<float>()), retained_Q,
       reinterpret_cast<__nv_bfloat16*>(A.data_ptr<at::BFloat16>()),
       retained_A, retained_T, lower_bound, scale);
@@ -1666,25 +1678,22 @@ at::Tensor nanochat_kda_chunk_wy_forward_c64(
   at::Tensor U_bf = at::empty({kRetainedVectorElements}, q.options());
   nanochat_kda_wy_forward_uw_wmma_c64_kernel<<<
       kChunkRows * (kDim / 16) * 2, 128, 0, stream>>>(
-      retained_T,
-      reinterpret_cast<const __nv_bfloat16*>(P.data_ptr<float>()),
-      retained_Q,
+      retained_T, retained_P, retained_Q,
       reinterpret_cast<__nv_bfloat16*>(U_bf.data_ptr<at::BFloat16>()),
       retained_W);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 
-  // After U/W are formed, M and P are dead. Preprocess has already published
-  // compact restored-k into Q's backing. M's
-  // FP32 bytes plus Q's unused BF16 upper half exactly hold the full incoming-H
-  // history; P's bytes hold the smaller Z history. No allocation or public
-  // output-sidecar growth is introduced.
+  // After U/W are formed, preprocess has already published compact restored-k
+  // into Q's backing. M's FP32 bytes plus Q's unused BF16 upper half exactly
+  // hold the full incoming-H history. The dedicated transient backing holds the
+  // smaller producer-complete Z history.
   __nv_bfloat16* h_history_lo =
       reinterpret_cast<__nv_bfloat16*>(M.data_ptr<float>());
   __nv_bfloat16* packed_q_storage =
       reinterpret_cast<__nv_bfloat16*>(Q.data_ptr<float>());
   __nv_bfloat16* h_history_hi = packed_q_storage;
-  __nv_bfloat16* z_history =
-      reinterpret_cast<__nv_bfloat16*>(P.data_ptr<float>());
+  __nv_bfloat16* z_history = reinterpret_cast<__nv_bfloat16*>(
+      z_history_backing.data_ptr<float>());
 
   nanochat_kda_chunk_wy_forward_state_c64_kernel<<<
       kBatch * kHeads * (kDim / 32),

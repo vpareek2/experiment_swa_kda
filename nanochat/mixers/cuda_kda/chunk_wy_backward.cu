@@ -117,50 +117,6 @@ __device__ __forceinline__ int64_t grouped_matrix_index(
           kChunk + column);
 }
 
-// Rebuild the two normalized operands and grouped P from retained exact
-// scalars. Each CTA owns one recurrence-major chunk row; every thread owns one
-// channel.
-__global__ void nanochat_kda_wy_backward_rebuild_norms_c64_kernel(
-    const __nv_bfloat16* q,
-    const __nv_bfloat16* k,
-    const __nv_bfloat16* v,
-    const float* q_inverse,
-    const float* k_inverse,
-    const float* beta,
-    __nv_bfloat16* qbar,
-    __nv_bfloat16* khat,
-    __nv_bfloat16* P,
-    float scale) {
-  const int n = blockIdx.x;
-  const int d = threadIdx.x;
-  if (n >= kChunkRows || d >= kDim) {
-    return;
-  }
-  const int chunk_id = n % kChunks;
-  const int recurrence = n / kChunks;
-  const int grouped_n =
-      (chunk_id / 8) * 48 + recurrence * 8 + chunk_id % 8;
-  const int h = recurrence % kHeads;
-  const int b = recurrence / kHeads;
-  const int token_start = chunk_id * kChunk;
-  for (int row = 0; row < kChunk; ++row) {
-    const int token = token_start + row;
-    const int64_t source = input_vector_index(b, token, h, d);
-    const int64_t scalar = static_cast<int64_t>(n) * kChunk + row;
-    const int64_t destination = chunk_vector_index(n, row, d);
-    const int64_t grouped_destination =
-        (static_cast<int64_t>(grouped_n) * kChunk + row) * kDim + d;
-    const float q_value = __bfloat162float(q[source]);
-    const float k_value = __bfloat162float(k[source]);
-    qbar[destination] = __float2bfloat16_rn(
-        (q_value * q_inverse[scalar]) * scale);
-    khat[destination] = __float2bfloat16_rn(
-        k_value * k_inverse[scalar]);
-    P[grouped_destination] = __float2bfloat16_rn(
-        beta[scalar] * __bfloat162float(v[source]));
-  }
-}
-
 __global__ void nanochat_kda_wy_backward_build_m_a_c64_kernel(
     const float* qbar,
     const float* khat,
@@ -4053,6 +4009,10 @@ nanochat_kda_chunk_wy_backward_c64(
   constexpr int64_t kRetainedScalarElements =
       static_cast<int64_t>(kChunkRows) * kChunk;
   static_assert(kRetainedVectorElements % 2 == 0);
+  // The visible tensor is a contiguous prefix. Its backing is, in order:
+  // visible BF16 output | FP32 checkpoints | grouped BF16 A/T/W/Q |
+  // recurrence-major BF16 qbar/khat | grouped BF16 P |
+  // recurrence-major FP16 prefix | recurrence-major FP32 beta/qinv/kinv.
   const __nv_bfloat16* output_sidecar =
       reinterpret_cast<const __nv_bfloat16*>(
           output.data_ptr<at::BFloat16>()) + kOutputElements;
@@ -4064,8 +4024,14 @@ nanochat_kda_chunk_wy_backward_c64(
       retained_A + kRetainedMatrixElements;
   const __nv_bfloat16* retained_W = retained_T + kRetainedMatrixElements;
   const __nv_bfloat16* retained_Q = retained_W + kRetainedVectorElements;
+  const __nv_bfloat16* retained_qbar =
+      retained_Q + kRetainedVectorElements;
+  const __nv_bfloat16* retained_khat =
+      retained_qbar + kRetainedVectorElements;
+  const __nv_bfloat16* retained_P =
+      retained_khat + kRetainedVectorElements;
   const __half* retained_prefix = reinterpret_cast<const __half*>(
-      retained_Q + kRetainedVectorElements);
+      retained_P + kRetainedVectorElements);
   const float* retained_beta = reinterpret_cast<const float*>(
       retained_prefix + kRetainedVectorElements);
   const float* retained_q_inverse =
@@ -4073,28 +4039,6 @@ nanochat_kda_chunk_wy_backward_c64(
   const float* retained_k_inverse =
       retained_q_inverse + kRetainedScalarElements;
   constexpr int kGroupMatrixElements = kGroupRows * kChunk * kChunk;
-
-  // Rebuild the two BF16 normalized vector surfaces and grouped BF16 P. The
-  // exact scalar operands are retained by forward, so this path performs no
-  // reductions.
-  at::Tensor qbar = at::empty(
-      {kChunkRows, kChunk, kDim}, q.options());
-  at::Tensor khat = at::empty_like(qbar);
-  at::Tensor P = at::empty_like(qbar);
-  __nv_bfloat16* qbar_ptr = reinterpret_cast<__nv_bfloat16*>(
-      qbar.data_ptr<at::BFloat16>());
-  __nv_bfloat16* khat_ptr = reinterpret_cast<__nv_bfloat16*>(
-      khat.data_ptr<at::BFloat16>());
-  __nv_bfloat16* P_ptr = reinterpret_cast<__nv_bfloat16*>(
-      P.data_ptr<at::BFloat16>());
-  nanochat_kda_wy_backward_rebuild_norms_c64_kernel<<<
-      kChunkRows, kDim, 0, stream>>>(
-      reinterpret_cast<const __nv_bfloat16*>(q.data_ptr<at::BFloat16>()),
-      reinterpret_cast<const __nv_bfloat16*>(k.data_ptr<at::BFloat16>()),
-      reinterpret_cast<const __nv_bfloat16*>(v.data_ptr<at::BFloat16>()),
-      retained_q_inverse, retained_k_inverse, retained_beta,
-      qbar_ptr, khat_ptr, P_ptr, scale);
-  C10_CUDA_KERNEL_LAUNCH_CHECK();
 
   at::Tensor chunk_state_history = at::empty(
       {kGroups, kGroupRows, kDim, kDim}, q.options());
@@ -4130,7 +4074,7 @@ nanochat_kda_chunk_wy_backward_c64(
     const __nv_bfloat16* W_group =
         retained_W + static_cast<int64_t>(group_id) * kGroupVectorElements;
     const __nv_bfloat16* P_group =
-        P_ptr + static_cast<int64_t>(group_id) * kGroupVectorElements;
+        retained_P + static_cast<int64_t>(group_id) * kGroupVectorElements;
     const __nv_bfloat16* Q_group =
         retained_Q + static_cast<int64_t>(group_id) * kGroupVectorElements;
 #if defined(NANOCHAT_DISABLE_SELECTIVE_PTX)
@@ -4163,7 +4107,7 @@ nanochat_kda_chunk_wy_backward_c64(
         T_group, P_group, reinterpret_cast<__nv_bfloat16*>(
             U_group.data_ptr<at::BFloat16>()),
 #endif
-        qbar_ptr, khat_ptr, retained_prefix,
+        retained_qbar, retained_khat, retained_prefix,
         reinterpret_cast<__nv_bfloat16*>(
             qg_group_bf16.data_ptr<at::BFloat16>()),
         reinterpret_cast<__nv_bfloat16*>(
@@ -4271,7 +4215,7 @@ nanochat_kda_chunk_wy_backward_c64(
     nanochat_kda_wy_backward_complete_four_warp_vjp_c64_kernel<<<
         kGroupRows, 256, 0, stream>>>(
         reinterpret_cast<const __nv_bfloat16*>(v.data_ptr<at::BFloat16>()),
-        qbar_ptr, khat_ptr,
+        retained_qbar, retained_khat,
         retained_prefix, retained_beta,
         P_group, Q_group, T_group,
         reinterpret_cast<const __nv_bfloat16*>(
@@ -4298,7 +4242,7 @@ nanochat_kda_chunk_wy_backward_c64(
       const int pair_count = color == 0 ? 4 : 2;
       nanochat_kda_wy_backward_colored_pair_wmma_c64_kernel<<<
           kGroupRows * pair_count, 256, 0, stream>>>(
-          qbar_ptr, khat_ptr,
+          retained_qbar, retained_khat,
           retained_prefix, retained_beta,
           dA_group.data_ptr<float>(), dT_group.data_ptr<float>(),
           dqbar_group.data_ptr<float>(), dkhat_group.data_ptr<float>(),
@@ -4319,7 +4263,7 @@ nanochat_kda_chunk_wy_backward_c64(
             beta_logits.data_ptr<at::BFloat16>()),
         A_log.data_ptr<float>(), dt_bias.data_ptr<float>(),
         retained_q_inverse, retained_k_inverse,
-        qbar_ptr, khat_ptr, retained_beta,
+        retained_qbar, retained_khat, retained_beta,
         dqbar_group.data_ptr<float>(), dkhat_group.data_ptr<float>(),
         dbeta_group.data_ptr<float>(), dprefix_group.data_ptr<float>(),
         reinterpret_cast<__nv_bfloat16*>(dq.data_ptr<at::BFloat16>()),
