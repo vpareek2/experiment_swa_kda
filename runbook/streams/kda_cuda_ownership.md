@@ -15680,3 +15680,32 @@ Attempt339 was also bitwise exact, but pack registers rose 48 to 56 and complete
 ### Next
 
 Retain attempt335 as the material compact-retention scaffold and treat attempt338 only as supporting locality evidence. Do not extend q/k interleaving: reduced instruction count did not reduce bytes and increased register pressure. The absolute trainer target remains unmet by 108 tok/s.
+
+
+## 2026-08-11 [agent] Attempts340-342 fixed target reached and audited
+
+### Context
+
+Attempt335's compact retention produced a real trainer gain but initially remained 108 tok/s below the fixed target. Attempt338 then made retained qbar/khat group-major and was exact with a small positive operator movement. Two final microdiagnostics tested launch overlap and vector publication before the clean group-major candidate was remeasured under stable direct-trainer conditions.
+
+### Commands
+
+Attempt340 used CUDA 13 programmatic dependent launch between complete and color 0. Complete helper warps fenced and triggered after dA while owner warps finished dM; color 0 executed its independent factor prologue before `cudaGridDependencySynchronize`. `NANOCHAT_DISABLE_KDA_PDL=1` was the exact ordinary-launch fallback. Attempt341 replaced three scalar retained-sidecar stores with even-lane BF16x2 publications after lane+1 shuffles. Attempt338 was then measured in four ordered direct-trainer blocks against attempt335; its stable candidate medians exceeded the fixed target. The protected checker initially rejected attempt338 twice because the actual specialized convolution-forward symbol no longer contained the generic symbol substring required by external Nsight ownership evidence. Attempt342 truthfully renamed that specialized kernel from `nanochat_kda_causal_convolution_forward_w4_t4_kernel` to `nanochat_kda_causal_convolution_forward_kernel_w4_t4`, without changing code, launch, or arithmetic. A staged attempt325-to-attempt342 validation worktree then ran the full protected checker and all four sanitizers. Finally, frozen Level 1 compared attempt266 to attempt342, and three stable ordered Level 2 blocks compared their direct trainers.
+
+### Artifacts
+
+- Attempt340 branch `kda-cuda/pdl-complete-colored-340`, commit `70c111dc2af6f23a451f22d239fe411fd1e11896`; evidence under `runs/kda-cuda-development/attempt-00340-raw-evidence`.
+- Attempt341 branch `kda-cuda/vector-retained-publication-341`, commit `2f8558472f8f5d0d5ce1b9cfb2d4281032017746`; evidence under `runs/kda-cuda-development/attempt-00341-raw-evidence`.
+- Attempt342 branch `kda-cuda/profile-symbol-compat-342`, commit `a237205ccfb2c8b0575407c0e6575094b70f65d6`; checker evidence under `runs/kda-cuda-development/attempt-00342-raw-evidence`, Level 1 under `runs/kda-cuda-development/attempt-00342-profile-symbol-level1`, and Level 2 under `runs/kda-cuda-development/attempt-00342-profile-symbol-level2`.
+
+### Result
+
+Attempt340 was bitwise exact and reduced the aggregate eight complete-to-color0 gaps from 0.016800 to 0.000354 ms/operator, but robust whole medians moved 3.800528 to 3.806544 ms and kernel sum 3.481120 to 3.483902 ms. Programmatic launch is rejected: the overlap does not survive whole timing. Attempt341 was also bitwise exact, but its paired whole median regressed 0.013232 ms and the fused producer itself regressed 0.002688 ms; vector publication is rejected.
+
+Attempt342 passed the protected runtime and profile audits with ownership 1.0 and no runtime FLA. Memcheck, racecheck, synccheck, and initcheck all completed with the checker's zero-error summary. The prior attempt338 failures were audit-symbol failures, not CUDA correctness failures; the symbol-only rename made the actual specialized project kernel visible to the existing audit without adding a launch or changing execution.
+
+Frozen Level 1 advanced attempt342. At T4096, forward+backward improved 5.150608 to 4.353168 ms (**+15.482%**) against accepted attempt266; forward improved 16.698752 to 16.502416 ms, important-shape regressions stayed within 5%, and operator peak fell 144,754,688 to 143,002,112 B. Stable direct Level 2 run medians were accepted baseline **42,660 / 42,689 / 42,671 tok/s** and candidate **43,821 / 43,840 / 43,849 tok/s**. The medians were **42,671 to 43,840 tok/s (+2.740%)**. Every candidate run median exceeded the fixed **43,680 tok/s** reference; the accepted margin is **160 tok/s**. A bootstrap over run medians gave candidate 95% bounds **[43,821, 43,849] tok/s** and paired-gain median bounds **[2.696%, 2.761%]**. Trainer peak grew 5669.971 to 5780.596 MiB (+1.951%), within the 3% gate. Final losses were stable at 10.36701117 versus 10.36701102, and the architecture equations were unchanged.
+
+### Next
+
+Accept attempt342 as the fixed-target-matching, fully project-owned CUDA candidate. Attempt266 remains the prior audited baseline and attempt338 remains the performance-bearing parent. Preserve all branches and artifacts. No private confirmation seed was inspected or optimized against. Any future campaign should start from attempt342 only for a separately declared objective; the 43,680 tok/s ownership goal is complete.
