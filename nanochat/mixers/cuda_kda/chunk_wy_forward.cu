@@ -13,6 +13,7 @@
 #include <c10/cuda/CUDAException.h>
 
 #include <cuda_bf16.h>
+#include <cuda_fp16.h>
 #include <cuda_pipeline_primitives.h>
 #include <cuda_runtime.h>
 #include <mma.h>
@@ -99,6 +100,10 @@ __global__ void nanochat_kda_wy_preprocess_c64_kernel(
     __nv_bfloat16* qgamma,
     float* prefix_g,
     float* beta,
+    __half* retained_prefix,
+    float* retained_beta,
+    float* retained_q_inverse,
+    float* retained_k_inverse,
     float* P,
     float* Q,
     float lower_bound,
@@ -154,7 +159,12 @@ __global__ void nanochat_kda_wy_preprocess_c64_kernel(
       k_inverse = rsqrtf(fmaxf(k_sum, 1.0e-24f));
       beta_value = wy_sigmoid(__bfloat162float(
           beta_logits[input_scalar_index(b, token, h)]));
-      beta[static_cast<int64_t>(n) * kChunk + row] = beta_value;
+      const int64_t scalar_offset =
+          static_cast<int64_t>(n) * kChunk + row;
+      beta[scalar_offset] = beta_value;
+      retained_beta[scalar_offset] = beta_value;
+      retained_q_inverse[scalar_offset] = q_inverse;
+      retained_k_inverse[scalar_offset] = k_inverse;
     }
     __syncthreads();
 
@@ -169,6 +179,7 @@ __global__ void nanochat_kda_wy_preprocess_c64_kernel(
     khat[destination] = normalized_k;
     qgamma[destination] = __float2bfloat16_rn(normalized_q * exp_g);
     prefix_g[destination] = running_g;
+    retained_prefix[destination] = __float2half_rn(running_g);
     P[destination] = beta_value * __bfloat162float(v[source]);
     Q[destination] = beta_value * exp_g * normalized_k;
     __syncthreads();
@@ -1470,12 +1481,15 @@ at::Tensor nanochat_kda_chunk_wy_forward_c64(
       static_cast<int64_t>(kChunkRows) * kChunk * kChunk;
   constexpr int64_t kRetainedVectorElements =
       static_cast<int64_t>(kChunkRows) * kChunk * kDim;
+  constexpr int64_t kRetainedScalarElements =
+      static_cast<int64_t>(kChunkRows) * kChunk;
   // The visible tensor is a contiguous prefix. Its backing is, in order:
-  // visible BF16 output | FP32 checkpoints | BF16 A | BF16 T | BF16 W/P/Q.
-  // Retained operands are group-major for direct reverse-group consumption.
+  // visible BF16 output | FP32 checkpoints | grouped BF16 A/T/W/P/Q |
+  // recurrence-major FP16 prefix | recurrence-major FP32 beta/qinv/kinv.
   at::Tensor output_storage = at::empty(
       {kOutputElements + 2 * kCheckpointElements +
-       2 * kRetainedMatrixElements + 3 * kRetainedVectorElements},
+       2 * kRetainedMatrixElements + 4 * kRetainedVectorElements +
+       6 * kRetainedScalarElements},
       v.options());
   at::Tensor output = output_storage.narrow(0, 0, kOutputElements).view(
       {kBatch, kLength, kHeads, kDim});
@@ -1489,6 +1503,12 @@ at::Tensor nanochat_kda_chunk_wy_forward_c64(
   __nv_bfloat16* retained_W = retained_T + kRetainedMatrixElements;
   __nv_bfloat16* retained_P = retained_W + kRetainedVectorElements;
   __nv_bfloat16* retained_Q = retained_P + kRetainedVectorElements;
+  __half* retained_prefix = reinterpret_cast<__half*>(
+      retained_Q + kRetainedVectorElements);
+  float* retained_beta = reinterpret_cast<float*>(
+      retained_prefix + kRetainedVectorElements);
+  float* retained_q_inverse = retained_beta + kRetainedScalarElements;
+  float* retained_k_inverse = retained_q_inverse + kRetainedScalarElements;
 
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream(q.get_device());
   constexpr int kThreads = 256;
@@ -1513,7 +1533,8 @@ at::Tensor nanochat_kda_chunk_wy_forward_c64(
       A_log.data_ptr<float>(), dt_bias.data_ptr<float>(),
       qbar.data_ptr<float>(), khat.data_ptr<float>(),
       reinterpret_cast<__nv_bfloat16*>(qgamma.data_ptr<at::BFloat16>()),
-      prefix_g.data_ptr<float>(), beta.data_ptr<float>(),
+      prefix_g.data_ptr<float>(), beta.data_ptr<float>(), retained_prefix,
+      retained_beta, retained_q_inverse, retained_k_inverse,
       P.data_ptr<float>(), Q.data_ptr<float>(), lower_bound, scale);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 
