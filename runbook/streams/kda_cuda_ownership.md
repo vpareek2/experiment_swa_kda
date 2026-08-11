@@ -15223,3 +15223,45 @@ nsys profile --trace=cuda,nvtx,osrt --sample=none --cpuctxsw=none <matched synch
 **Next**
 
 - Preserve the exact overlap scaffold but do not accept it. Attempt227 splits the independent 32-value strip into 16-value CTAs to fill all 48 SMs.
+
+
+## 2026-08-11 [Codex] Attempt227 advances Level 1 but fails Level 2
+
+**Context**
+
+- Attempt227 splits attempt226's fused selective-PTX boundary/register-dh ownership from a 32-value grid24 CTA into independent 16-value grid48 CTAs, filling all 48 GB10 SMs.
+
+**Artifacts**
+
+- Branch `kda-cuda/split-fused-boundary-dh-227`, commit `1ef988edb63d4b0ea41d9c83b943931031d36d1c`, parent attempt226.
+- Manifests: profile `5f9ef44cda21029f53a33f43166fd9177ecfacf63ccd5bd7ec1f17215713350c`; checker `95773a1f4e846be5862b22d1142c0f6cbbc376350aa5d1e960de80191d25c554`; sanitizers `8a2b0e4497039964d0d6a94c13d5a405301f09c433839e0d023a4bb888e73be7`; Level 1 `fd67a88c459089971c3a6438f362a7978734d5153517db50ce232baf3d635081`; Level 2 `901c0ca3cde70e692e65ecabe8f08185d25a80b06fa5327f8d34f83c2e0d143f`.
+
+**Result**
+
+- Independent random-upstream output and all gradients are bitwise attempts217/222 and fallback. Protected checker and all requested sanitizer checks complete; explicit synccheck has zero errors. Resources are 220 regs/thread, 55,296 B dynamic shared, zero spill.
+- Fused boundary/register-dh falls from attempt222's 0.684320 ms to **0.373472 ms**. Level 1 T4096 forward+backward improves **11.162%** (6.860032 -> 6.094304 ms); all guards pass.
+- Ordered Level 2 is **39,984 -> 40,707 tok/s**, **+1.808%**, below the required 2% gate. Attempt227 is not accepted. It remains 2,973 tok/s below FLA. No quality/statistical claim.
+
+**Next**
+
+- Retain attempt217 accepted and attempt227 as the fastest exact scaffold. Seek a small additional exact operator gain before another Level 2.
+
+
+## 2026-08-11 [Codex] Reject attempt228 sequential fused teams at profile
+
+**Context**
+
+- Attempt228 tests whether serial boundary-then-register-dh teams avoid attempt227's shared/Tensor-Core contention.
+
+**Artifacts**
+
+- Branch `kda-cuda/sequential-split-boundary-dh-228`, commit `12677ed96e4c095375fdf93dc80755c6e3515d61`, parent attempt227; profile manifest `7b7a7754ae3c29d9a15df306f7090f6ee9157c02ed3424dc719ed8496f08c101`.
+- Append-only development index SHA-256 after attempts227-228: `909a62ea7c691eeaf14ee5df6560aa4362deb0ed0cea4b2c86f70823523600b5`.
+
+**Result**
+
+- Exact random-upstream and fallback bitwise checks pass; synccheck has zero errors. Fused time regresses **0.373472 -> 0.532480 ms** and whole kernel sum regresses **5.115392 -> 5.506880 ms**. No Level 1/2.
+
+**Next**
+
+- Preserve concurrent attempt227 scheduling; close full serialization of these teams.
