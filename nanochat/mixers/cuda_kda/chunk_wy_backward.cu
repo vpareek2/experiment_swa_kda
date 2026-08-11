@@ -456,44 +456,6 @@ __global__ void nanochat_kda_wy_backward_pack_group_c64_kernel(
   E[index] = khat[source] * expf(end_g - g);
 }
 
-// The direct state scan has four independent value owners.  Pack qg/kg once
-// so those owners do not redundantly evaluate the same exponentials, matching
-// the lifetime of FLA's recomputed compact operands without retaining FP32
-// R/E workspaces.
-__global__ void nanochat_kda_wy_backward_pack_group_qgkg_bf16_c64_kernel(
-    const __nv_bfloat16* qbar,
-    const __nv_bfloat16* khat,
-    const __half* prefix_g,
-    __nv_bfloat16* qg,
-    __nv_bfloat16* kg,
-    __nv_bfloat16* kg_transposed,
-    int chunk_start,
-    int group_chunks) {
-  const int index = blockIdx.x * blockDim.x + threadIdx.x;
-  const int elements = kRecurrences * group_chunks * kChunk * kDim;
-  if (index >= elements) {
-    return;
-  }
-  const int local_n = index / (kChunk * kDim);
-  const int recurrence = local_n / group_chunks;
-  const int local_chunk = local_n - recurrence * group_chunks;
-  const int within = index - local_n * kChunk * kDim;
-  const int row = within / kDim;
-  const int key = within - row * kDim;
-  const int chunk_id = chunk_start + local_chunk;
-  const int n = recurrence * kChunks + chunk_id;
-  const int64_t source = chunk_vector_index(n, row, key);
-  const float g = __half2float(prefix_g[source]);
-  const float end_g =
-      __half2float(prefix_g[chunk_vector_index(n, kChunk - 1, key)]);
-  qg[index] = __float2bfloat16_rn(__bfloat162float(qbar[source]) * expf(g));
-  const __nv_bfloat16 kg_value =
-      __float2bfloat16_rn(__bfloat162float(khat[source]) * expf(end_g - g));
-  kg[index] = kg_value;
-  kg_transposed[(static_cast<int64_t>(local_n) * kDim + key) * kChunk + row] =
-      kg_value;
-}
-
 __global__ void nanochat_kda_wy_backward_sub_z_c64_kernel(
     const float* U, const float* wh, float* z, int chunk_id) {
   const int index = blockIdx.x * blockDim.x + threadIdx.x;
@@ -1206,13 +1168,23 @@ __global__ void nanochat_kda_wy_backward_fp32_to_bf16_c64_kernel(
   }
 }
 
-// Rebuild only U for the current reverse group. Forward-retained BF16 T/P
-// are the exact tensor-core operands used by the accepted backward arithmetic;
-// W is retained directly and no P/Q packing or second accumulator is needed.
-__global__ void nanochat_kda_wy_backward_group_u_wmma_c64_kernel(
+// Rebuild U and publish qg/kg for the current reverse group in one launch.
+// The first group-U CTAs execute the accepted 128-thread WMMA body literally;
+// all CTAs also own one independent 128-element qg/kg segment.  The uniform
+// owner predicate keeps every group-U barrier converged, while the larger pack
+// grid lets the two independent bodies overlap at CTA scheduling granularity.
+__global__ void nanochat_kda_wy_backward_group_u_pack_qgkg_bf16_c64_kernel(
     const __nv_bfloat16* T,
     const __nv_bfloat16* P,
     float* U,
+    const __nv_bfloat16* qbar,
+    const __nv_bfloat16* khat,
+    const __half* prefix_g,
+    __nv_bfloat16* qg,
+    __nv_bfloat16* kg,
+    __nv_bfloat16* kg_transposed,
+    int chunk_start,
+    int group_chunks,
     int group_rows) {
   namespace wmma = nvcuda::wmma;
   constexpr int kTile = 16;
@@ -1220,66 +1192,94 @@ __global__ void nanochat_kda_wy_backward_group_u_wmma_c64_kernel(
   constexpr int kValueTiles = kDim / kTile;
 
   const int owner = blockIdx.x;
-  const int local_n = owner / kValueTiles;
-  const int value_tile = owner - local_n * kValueTiles;
-  if (local_n >= group_rows) {
-    return;
-  }
-  const int value_start = value_tile * kTile;
-  const int warp = threadIdx.x / warpSize;
-  const int lane = threadIdx.x % warpSize;
-  const int row_start = warp * kTile;
-
   __shared__ __align__(16) __nv_bfloat16 left[4 * kTileElements];
   __shared__ __align__(16) __nv_bfloat16 right[kTileElements];
 
-  using MatrixA = wmma::fragment<
-      wmma::matrix_a, kTile, kTile, kTile,
-      __nv_bfloat16, wmma::row_major>;
-  using MatrixB = wmma::fragment<
-      wmma::matrix_b, kTile, kTile, kTile,
-      __nv_bfloat16, wmma::row_major>;
-  using Accumulator = wmma::fragment<
-      wmma::accumulator, kTile, kTile, kTile, float>;
+  if (owner < group_rows * kValueTiles) {
+    const int local_n = owner / kValueTiles;
+    const int value_tile = owner - local_n * kValueTiles;
+    const int value_start = value_tile * kTile;
+    const int warp = threadIdx.x / warpSize;
+    const int lane = threadIdx.x % warpSize;
+    const int row_start = warp * kTile;
 
-  Accumulator u_accumulator;
-  wmma::fill_fragment(u_accumulator, 0.0f);
+    using MatrixA = wmma::fragment<
+        wmma::matrix_a, kTile, kTile, kTile,
+        __nv_bfloat16, wmma::row_major>;
+    using MatrixB = wmma::fragment<
+        wmma::matrix_b, kTile, kTile, kTile,
+        __nv_bfloat16, wmma::row_major>;
+    using Accumulator = wmma::fragment<
+        wmma::accumulator, kTile, kTile, kTile, float>;
 
-  for (int inner_start = 0; inner_start < kChunk; inner_start += kTile) {
-    for (int element = lane; element < kTileElements; element += warpSize) {
-      const int row = element / kTile;
-      const int inner = element - row * kTile;
-      const int64_t source =
-          (static_cast<int64_t>(local_n) * kChunk + row_start + row) *
-              kChunk + inner_start + inner;
-      left[warp * kTileElements + element] = T[source];
+    Accumulator u_accumulator;
+    wmma::fill_fragment(u_accumulator, 0.0f);
+
+    for (int inner_start = 0; inner_start < kChunk; inner_start += kTile) {
+      for (int element = lane; element < kTileElements; element += warpSize) {
+        const int row = element / kTile;
+        const int inner = element - row * kTile;
+        const int64_t source =
+            (static_cast<int64_t>(local_n) * kChunk + row_start + row) *
+                kChunk + inner_start + inner;
+        left[warp * kTileElements + element] = T[source];
+      }
+      for (int element = threadIdx.x; element < kTileElements;
+           element += blockDim.x) {
+        const int inner = element / kTile;
+        const int value = element - inner * kTile;
+        const int64_t source =
+            (static_cast<int64_t>(local_n) * kChunk + inner_start + inner) *
+            kDim + value_start + value;
+        right[element] = P[source];
+      }
+      __syncthreads();
+
+      MatrixA t_fragment;
+      MatrixB p_fragment;
+      wmma::load_matrix_sync(
+          t_fragment, left + warp * kTileElements, kTile);
+      wmma::load_matrix_sync(p_fragment, right, kTile);
+      wmma::mma_sync(
+          u_accumulator, t_fragment, p_fragment, u_accumulator);
+      __syncthreads();
     }
-    for (int element = threadIdx.x; element < kTileElements;
-         element += blockDim.x) {
-      const int inner = element / kTile;
-      const int value = element - inner * kTile;
-      const int64_t source =
-          (static_cast<int64_t>(local_n) * kChunk + inner_start + inner) *
-          kDim + value_start + value;
-      right[element] = P[source];
-    }
-    __syncthreads();
 
-    MatrixA t_fragment;
-    MatrixB p_fragment;
-    wmma::load_matrix_sync(
-        t_fragment, left + warp * kTileElements, kTile);
-    wmma::load_matrix_sync(p_fragment, right, kTile);
-    wmma::mma_sync(
-        u_accumulator, t_fragment, p_fragment, u_accumulator);
-    __syncthreads();
+    const int64_t destination =
+        (static_cast<int64_t>(local_n) * kChunk + row_start) * kDim +
+        value_start;
+    wmma::store_matrix_sync(
+        U + destination, u_accumulator, kDim, wmma::mem_row_major);
   }
 
-  const int64_t destination =
-      (static_cast<int64_t>(local_n) * kChunk + row_start) * kDim +
-      value_start;
-  wmma::store_matrix_sync(
-      U + destination, u_accumulator, kDim, wmma::mem_row_major);
+  // The direct state scan has four independent value owners. Pack qg/kg once
+  // so those owners do not redundantly evaluate the same exponentials, matching
+  // the lifetime of the recomputed compact operands without FP32 workspaces.
+  const int index = owner * blockDim.x + threadIdx.x;
+  const int elements = kRecurrences * group_chunks * kChunk * kDim;
+  if (index < elements) {
+    const int local_n = index / (kChunk * kDim);
+    const int recurrence = local_n / group_chunks;
+    const int local_chunk = local_n - recurrence * group_chunks;
+    const int within = index - local_n * kChunk * kDim;
+    const int row = within / kDim;
+    const int key = within - row * kDim;
+    const int chunk_id = chunk_start + local_chunk;
+    const int n = recurrence * kChunks + chunk_id;
+    const int64_t source = chunk_vector_index(n, row, key);
+    const float g = __half2float(prefix_g[source]);
+    const float end_g =
+        __half2float(prefix_g[chunk_vector_index(n, kChunk - 1, key)]);
+    qg[index] =
+        __float2bfloat16_rn(__bfloat162float(qbar[source]) * expf(g));
+    const __nv_bfloat16 kg_value =
+        __float2bfloat16_rn(
+            __bfloat162float(khat[source]) * expf(end_g - g));
+    kg[index] = kg_value;
+    kg_transposed[
+        (static_cast<int64_t>(local_n) * kDim + key) * kChunk + row] =
+        kg_value;
+  }
 }
 
 // Fuse the two reverse-group products that share dO. Eight warps own the
@@ -4091,10 +4091,6 @@ nanochat_kda_chunk_wy_backward_c64(
         retained_Q + static_cast<int64_t>(group_id) * kGroupVectorElements;
     at::Tensor U_group = at::empty(
         {kGroupRows, kChunk, kDim}, fp32);
-    nanochat_kda_wy_backward_group_u_wmma_c64_kernel<<<
-        kGroupRows * (kDim / 16), 128, 0, stream>>>(
-        T_group, P_group, U_group.data_ptr<float>(), kGroupRows);
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
     at::Tensor dZ_group_bf16 = at::empty(
         {kGroupRows, kChunk, kDim}, q.options());
     at::Tensor dstate_next_group_bf16 = at::empty(
@@ -4104,18 +4100,23 @@ nanochat_kda_chunk_wy_backward_c64(
     at::Tensor kg_group_bf16 = at::empty_like(qg_group_bf16);
     at::Tensor kg_transposed_group_bf16 = at::empty(
         {kGroupRows, kDim, kChunk}, q.options());
-    nanochat_kda_wy_backward_pack_group_qgkg_bf16_c64_kernel<<<
-        (kGroupVectorElements + kThreads - 1) / kThreads,
-        kThreads, 0, stream>>>(
-        qbar_ptr, khat_ptr,
-        retained_prefix,
+    constexpr int kGroupUPackThreads = 128;
+    constexpr int kGroupUBlocks = kGroupRows * (kDim / 16);
+    constexpr int kGroupPackBlocks =
+        (kGroupVectorElements + kGroupUPackThreads - 1) / kGroupUPackThreads;
+    constexpr int kGroupUPackBlocks =
+        kGroupUBlocks > kGroupPackBlocks ? kGroupUBlocks : kGroupPackBlocks;
+    nanochat_kda_wy_backward_group_u_pack_qgkg_bf16_c64_kernel<<<
+        kGroupUPackBlocks, kGroupUPackThreads, 0, stream>>>(
+        T_group, P_group, U_group.data_ptr<float>(),
+        qbar_ptr, khat_ptr, retained_prefix,
         reinterpret_cast<__nv_bfloat16*>(
             qg_group_bf16.data_ptr<at::BFloat16>()),
         reinterpret_cast<__nv_bfloat16*>(
             kg_group_bf16.data_ptr<at::BFloat16>()),
         reinterpret_cast<__nv_bfloat16*>(
             kg_transposed_group_bf16.data_ptr<at::BFloat16>()),
-        chunk_start, kGroupChunks);
+        chunk_start, kGroupChunks, kGroupRows);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 
     // Reconstruct this group's forward histories from the FP32 boundary saved
