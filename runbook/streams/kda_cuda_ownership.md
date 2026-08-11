@@ -15429,3 +15429,20 @@ Attempt266 writes BF16 U to compact scratch and W directly to grouped retained s
 
 ### Next
 Continue from `7a07e5a`. Small launch/memory fusions are not translating reliably to trainer throughput. The next broad direction is a direct CUDA program-shape port of FLA’s raw-q/k/g WY backward equations, rather than another colored-pair rearrangement.
+
+## 2026-08-11 [agent] Fused qg/kg stack and direct FLA backward mapping
+
+### Context
+Tested whether attempt267’s launch-reduced qg/kg producer would translate when stacked on accepted attempt266, and mapped the offline FLA fused WY backward kernel to project operands.
+
+### Commands
+Applied the exact attempt267 backward patch to attempt266, ran checker, matched profile, direct accepted-parent trainer comparison, Level 1, and ordered Level 2. Reviewed the offline FLA equations without importing/linking FLA into project runtime.
+
+### Artifacts
+Attempt270 branch `kda-cuda/bf16-uw-fused-qgkg-270`, commit `43772e0`; Level 1/2 artifacts under `runs/kda-cuda-development/attempt-00270-*`.
+
+### Result
+Attempt270 was exact and passed Level 1 (+20.826% T4096 forward+backward). It saved only about 0.039 ms in the matched operator and produced 41,975 tok/s in ordered Level 2, below accepted attempt266’s 42,237 tok/s; rejected. The FLA mapping confirmed `A -> project T`, `v_new -> z`, `h -> H`, `dh -> dH`, and fused-kernel `dv -> dZ`; FLA’s separate intra kernel still corresponds to the colored/local VJP. Therefore a direct port targets the complete WY leaf rather than eliminating the separate local-intra phase, and its measured ceiling is smaller than previously assumed.
+
+### Next
+Retain attempt266. Any direct FLA-program-shape port must preserve the separate intra/local pullback and demonstrate a trainer-scale gain; do not assume complete+colored can collapse into the single FLA fused symbol.
