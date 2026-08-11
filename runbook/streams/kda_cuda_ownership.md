@@ -15016,3 +15016,38 @@ uv run --no-sync python scripts/kda_cuda_development.py /home/veer/Master/projec
 
 - Keep attempt217. Close full grouped `U/W/P/Q` retention and larger saved-preprocessing sidecars; saved-factor traffic/coldness and memory outweigh reconstruction deletion on GB10.
 - Seek compute-side acceleration of the 1.04-ms complete VJP or on-chip producer/consumer reuse without full-sequence backing growth.
+
+
+## 2026-08-11 [Codex] Reject attempt220 exact parallel dP helper at the Level-1 threshold
+
+**Context**
+
+- Attempt220 splits only the value-strip portion of `complete_four_warp_vjp`: four owner warps retain the attempt217 `dZ P^T` adjoint while four helper warps compute the independent `T^T dZ` dP/dv/initial-dbeta path concurrently. After one full 256-thread barrier the helpers exit; owners append `dW Q^T` in the original order and use 128-participant named CUDA barriers.
+- It deliberately does not separately accumulate or reassociate the two adjoint products.
+
+**Commands**
+
+```bash
+<fresh-cache independent-random-dO production capture and comparison>
+uv run --no-sync research cuda-candidate-check --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_220 --lane optimization <isolated caches/artifact>
+nsys profile --trace=cuda,nvtx,osrt --sample=none --cpuctxsw=none <matched attempt217/attempt220 random-dO runners>
+uv run --no-sync python scripts/kda_cuda_development.py /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_217 /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_220 runs/kda-cuda-development/attempt-00220-parallel-dp-helper-warps-level1 --level2-order baseline-first
+uv run --no-sync python scripts/kda_cuda_development.py /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_217 /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_220 runs/kda-cuda-development/attempt-00220-parallel-dp-helper-warps-level1-retest --level2-order candidate-first
+```
+
+**Artifacts**
+
+- Branch `kda-cuda/parallel-dp-helper-warps-220`, commit `ff39227da8018ea88f8503b232462ba334f29cb5`.
+- Gradient manifest `eb68f1af48b1c1e156350085a3fee04884f714ff29d0afb54945258fa101e534`; checker `41c981c0ebf6411fccf2dd920369389403c5646fcee23ed310b9f72dd7efc1e7`; paired profile `7c235c54dbc7cd28a68a440ee6dea44b1060fc6382906dc196dfe3114bc8e038`; Level 1 `90ad047c83879c6b8a3834c87ae569415032e80159a68c3`; retest `ec250c2d5ae922d79be57b75fd40f7b569527ddce5d3c4ce8ebc71ddd8db4bad`.
+- Append-only development index SHA-256 after attempt220: `524e9eb92e8f7fd70fb6e771e403d667c673f1dde0672b7910be195a332dd0e8`.
+
+**Result**
+
+- Output and all independent-random-upstream gradients are finite and bitwise attempt217; checker and runtime-FLA audit pass. Candidate complete-VJP resources are 256 threads, 134 registers/thread, 24,576 B static shared, zero local/stack.
+- The complete VJP improves `1.023040 -> 0.923232 ms` (9.756%). Paired random-dO whole-op profile improves 142-launch sum `5.977024 -> 5.894112 ms` (1.387%) and span `6.254656 -> 6.189312 ms` (1.045%).
+- Both ordered Level-1 captures land just below the declared 3% gate: baseline-first T4096 forward+backward `7.110960 -> 6.901744 ms`, **+2.9422%**; candidate-first retest `7.104496 -> 6.895312 ms`, **+2.9444%**. Memory is identical. `advance=false` is authoritative; no Level 2, sanitizer, quality, or statistical claim is made.
+
+**Next**
+
+- Keep attempt217 as accepted. Preserve attempt220's exact mechanism as a validated subthreshold building block, but do not call it accepted.
+- The next composite successor may add one exact forward build+solve axis on top of attempt220; it must compare against attempt217 and independently clear every gate.
