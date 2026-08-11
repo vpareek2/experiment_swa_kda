@@ -108,5 +108,23 @@ def provenance() -> dict[str, Any]:
                 "runs/kda-cuda-development/profiles/attempt-00211-gb10-register-"
                 "forward-state-profile-001"
             ),
+        }, {
+            "source": _CHUNK_WY_BACKWARD_SOURCE,
+            "rationale": (
+                "Use documented warp mma.sync m16n8k16 and ldmatrix only for "
+                "the GB10 register-held backward boundary reconstruction"
+            ),
+            "architecture_guard": (
+                "The project extension builds a native sm_121 image with CUDA "
+                "13.x; the selected instructions require baseline sm_80+"
+            ),
+            "cuda_fallback": (
+                "NANOCHAT_DISABLE_SELECTIVE_PTX=1 builds the exact standard-CUDA "
+                "WMMA shared-state boundary and launches its 256-thread CTA"
+            ),
+            "profile_evidence": (
+                "runs/kda-cuda-development/profiles/attempt-00216-gb10-register-"
+                "boundary-profile-001"
+            ),
         }],
     }
