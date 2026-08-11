@@ -246,8 +246,9 @@ __global__ void nanochat_kda_wy_preprocess_build_solve_wmma_c64_kernel(
             chunk_vector_index(n, owner_row, owner_d);
         running_g += lower_bound * wy_sigmoid(
             a * preprocess->gate_input[batch_row][owner_d]);
-        const float exp_g = expf(running_g);
+        const float exp_g = running_g < -104.0f ? 0.0f : expf(running_g);
         shared_prefix[owner_local] = running_g;
+
         qgamma[owner_destination] = __float2bfloat16_rn(
             preprocess->normalized_q[batch_row][owner_d] * exp_g);
         retained_prefix[owner_destination] = __float2half_rn(running_g);
@@ -271,7 +272,9 @@ __global__ void nanochat_kda_wy_preprocess_build_solve_wmma_c64_kernel(
       restored_k[packed_strided_transpose_index(n, owner_d, row)] =
           __float2bfloat16_rn(
               __half2float(shared_khat[local]) *
-              expf(end_g - shared_prefix[local]));
+              ((end_g - shared_prefix[local]) < -104.0f
+                  ? 0.0f : expf(end_g - shared_prefix[local])));
+
     }
   }
   __syncthreads();
