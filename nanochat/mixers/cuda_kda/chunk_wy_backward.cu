@@ -2464,102 +2464,115 @@ __global__ void nanochat_kda_wy_backward_complete_four_warp_vjp_c64_kernel(
       wmma::accumulator, kStrip, kStrip, kStrip, float>;
 
   const int64_t matrix_base = static_cast<int64_t>(local_n) * kMatrixElements;
-  // Match FLA's four-warp K=V=128 decomposition: each warp owns one 16-row
-  // tile and all four column tiles of the local adjoint. This halves the live
-  // accumulator set per warp while preserving the exact phase boundaries.
+  // Eight warps split the value-strip work into four owner/helper pairs. The
+  // owner warp keeps the local adjoint live; its helper computes dP and the
+  // immediately consumed vector gradients for the same 16-row tile.
   Accumulator local_adjoint[4];
-#pragma unroll
-  for (int tile = 0; tile < 4; ++tile) {
-    wmma::fill_fragment(local_adjoint[tile], 0.0f);
-  }
-  const int row_start = warp * kStrip;
+  const int local_warp = warp < 4 ? warp : warp - 4;
+  const int row_start = local_warp * kStrip;
 
-  // Value strips contribute dZ P^T to the inverse adjoint. They also produce
-  // dP = T^T dZ, which is consumed immediately by dv and dbeta.
-  for (int value_start = 0; value_start < kDim; value_start += kStrip) {
-    MatrixARow dz_fragment;
-    wmma::load_matrix_sync(
-        dz_fragment,
-        dZ + (static_cast<int64_t>(local_n) * kChunk + row_start) *
-            kDim + value_start,
-        kDim);
+  if (warp < 4) {
 #pragma unroll
-    for (int column_tile = 0; column_tile < 4; ++column_tile) {
-      MatrixBCol p_fragment;
-      wmma::load_matrix_sync(
-          p_fragment,
-          P + (static_cast<int64_t>(local_n) * kChunk +
-               column_tile * kStrip) * kDim + value_start,
-          kDim);
-      wmma::mma_sync(
-          local_adjoint[column_tile], dz_fragment, p_fragment,
-          local_adjoint[column_tile]);
+    for (int tile = 0; tile < 4; ++tile) {
+      wmma::fill_fragment(local_adjoint[tile], 0.0f);
     }
 
-    Accumulator dP_fragment;
-    wmma::fill_fragment(dP_fragment, 0.0f);
-    for (int inner_start = 0; inner_start < kChunk;
-         inner_start += kStrip) {
-      MatrixACol t_fragment;
-      MatrixBRow dz_inner_fragment;
+    // Value strips contribute dZ P^T to the inverse adjoint. Preserve the
+    // existing value-major, then column-major accumulation order exactly.
+    for (int value_start = 0; value_start < kDim; value_start += kStrip) {
+      MatrixARow dz_fragment;
       wmma::load_matrix_sync(
-          t_fragment, T + matrix_base + inner_start * kChunk + row_start,
-          kChunk);
-      wmma::load_matrix_sync(
-          dz_inner_fragment,
-          dZ + (static_cast<int64_t>(local_n) * kChunk + inner_start) *
+          dz_fragment,
+          dZ + (static_cast<int64_t>(local_n) * kChunk + row_start) *
               kDim + value_start,
           kDim);
-      wmma::mma_sync(
-          dP_fragment, t_fragment, dz_inner_fragment, dP_fragment);
-    }
-    // For the fixed SM121 m16n16 accumulator layout, each four-lane subgroup
-    // owns two rows and all sixteen columns. Consume dP directly from the
-    // fragment instead of round-tripping it through shared memory and two CTA
-    // barriers. Each matrix element has exactly one lane/element owner.
-    float beta_lower = 0.0f;
-    float beta_upper = 0.0f;
 #pragma unroll
-    for (int element = 0; element < dP_fragment.num_elements; ++element) {
-      const int local_row = (lane >> 2) + ((element & 2) ? 8 : 0);
-      const int local_value = ((lane & 3) << 1) + (element & 1) +
-          ((element & 4) ? 8 : 0);
-      const int row = row_start + local_row;
-      const int value = value_start + local_value;
-      const int token = chunk_id * kChunk + row;
-      const int64_t input = input_vector_index(b, token, h, value);
-      const float dP_value = dP_fragment.x[element];
-      const float beta_row = beta[static_cast<int64_t>(n) * kChunk + row];
-      dv[input] = __float2bfloat16_rn(beta_row * dP_value);
-      const float contribution =
-          dP_value * __bfloat162float(v[input]);
-      if (element & 2) {
-        beta_upper += contribution;
-      } else {
-        beta_lower += contribution;
+      for (int column_tile = 0; column_tile < 4; ++column_tile) {
+        MatrixBCol p_fragment;
+        wmma::load_matrix_sync(
+            p_fragment,
+            P + (static_cast<int64_t>(local_n) * kChunk +
+                 column_tile * kStrip) * kDim + value_start,
+            kDim);
+        wmma::mma_sync(
+            local_adjoint[column_tile], dz_fragment, p_fragment,
+            local_adjoint[column_tile]);
       }
     }
+  } else {
+    // Helper warps produce dP = T^T dZ, dv, and the initial dbeta while their
+    // paired owner warps form the local adjoint.
+    for (int value_start = 0; value_start < kDim; value_start += kStrip) {
+      Accumulator dP_fragment;
+      wmma::fill_fragment(dP_fragment, 0.0f);
+      for (int inner_start = 0; inner_start < kChunk;
+           inner_start += kStrip) {
+        MatrixACol t_fragment;
+        MatrixBRow dz_inner_fragment;
+        wmma::load_matrix_sync(
+            t_fragment, T + matrix_base + inner_start * kChunk + row_start,
+            kChunk);
+        wmma::load_matrix_sync(
+            dz_inner_fragment,
+            dZ + (static_cast<int64_t>(local_n) * kChunk + inner_start) *
+                kDim + value_start,
+            kDim);
+        wmma::mma_sync(
+            dP_fragment, t_fragment, dz_inner_fragment, dP_fragment);
+      }
+      // For the fixed SM121 m16n16 accumulator layout, each four-lane subgroup
+      // owns two rows and all sixteen columns. Consume dP directly from the
+      // fragment instead of round-tripping it through shared memory and two CTA
+      // barriers. Each matrix element has exactly one lane/element owner.
+      float beta_lower = 0.0f;
+      float beta_upper = 0.0f;
 #pragma unroll
-    for (int offset = 2; offset > 0; offset >>= 1) {
-      beta_lower += __shfl_down_sync(0xffffffffu, beta_lower, offset, 4);
-      beta_upper += __shfl_down_sync(0xffffffffu, beta_upper, offset, 4);
-    }
-    if ((lane & 3) == 0) {
-      const int local_row = lane >> 2;
-      const int lower_row = row_start + local_row;
-      const int upper_row = lower_row + 8;
-      const int64_t lower_index =
-          static_cast<int64_t>(local_n) * kChunk + lower_row;
-      const int64_t upper_index =
-          static_cast<int64_t>(local_n) * kChunk + upper_row;
-      if (value_start == 0) {
-        dbeta[lower_index] = beta_lower;
-        dbeta[upper_index] = beta_upper;
-      } else {
-        dbeta[lower_index] += beta_lower;
-        dbeta[upper_index] += beta_upper;
+      for (int element = 0; element < dP_fragment.num_elements; ++element) {
+        const int local_row = (lane >> 2) + ((element & 2) ? 8 : 0);
+        const int local_value = ((lane & 3) << 1) + (element & 1) +
+            ((element & 4) ? 8 : 0);
+        const int row = row_start + local_row;
+        const int value = value_start + local_value;
+        const int token = chunk_id * kChunk + row;
+        const int64_t input = input_vector_index(b, token, h, value);
+        const float dP_value = dP_fragment.x[element];
+        const float beta_row = beta[static_cast<int64_t>(n) * kChunk + row];
+        dv[input] = __float2bfloat16_rn(beta_row * dP_value);
+        const float contribution =
+            dP_value * __bfloat162float(v[input]);
+        if (element & 2) {
+          beta_upper += contribution;
+        } else {
+          beta_lower += contribution;
+        }
+      }
+#pragma unroll
+      for (int offset = 2; offset > 0; offset >>= 1) {
+        beta_lower += __shfl_down_sync(0xffffffffu, beta_lower, offset, 4);
+        beta_upper += __shfl_down_sync(0xffffffffu, beta_upper, offset, 4);
+      }
+      if ((lane & 3) == 0) {
+        const int local_row = lane >> 2;
+        const int lower_row = row_start + local_row;
+        const int upper_row = lower_row + 8;
+        const int64_t lower_index =
+            static_cast<int64_t>(local_n) * kChunk + lower_row;
+        const int64_t upper_index =
+            static_cast<int64_t>(local_n) * kChunk + upper_row;
+        if (value_start == 0) {
+          dbeta[lower_index] = beta_lower;
+          dbeta[upper_index] = beta_upper;
+        } else {
+          dbeta[lower_index] += beta_lower;
+          dbeta[upper_index] += beta_upper;
+        }
       }
     }
+  }
+
+  __syncthreads();
+  if (warp >= 4) {
+    return;
   }
 
   // Key strips form all boundary-state products. dW is negated into BF16
@@ -2620,10 +2633,10 @@ __global__ void nanochat_kda_wy_backward_complete_four_warp_vjp_c64_kernel(
     wmma::store_matrix_sync(
         result + 2 * kStripElements + row_start * kStrip,
         dW_fragment, kStrip, wmma::mem_row_major);
-    __syncthreads();
+    __barrier_sync_count(1, 128);
 
     for (int index = threadIdx.x; index < kStripElements;
-         index += blockDim.x) {
+         index += 128) {
       const int row = index / kStrip;
       const int key = key_start + index % kStrip;
       const int64_t local =
@@ -2643,7 +2656,7 @@ __global__ void nanochat_kda_wy_backward_complete_four_warp_vjp_c64_kernel(
       left[index] = __float2bfloat16_rn(
           -result[2 * kStripElements + index]);
     }
-    __syncthreads();
+    __barrier_sync_count(1, 128);
 
     MatrixARow dw_operand;
     wmma::load_matrix_sync(dw_operand, left + row_start * kStrip, kStrip);
@@ -2719,7 +2732,7 @@ __global__ void nanochat_kda_wy_backward_complete_four_warp_vjp_c64_kernel(
 
     // The end-prefix reduction updates row 63 from warp 0, so retain this
     // barrier until every owning warp has completed its direct dQ update.
-    __syncthreads();
+    __barrier_sync_count(1, 128);
 
     if (threadIdx.x < kStrip) {
       const int key = key_start + threadIdx.x;
@@ -2740,7 +2753,7 @@ __global__ void nanochat_kda_wy_backward_complete_four_warp_vjp_c64_kernel(
           kDim + key;
       dprefix[end_local] += end_contribution;
     }
-    __syncthreads();
+    __barrier_sync_count(1, 128);
   }
 
   // Complete dM = -T^T (dZ P^T + dW Q^T) T^T. The required dM output is
@@ -2752,12 +2765,12 @@ __global__ void nanochat_kda_wy_backward_complete_four_warp_vjp_c64_kernel(
         result + row_start * kChunk + column_tile * kStrip,
         local_adjoint[column_tile], kChunk, wmma::mem_row_major);
   }
-  __syncthreads();
+  __barrier_sync_count(1, 128);
   for (int index = threadIdx.x; index < kMatrixElements;
-       index += blockDim.x) {
+       index += 128) {
     left[index] = __float2bfloat16_rn(result[index]);
   }
-  __syncthreads();
+  __barrier_sync_count(1, 128);
 
 #pragma unroll
   for (int column_tile = 0; column_tile < 4; ++column_tile) {
@@ -2780,12 +2793,12 @@ __global__ void nanochat_kda_wy_backward_complete_four_warp_vjp_c64_kernel(
         dM + matrix_base + row_start * kChunk + column_tile * kStrip,
         transformed, kChunk, wmma::mem_row_major);
   }
-  __syncthreads();
+  __barrier_sync_count(1, 128);
   for (int index = threadIdx.x; index < kMatrixElements;
-       index += blockDim.x) {
+       index += 128) {
     left[index] = __float2bfloat16_rn(dM[matrix_base + index]);
   }
-  __syncthreads();
+  __barrier_sync_count(1, 128);
 
 #pragma unroll
   for (int column_tile = 0; column_tile < 4; ++column_tile) {
@@ -2809,9 +2822,9 @@ __global__ void nanochat_kda_wy_backward_complete_four_warp_vjp_c64_kernel(
         result + row_start * kChunk + column_tile * kStrip,
         transformed, kChunk, wmma::mem_row_major);
   }
-  __syncthreads();
+  __barrier_sync_count(1, 128);
   for (int index = threadIdx.x; index < kMatrixElements;
-       index += blockDim.x) {
+       index += 128) {
     dM[matrix_base + index] = -result[index];
   }
 }
@@ -3678,7 +3691,7 @@ nanochat_kda_chunk_wy_backward_c64(
     at::Tensor dprefix_group = at::empty_like(P_group);
     at::Tensor dbeta_group = at::empty({kGroupRows, kChunk}, fp32);
     nanochat_kda_wy_backward_complete_four_warp_vjp_c64_kernel<<<
-        kGroupRows, 128, 0, stream>>>(
+        kGroupRows, 256, 0, stream>>>(
         reinterpret_cast<const __nv_bfloat16*>(v.data_ptr<at::BFloat16>()),
         qbar.data_ptr<float>(), khat.data_ptr<float>(),
         prefix_g.data_ptr<float>(), beta.data_ptr<float>(),
