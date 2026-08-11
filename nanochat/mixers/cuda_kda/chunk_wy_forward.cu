@@ -223,14 +223,15 @@ __global__ void nanochat_kda_wy_preprocess_build_solve_wmma_c64_kernel(
     __syncthreads();
 
     const int local_destination = row * kDim + d;
-    const int64_t destination = chunk_vector_index(n, row, d);
+    const int64_t grouped_destination =
+        chunk_vector_index(grouped_n, row, d);
     const float normalized_q =
         (q_value * preprocess->q_inverse[row_in_batch]) * scale;
     const float normalized_k =
         k_value * preprocess->k_inverse[row_in_batch];
     const float gate_input = raw_gate_value + dt_bias[h * kDim + d];
-    retained_qbar[destination] = __float2bfloat16_rn(normalized_q);
-    retained_khat[destination] = __float2bfloat16_rn(normalized_k);
+    retained_qbar[grouped_destination] = __float2bfloat16_rn(normalized_q);
+    retained_khat[grouped_destination] = __float2bfloat16_rn(normalized_k);
     retained_P[chunk_vector_index(grouped_n, row, d)] =
         __float2bfloat16_rn(
             preprocess->beta_value[row_in_batch] * v_value);
@@ -1621,7 +1622,7 @@ at::Tensor nanochat_kda_chunk_wy_forward_c64(
       static_cast<int64_t>(kChunkRows) * kChunk;
   // The visible tensor is a contiguous prefix. Its backing is, in order:
   // visible BF16 output | FP32 checkpoints | grouped BF16 A/T/W/Q |
-  // recurrence-major BF16 qbar/khat | grouped BF16 P |
+  // grouped BF16 qbar/khat/P |
   // recurrence-major FP16 prefix | recurrence-major FP32 beta/qinv/kinv.
   at::Tensor output_storage = at::empty(
       {kOutputElements + 2 * kCheckpointElements +

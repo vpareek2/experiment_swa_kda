@@ -1244,10 +1244,10 @@ __global__ void nanochat_kda_wy_backward_group_u_pack_qgkg_bf16_c64_kernel(
     const float end_g =
         __half2float(prefix_g[chunk_vector_index(n, kChunk - 1, key)]);
     qg[index] =
-        __float2bfloat16_rn(__bfloat162float(qbar[source]) * expf(g));
+        __float2bfloat16_rn(__bfloat162float(qbar[index]) * expf(g));
     const __nv_bfloat16 kg_value =
         __float2bfloat16_rn(
-            __bfloat162float(khat[source]) * expf(end_g - g));
+            __bfloat162float(khat[index]) * expf(end_g - g));
     kg[index] = kg_value;
     kg_transposed[
         (static_cast<int64_t>(local_n) * kDim + key) * kChunk + row] =
@@ -3091,8 +3091,8 @@ __global__ void nanochat_kda_wy_backward_complete_four_warp_vjp_c64_kernel(
             __half2float(prefix_g[chunk_vector_index(n, kChunk - 1, key)]);
         const float dR_value = consumed[index];
         const float dE_value = consumed[kStripElements + index];
-        const float R_value = __bfloat162float(qbar[source]) * expf(g);
-        const float E_value = __bfloat162float(khat[source]) * expf(end_g - g);
+        const float R_value = __bfloat162float(qbar[local]) * expf(g);
+        const float E_value = __bfloat162float(khat[local]) * expf(end_g - g);
         dqbar[local] = dR_value * expf(g);
         dkhat[local] = dE_value * expf(end_g - g);
         dprefix[local] = dR_value * R_value - dE_value * E_value;
@@ -3153,9 +3153,9 @@ __global__ void nanochat_kda_wy_backward_complete_four_warp_vjp_c64_kernel(
             beta[static_cast<int64_t>(n) * kChunk + row];
         dkhat[local] += dQ_value * beta_row * exp_g;
         dprefix[local] += dQ_value * beta_row * exp_g *
-            __bfloat162float(khat[source]);
+            __bfloat162float(khat[local]);
         const float contribution =
-            dQ_value * exp_g * __bfloat162float(khat[source]);
+            dQ_value * exp_g * __bfloat162float(khat[local]);
         if (element & 2) {
           beta_upper += contribution;
         } else {
@@ -3187,10 +3187,13 @@ __global__ void nanochat_kda_wy_backward_complete_four_warp_vjp_c64_kernel(
         for (int row_index = 0; row_index < kChunk; ++row_index) {
           const int index = row_index * kStrip + threadIdx.x;
           const int64_t source = chunk_vector_index(n, row_index, key);
+          const int64_t group_source =
+              chunk_vector_index(local_n, row_index, key);
           const float end_g =
               __half2float(prefix_g[chunk_vector_index(n, kChunk - 1, key)]);
           const float E_value =
-              __bfloat162float(khat[source]) * expf(end_g - __half2float(prefix_g[source]));
+              __bfloat162float(khat[group_source]) *
+              expf(end_g - __half2float(prefix_g[source]));
           end_contribution += consumed[kStripElements + index] * E_value;
         }
         const int64_t end_local =
@@ -3382,12 +3385,19 @@ __global__ void nanochat_kda_wy_backward_colored_pair_wmma_c64_kernel(
     const int source_row = source_start + local_row;
     const int64_t target = chunk_vector_index(n, target_row, d);
     const int64_t source = chunk_vector_index(n, source_row, d);
+    const int64_t group_target =
+        chunk_vector_index(local_n, target_row, d);
+    const int64_t group_source =
+        chunk_vector_index(local_n, source_row, d);
     const float center = __half2float(prefix_g[chunk_vector_index(n, center_row, d)]);
     const float target_factor = expf(__half2float(prefix_g[target]) - center);
-    const float query_left = __bfloat162float(qbar[target]) * target_factor;
-    const float key_left = __bfloat162float(khat[target]) * target_factor;
+    const float query_left =
+        __bfloat162float(qbar[group_target]) * target_factor;
+    const float key_left =
+        __bfloat162float(khat[group_target]) * target_factor;
     const float right_value =
-        __bfloat162float(khat[source]) * expf(center - __half2float(prefix_g[source]));
+        __bfloat162float(khat[group_source]) *
+        expf(center - __half2float(prefix_g[source]));
     shared_left[index] = __float2bfloat16_rn(query_left);
     shared_left[kMatrixTile * kDim + index] =
         __float2bfloat16_rn(key_left);
@@ -3498,25 +3508,28 @@ __global__ void nanochat_kda_wy_backward_colored_pair_wmma_c64_kernel(
     const int source_row = source_start + local_row;
     const int64_t target = chunk_vector_index(n, target_row, d);
     const int64_t source = chunk_vector_index(n, source_row, d);
+    const int64_t target_local =
+        chunk_vector_index(local_n, target_row, d);
+    const int64_t source_local =
+        chunk_vector_index(local_n, source_row, d);
     const float center = __half2float(prefix_g[chunk_vector_index(n, center_row, d)]);
     const float target_factor = expf(__half2float(prefix_g[target]) - center);
-    const float query_left = __bfloat162float(qbar[target]) * target_factor;
-    const float key_left = __bfloat162float(khat[target]) * target_factor;
+    const float query_left =
+        __bfloat162float(qbar[target_local]) * target_factor;
+    const float key_left =
+        __bfloat162float(khat[target_local]) * target_factor;
     const float query_gradient = shared_target_gradient[index];
     const float target_key_gradient =
         shared_target_gradient[kMatrixTile * kDim + index];
-    const int64_t target_local =
-        chunk_vector_index(local_n, target_row, d);
     dqbar[target_local] += query_gradient * target_factor;
     dkhat[target_local] += target_key_gradient * target_factor;
     dprefix[target_local] +=
         query_gradient * query_left + target_key_gradient * key_left;
 
     const float source_factor = expf(center - __half2float(prefix_g[source]));
-    const float right_value = __bfloat162float(khat[source]) * source_factor;
+    const float right_value =
+        __bfloat162float(khat[source_local]) * source_factor;
     const float source_key_gradient = shared_source_gradient[index];
-    const int64_t source_local =
-        chunk_vector_index(local_n, source_row, d);
     dkhat[source_local] += source_key_gradient * source_factor;
     dprefix[source_local] -= source_key_gradient * right_value;
   }
@@ -3826,11 +3839,11 @@ __global__ void nanochat_kda_wy_backward_finalize_c64_kernel(
   __shared__ float k_dot;
 
   const float a = expf(A_log[h]);
-  const int64_t offset = chunk_vector_index(n, row, d);
   const int64_t local_offset = chunk_vector_index(local_n, row, d);
-  const float normalized_q = __bfloat162float(qbar[offset]) / scale;
+  const float normalized_q = __bfloat162float(qbar[local_offset]) / scale;
   float q_term = dqbar[local_offset] * normalized_q;
-  float k_term = dkhat[local_offset] * __bfloat162float(khat[offset]);
+  float k_term =
+      dkhat[local_offset] * __bfloat162float(khat[local_offset]);
   for (int lane_offset = 16; lane_offset > 0; lane_offset >>= 1) {
     q_term += __shfl_down_sync(0xffffffffu, q_term, lane_offset);
     k_term += __shfl_down_sync(0xffffffffu, k_term, lane_offset);
@@ -3862,7 +3875,8 @@ __global__ void nanochat_kda_wy_backward_finalize_c64_kernel(
       (dqbar[local_offset] - normalized_q * q_dot));
   dk[input] = __float2bfloat16_rn(
       k_inverse[static_cast<int64_t>(n) * kChunk + row] *
-      (dkhat[local_offset] - __bfloat162float(khat[offset]) * k_dot));
+      (dkhat[local_offset] -
+       __bfloat162float(khat[local_offset]) * k_dot));
 
   const float biased_gate = __bfloat162float(raw_gate[input]) +
       dt_bias[h * kDim + d];
@@ -4011,7 +4025,7 @@ nanochat_kda_chunk_wy_backward_c64(
   static_assert(kRetainedVectorElements % 2 == 0);
   // The visible tensor is a contiguous prefix. Its backing is, in order:
   // visible BF16 output | FP32 checkpoints | grouped BF16 A/T/W/Q |
-  // recurrence-major BF16 qbar/khat | grouped BF16 P |
+  // grouped BF16 qbar/khat/P |
   // recurrence-major FP16 prefix | recurrence-major FP32 beta/qinv/kinv.
   const __nv_bfloat16* output_sidecar =
       reinterpret_cast<const __nv_bfloat16*>(
@@ -4077,6 +4091,10 @@ nanochat_kda_chunk_wy_backward_c64(
         retained_P + static_cast<int64_t>(group_id) * kGroupVectorElements;
     const __nv_bfloat16* Q_group =
         retained_Q + static_cast<int64_t>(group_id) * kGroupVectorElements;
+    const __nv_bfloat16* qbar_group =
+        retained_qbar + static_cast<int64_t>(group_id) * kGroupVectorElements;
+    const __nv_bfloat16* khat_group =
+        retained_khat + static_cast<int64_t>(group_id) * kGroupVectorElements;
 #if defined(NANOCHAT_DISABLE_SELECTIVE_PTX)
     at::Tensor U_group = at::empty(
         {kGroupRows, kChunk, kDim}, fp32);
@@ -4107,7 +4125,7 @@ nanochat_kda_chunk_wy_backward_c64(
         T_group, P_group, reinterpret_cast<__nv_bfloat16*>(
             U_group.data_ptr<at::BFloat16>()),
 #endif
-        retained_qbar, retained_khat, retained_prefix,
+        qbar_group, khat_group, retained_prefix,
         reinterpret_cast<__nv_bfloat16*>(
             qg_group_bf16.data_ptr<at::BFloat16>()),
         reinterpret_cast<__nv_bfloat16*>(
@@ -4215,7 +4233,7 @@ nanochat_kda_chunk_wy_backward_c64(
     nanochat_kda_wy_backward_complete_four_warp_vjp_c64_kernel<<<
         kGroupRows, 256, 0, stream>>>(
         reinterpret_cast<const __nv_bfloat16*>(v.data_ptr<at::BFloat16>()),
-        retained_qbar, retained_khat,
+        qbar_group, khat_group,
         retained_prefix, retained_beta,
         P_group, Q_group, T_group,
         reinterpret_cast<const __nv_bfloat16*>(
@@ -4242,7 +4260,7 @@ nanochat_kda_chunk_wy_backward_c64(
       const int pair_count = color == 0 ? 4 : 2;
       nanochat_kda_wy_backward_colored_pair_wmma_c64_kernel<<<
           kGroupRows * pair_count, 256, 0, stream>>>(
-          retained_qbar, retained_khat,
+          qbar_group, khat_group,
           retained_prefix, retained_beta,
           dA_group.data_ptr<float>(), dT_group.data_ptr<float>(),
           dqbar_group.data_ptr<float>(), dkhat_group.data_ptr<float>(),
@@ -4263,7 +4281,7 @@ nanochat_kda_chunk_wy_backward_c64(
             beta_logits.data_ptr<at::BFloat16>()),
         A_log.data_ptr<float>(), dt_bias.data_ptr<float>(),
         retained_q_inverse, retained_k_inverse,
-        retained_qbar, retained_khat, retained_beta,
+        qbar_group, khat_group, retained_beta,
         dqbar_group.data_ptr<float>(), dkhat_group.data_ptr<float>(),
         dbeta_group.data_ptr<float>(), dprefix_group.data_ptr<float>(),
         reinterpret_cast<__nv_bfloat16*>(dq.data_ptr<at::BFloat16>()),
