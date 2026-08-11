@@ -4,7 +4,8 @@ Shared project memory for humans and research agents. The implementation is now
 a PyTorch nanochat fork; SWA means sliding-window attention. The correctness-first
 K3 KDA mixer and its FLA Triton backend are integrated on GB10/SM121. Controlled
 memory-probe and discovery experiments remain outstanding, so no architecture
-quality or end-to-end efficiency result is claimed yet.
+quality result is claimed yet. The CUDA-ownership performance stream currently
+retains attempt255 at 41,922 tok/s against the fixed 43,680 tok/s FLA reference.
 
 ## Active streams
 

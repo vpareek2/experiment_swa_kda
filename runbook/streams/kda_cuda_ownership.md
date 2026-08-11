@@ -15360,3 +15360,32 @@ nsys profile --trace=cuda,nvtx,osrt --sample=none --cpuctxsw=none <matched synch
 **Next**
 
 - Preserve attempt231 accepted; close token-parallel scalar materialization because extra scalar traffic and consumer register pressure dominate.
+
+## 2026-08-11 [agent] Attempts 240–255 and accepted compact retained-preprocess baseline
+
+### Context
+Continued from accepted attempt231 toward the fixed 43,680 tok/s FLA training reference. All candidates remained within the CUDA mixer boundary and FLA was used only as an offline equation/scheduling reference. Independent random upstream gradients, attempt218’s explicit-zero oracle, selective-PTX fallback parity, producer completeness, and the frozen matched gates remained mandatory.
+
+### Commands
+- Built and profiled attempts240–255 in isolated Git worktrees and caches with the protected candidate checker and bounded Nsys (`--sample=none --cpuctxsw=none`).
+- Ran the complete sanitizer set for accepted attempt255 through `research cuda-candidate-check --sanitizers`.
+- Ran matched Level 1 twice for attempt255 because candidate-first short-shape results were order-sensitive; the baseline-first retest was authoritative.
+- Ran ordered Level 2 baseline-first from the retest plan: attempt231 followed by attempt255.
+
+### Artifacts
+- Append-only attempt records: `runs/kda-cuda-development/attempt-index.jsonl`.
+- Attempt255 evidence: `runs/kda-cuda-development/attempt-00255-swap-retained-p-for-prefix-evidence/`.
+- Attempt255 Level 1 retest: `runs/kda-cuda-development/attempt-00255-swap-retained-p-for-prefix-level1-retest/`.
+- Attempt255 Level 2: `runs/kda-cuda-development/attempt-00255-swap-retained-p-for-prefix-level2/`.
+- Attempt255 commit: `d55821c23ae0265f9f511e484ef464264ac670db` on `kda-cuda/swap-retained-p-for-prefix-255`.
+
+### Result
+- Attempts240–244 were correct but profile/Level-2 rejected until the stacked attempt245 (`b1796308`) cleared Level 1 and ordered Level 2 at 40,629 -> 41,657 tok/s (+2.530%).
+- Attempts246–254 were preserved and rejected. Full kg and retained U exceeded memory and/or regressed; convolution channel/time/block changes and saved derivatives regressed; full retained preprocess surfaces saved time but exceeded the frozen memory limit; compact half-prefix attempt253 still exceeded the production operator memory gate.
+- Attempt255 removed retained BF16 P and rebuilt grouped P inside the compact backward norm reconstruction while retaining half prefix and exact scalar surfaces. It remained deterministic and selective/fallback bitwise equivalent. Protected checker and memcheck/racecheck/synccheck/initcheck all completed.
+- Attempt255 matched operator profile was about 4.784 ms, down about 0.282 ms from attempt245 in a stable paired capture. Authoritative Level 1 baseline-first retest advanced: T4096 forward+backward +16.153%, T1024 regression 3.922%, other important shapes within 5%, candidate peak 178,440,192 B.
+- Ordered Level 2 was 40,957 -> 41,922 tok/s (+2.356%); peak 5,668.221 MiB versus 5,558.908 MiB (1.01967x). Attempt255 is the new accepted candidate.
+- No quality or statistical confirmation was run. The accepted result remains 1,758 tok/s (4.19%) below 43,680 tok/s.
+
+### Next
+Continue from `d55821c`, not rejected branches. Target a broad forward WY product/build path or a genuinely new full-tile VJP schedule; small convolution tiling and retained full-sequence surfaces are closed. Require fresh random-dO comparison, fallback parity, resource inspection, sanitizer gates, matched Level 1, and ordered Level 2 before replacing attempt255.
