@@ -15446,3 +15446,29 @@ Attempt270 was exact and passed Level 1 (+20.826% T4096 forward+backward). It sa
 
 ### Next
 Retain attempt266. Any direct FLA-program-shape port must preserve the separate intra/local pullback and demonstrate a trainer-scale gain; do not assume complete+colored can collapse into the single FLA fused symbol.
+
+
+## 2026-08-11 [agent] Attempts271-312 scheduling, activation, graph, and forward-phase campaign
+
+### Context
+Continued from accepted attempt266 (`7a07e5a`) at 42,237 tok/s, with the fixed 43,680 tok/s target still active. The purpose of this block was to test broad scheduling and dataflow changes rather than infer wins from launch counts. Candidate scope remained `nanochat/mixers/cuda_kda/`; no quality or statistical confirmation was run.
+
+### Commands
+Built isolated branches for attempts271-312; ran independent production-shape random-`dO` comparisons, selective-PTX fallback comparisons, resource inspection, protected checker/sanitizers where a candidate advanced, interleaved Nsight Systems profiles, Level 1, and ordered direct trainer blocks. Rechecked the FLA Triton trainer under the current system state with the same seven-step lane. Preserved raw `/tmp` evidence into `runs/kda-cuda-development/attempt-00NNN-raw-evidence/` with SHA-256 manifests and appended the attempt index. Ephemeral CUDA/extension caches only were removed when the filesystem filled; evidence directories were preserved. Attempt290 ends at externally present cleanup commit `fce5268`; this record does not attribute that cleanup commit to the reporting agent.
+
+### Artifacts
+Branches/commits are indexed append-only in `runs/kda-cuda-development/attempt-index.jsonl`. Important durable directories include `attempt-00271-*`, `attempt-00279-*`, `attempt-00282-*`, `attempt-00290-*`, `attempt-00292-*`, `attempt-00296-*`, `attempt-00297-current-trainer-profile`, `attempt-00301-*`, `attempt-00308-vs-266-direct-level2`, and per-attempt raw-evidence manifests through attempt312. Attempt282's final sanitizer artifact is `/tmp/kda-attempt282-sanitizers-final/summary.json`; attempt301's is `/tmp/kda-attempt301-sanitizers/summary.json`.
+
+### Result
+CUDA Graph attempts271-276 were rejected: same-pointer replay could improve a micro-call, but exact-pointer churn/capture regressed real training, including attempt274's collapse to 20,883 tok/s. Attempts277-283 produced exact scheduling scaffolds (group-U/qgkg interleaving, early restored-k publication, and fused preprocess/build), but attempt282 reached only 41,913-41,970 tok/s in its original direct retests and remained below attempt266's retained absolute result. Attempt282 later completed all four sanitizers and remains a valid scaffold, not the accepted throughput baseline.
+
+Attempts284-300 closed retained-Z/Q swaps, approximate Q-sidecar removal, BF16 group U, finalize/parameter interleaving, cluster fusion/launch-bounds, memset folding, reverse allocation rearrangements, host-only O3, one-warp/cluster forward state, and several exponential/preprocess variants. Attempt295 was invalid at production shape because remote-DSM `ldmatrix` raised an illegal instruction. Attempt296 saved exactly 36 MiB in the six-layer trainer but was throughput-neutral. Attempt299 was invalid because FP32 `exp(g)` underflow made the ratio path `0/0`; direct safe exponent differences remain mandatory.
+
+Attempt301 (`1747498`) reduced monolithic preprocess barriers with an exact 1024-thread/eight-row CTA. It was bitwise attempt282/fallback, used REG48/STACK0/LOCAL0, and passed checker plus all four sanitizers. It passed Level 1 versus accepted266 (+5.249%) but failed incremental Level 1 versus attempt282 (0.974% and 1.679% retests) and failed the direct accepted266 trainer gate: the three paired deltas had median +0.759%, with normal candidate medians 43,036-43,095 tok/s. It is therefore preserved but rejected.
+
+Attempt306 (`6a67021`) specialized width-four convolution forward with a time-four tile and removed runtime index divisions, improving the isolated kernel from about 0.0551 to 0.0285 ms bitwise. Attempt308 stacked attempts301/306 and produced ordered candidate medians 43,125, 43,215, and 43,145 tok/s versus accepted266 medians 42,817, 42,689, and 42,741; paired median gain was only +0.945%, below the 2% trainer gate. A current matched FLA recheck was 43,183 tok/s, so attempt308 was within 0.088% of that contemporaneous reference but still below the fixed 43,680 target and is not accepted. Attempts309-312 (split output ownership, warp dD/finalize reductions, and sixteen-row preprocess) were exact/tolerant mechanical variants but too small or regressive.
+
+The current matched trainer profile measured attempt282 at 42,540 and FLA at 42,913 tok/s, a 0.878% wall-time gap; project kernel sum was only 4.038 ms/step slower. Phase attribution showed the remaining project-owned raw gap concentrated in KDA forward local production, while backward and convolution largely canceled. Current hardware/system throughput is lower than the historical 43,680 FLA capture, but the fixed target is unchanged.
+
+### Next
+Retain attempt266 as the accepted audited baseline until a candidate clears both the direct >=2% trainer gate and the fixed 43,680 tok/s target. Preserve attempt301, attempt306, and the tiny exact attempt310/311 reductions only as scaffolds. Do not revisit exact-pointer graphs, graph capture, retained Q/Z swaps, cluster DSM `ldmatrix`, host allocator/O3, launch-only memset changes, or ratio-factorized exponent paths. The next candidate must remove at least about 9-10 ms/step from the current 43.1k stack, most plausibly through a new project-owned CUDA program shape for forward A/T/U/W production rather than another barrier, allocation, or launch microvariant.
