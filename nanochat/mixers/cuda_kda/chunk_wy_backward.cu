@@ -2445,8 +2445,21 @@ __global__ void nanochat_kda_wy_backward_complete_four_warp_vjp_c64_kernel(
   constexpr int kStrip = kMatrixTile;
   constexpr int kStripElements = kChunk * kStrip;
   constexpr int kMatrixElements = kChunk * kChunk;
-  __shared__ __align__(16) __nv_bfloat16 left[kMatrixElements];
-  __shared__ float result[kMatrixElements];
+  struct KeyPipelineStorage {
+    float products[2][3 * kStripElements];
+    __nv_bfloat16 left[kStripElements];
+  };
+  struct FinalTransformStorage {
+    __nv_bfloat16 left[kMatrixElements];
+    float result[kMatrixElements];
+  };
+  union SharedStorage {
+    KeyPipelineStorage key;
+    FinalTransformStorage final;
+  };
+  __shared__ __align__(16) SharedStorage shared;
+  __nv_bfloat16* left = shared.final.left;
+  float* result = shared.final.result;
 
   using MatrixARow = wmma::fragment<
       wmma::matrix_a, kStrip, kStrip, kStrip,
@@ -2570,190 +2583,211 @@ __global__ void nanochat_kda_wy_backward_complete_four_warp_vjp_c64_kernel(
     }
   }
 
+  // Publish the completed dZ P^T / dP split before repurposing all helper
+  // warps as key-product producers.
   __syncthreads();
-  if (warp >= 4) {
-    return;
-  }
 
-  // Key strips form all boundary-state products. dW is negated into BF16
-  // scratch, contributes dW Q^T to the retained adjoint, and feeds
-  // dQ = T^T dW without ever reaching global memory.
-  for (int key_start = 0; key_start < kDim; key_start += kStrip) {
-    Accumulator dR_fragment;
-    Accumulator dE_fragment;
-    Accumulator dW_fragment;
-    wmma::fill_fragment(dR_fragment, 0.0f);
-    wmma::fill_fragment(dE_fragment, 0.0f);
-    wmma::fill_fragment(dW_fragment, 0.0f);
+  // Warm key strip zero, then pipeline each following strip: helpers 4--7
+  // produce dR/dE/dW for the next strip while owners 0--3 consume the prior
+  // buffer. The full-CTA boundary publishes that buffer and makes the other
+  // one reusable; owner-only dependencies retain their 128-thread barrier.
+  constexpr int kKeyStrips = kDim / kStrip;
+  for (int pipeline_stage = 0; pipeline_stage <= kKeyStrips;
+       ++pipeline_stage) {
+    if (warp >= 4 && pipeline_stage < kKeyStrips) {
+      const int produced_key_start = pipeline_stage * kStrip;
+      float* produced =
+          shared.key.products[pipeline_stage & 1];
+      Accumulator dR_fragment;
+      Accumulator dE_fragment;
+      Accumulator dW_fragment;
+      wmma::fill_fragment(dR_fragment, 0.0f);
+      wmma::fill_fragment(dE_fragment, 0.0f);
+      wmma::fill_fragment(dW_fragment, 0.0f);
 
-    for (int value_start = 0; value_start < kDim; value_start += kStrip) {
-      MatrixARow do_operand;
-      MatrixARow z_operand;
-      MatrixARow dz_operand;
-      MatrixBCol h_operand;
-      MatrixBCol dh_operand;
-      wmma::load_matrix_sync(
-          do_operand,
-          dO + input_vector_index(
-              b, chunk_id * kChunk + row_start, h, value_start),
-          kHeads * kDim);
-      wmma::load_matrix_sync(
-          z_operand,
-          z + (static_cast<int64_t>(local_n) * kChunk + row_start) *
-              kDim + value_start,
-          kDim);
-      wmma::load_matrix_sync(
-          dz_operand,
-          dZ + (static_cast<int64_t>(local_n) * kChunk + row_start) *
-              kDim + value_start,
-          kDim);
-      wmma::load_matrix_sync(
-          h_operand,
-          state_history +
-              (static_cast<int64_t>(local_n) * kDim + key_start) *
-                  kDim + value_start,
-          kDim);
-      wmma::load_matrix_sync(
-          dh_operand,
-          dstate_history +
-              (static_cast<int64_t>(local_n) * kDim + key_start) *
-                  kDim + value_start,
-          kDim);
-      wmma::mma_sync(dR_fragment, do_operand, h_operand, dR_fragment);
-      wmma::mma_sync(dE_fragment, z_operand, dh_operand, dE_fragment);
-      wmma::mma_sync(dW_fragment, dz_operand, h_operand, dW_fragment);
-    }
-
-    wmma::store_matrix_sync(
-        result + row_start * kStrip, dR_fragment, kStrip,
-        wmma::mem_row_major);
-    wmma::store_matrix_sync(
-        result + kStripElements + row_start * kStrip,
-        dE_fragment, kStrip, wmma::mem_row_major);
-    wmma::store_matrix_sync(
-        result + 2 * kStripElements + row_start * kStrip,
-        dW_fragment, kStrip, wmma::mem_row_major);
-    __barrier_sync_count(1, 128);
-
-    for (int index = threadIdx.x; index < kStripElements;
-         index += 128) {
-      const int row = index / kStrip;
-      const int key = key_start + index % kStrip;
-      const int64_t local =
-          (static_cast<int64_t>(local_n) * kChunk + row) * kDim + key;
-      const int64_t source = chunk_vector_index(n, row, key);
-      const float g = prefix_g[source];
-      const float end_g =
-          prefix_g[chunk_vector_index(n, kChunk - 1, key)];
-      const float dR_value = result[index];
-      const float dE_value = result[kStripElements + index];
-      const float R_value = qbar[source] * expf(g);
-      const float E_value = khat[source] * expf(end_g - g);
-      dqbar[local] = dR_value * expf(g);
-      dkhat[local] = dE_value * expf(end_g - g);
-      dprefix[local] =
-          dR_value * R_value - dE_value * E_value;
-      left[index] = __float2bfloat16_rn(
-          -result[2 * kStripElements + index]);
-    }
-    __barrier_sync_count(1, 128);
-
-    MatrixARow dw_operand;
-    wmma::load_matrix_sync(dw_operand, left + row_start * kStrip, kStrip);
-#pragma unroll
-    for (int column_tile = 0; column_tile < 4; ++column_tile) {
-      MatrixBCol q_operand;
-      wmma::load_matrix_sync(
-          q_operand,
-          Q + (static_cast<int64_t>(local_n) * kChunk +
-               column_tile * kStrip) * kDim + key_start,
-          kDim);
-      wmma::mma_sync(
-          local_adjoint[column_tile], dw_operand, q_operand,
-          local_adjoint[column_tile]);
-    }
-
-    Accumulator dQ_fragment;
-    wmma::fill_fragment(dQ_fragment, 0.0f);
-    for (int inner_start = 0; inner_start < kChunk;
-         inner_start += kStrip) {
-      MatrixACol t_fragment;
-      MatrixBRow dw_inner_fragment;
-      wmma::load_matrix_sync(
-          t_fragment, T + matrix_base + inner_start * kChunk + row_start,
-          kChunk);
-      wmma::load_matrix_sync(
-          dw_inner_fragment, left + inner_start * kStrip, kStrip);
-      wmma::mma_sync(
-          dQ_fragment, t_fragment, dw_inner_fragment, dQ_fragment);
-    }
-
-    // Consume the fixed SM121 accumulator layout in registers. As for dP,
-    // each four-lane subgroup owns two rows and all sixteen columns. This
-    // avoids the dQ shared-memory store/reload and its producer barrier.
-    float beta_lower = 0.0f;
-    float beta_upper = 0.0f;
-#pragma unroll
-    for (int element = 0; element < dQ_fragment.num_elements; ++element) {
-      const int local_row = (lane >> 2) + ((element & 2) ? 8 : 0);
-      const int local_key = ((lane & 3) << 1) + (element & 1) +
-          ((element & 4) ? 8 : 0);
-      const int row = row_start + local_row;
-      const int key = key_start + local_key;
-      const int64_t local =
-          (static_cast<int64_t>(local_n) * kChunk + row) * kDim + key;
-      const int64_t source = chunk_vector_index(n, row, key);
-      const float dQ_value = dQ_fragment.x[element];
-      const float exp_g = expf(prefix_g[source]);
-      const float beta_row = beta[static_cast<int64_t>(n) * kChunk + row];
-      dkhat[local] += dQ_value * beta_row * exp_g;
-      dprefix[local] += dQ_value * beta_row * exp_g * khat[source];
-      const float contribution = dQ_value * exp_g * khat[source];
-      if (element & 2) {
-        beta_upper += contribution;
-      } else {
-        beta_lower += contribution;
+      for (int value_start = 0; value_start < kDim;
+           value_start += kStrip) {
+        MatrixARow do_operand;
+        MatrixARow z_operand;
+        MatrixARow dz_operand;
+        MatrixBCol h_operand;
+        MatrixBCol dh_operand;
+        wmma::load_matrix_sync(
+            do_operand,
+            dO + input_vector_index(
+                b, chunk_id * kChunk + row_start, h, value_start),
+            kHeads * kDim);
+        wmma::load_matrix_sync(
+            z_operand,
+            z + (static_cast<int64_t>(local_n) * kChunk + row_start) *
+                kDim + value_start,
+            kDim);
+        wmma::load_matrix_sync(
+            dz_operand,
+            dZ + (static_cast<int64_t>(local_n) * kChunk + row_start) *
+                kDim + value_start,
+            kDim);
+        wmma::load_matrix_sync(
+            h_operand,
+            state_history +
+                (static_cast<int64_t>(local_n) * kDim +
+                 produced_key_start) * kDim + value_start,
+            kDim);
+        wmma::load_matrix_sync(
+            dh_operand,
+            dstate_history +
+                (static_cast<int64_t>(local_n) * kDim +
+                 produced_key_start) * kDim + value_start,
+            kDim);
+        wmma::mma_sync(dR_fragment, do_operand, h_operand, dR_fragment);
+        wmma::mma_sync(dE_fragment, z_operand, dh_operand, dE_fragment);
+        wmma::mma_sync(dW_fragment, dz_operand, h_operand, dW_fragment);
       }
-    }
-#pragma unroll
-    for (int offset = 2; offset > 0; offset >>= 1) {
-      beta_lower += __shfl_down_sync(0xffffffffu, beta_lower, offset, 4);
-      beta_upper += __shfl_down_sync(0xffffffffu, beta_upper, offset, 4);
-    }
-    if ((lane & 3) == 0) {
-      const int local_row = lane >> 2;
-      const int lower_row = row_start + local_row;
-      const int upper_row = lower_row + 8;
-      dbeta[static_cast<int64_t>(local_n) * kChunk + lower_row] +=
-          beta_lower;
-      dbeta[static_cast<int64_t>(local_n) * kChunk + upper_row] +=
-          beta_upper;
+
+      wmma::store_matrix_sync(
+          produced + row_start * kStrip, dR_fragment, kStrip,
+          wmma::mem_row_major);
+      wmma::store_matrix_sync(
+          produced + kStripElements + row_start * kStrip,
+          dE_fragment, kStrip, wmma::mem_row_major);
+      wmma::store_matrix_sync(
+          produced + 2 * kStripElements + row_start * kStrip,
+          dW_fragment, kStrip, wmma::mem_row_major);
     }
 
-    // The end-prefix reduction updates row 63 from warp 0, so retain this
-    // barrier until every owning warp has completed its direct dQ update.
-    __barrier_sync_count(1, 128);
+    if (warp < 4 && pipeline_stage > 0) {
+      const int key_strip = pipeline_stage - 1;
+      const int key_start = key_strip * kStrip;
+      const float* consumed = shared.key.products[key_strip & 1];
 
-    if (threadIdx.x < kStrip) {
-      const int key = key_start + threadIdx.x;
-      float end_contribution =
-          dD[static_cast<int64_t>(n) * kDim + key] *
-          expf(prefix_g[chunk_vector_index(n, kChunk - 1, key)]);
-      for (int row_index = 0; row_index < kChunk; ++row_index) {
-        const int index = row_index * kStrip + threadIdx.x;
-        const int64_t source = chunk_vector_index(n, row_index, key);
+      for (int index = threadIdx.x; index < kStripElements;
+           index += 128) {
+        const int row = index / kStrip;
+        const int key = key_start + index % kStrip;
+        const int64_t local =
+            (static_cast<int64_t>(local_n) * kChunk + row) * kDim + key;
+        const int64_t source = chunk_vector_index(n, row, key);
+        const float g = prefix_g[source];
         const float end_g =
             prefix_g[chunk_vector_index(n, kChunk - 1, key)];
-        const float E_value =
-            khat[source] * expf(end_g - prefix_g[source]);
-        end_contribution += result[kStripElements + index] * E_value;
+        const float dR_value = consumed[index];
+        const float dE_value = consumed[kStripElements + index];
+        const float R_value = qbar[source] * expf(g);
+        const float E_value = khat[source] * expf(end_g - g);
+        dqbar[local] = dR_value * expf(g);
+        dkhat[local] = dE_value * expf(end_g - g);
+        dprefix[local] = dR_value * R_value - dE_value * E_value;
+        shared.key.left[index] = __float2bfloat16_rn(
+            -consumed[2 * kStripElements + index]);
       }
-      const int64_t end_local =
-          (static_cast<int64_t>(local_n) * kChunk + kChunk - 1) *
-          kDim + key;
-      dprefix[end_local] += end_contribution;
+      __barrier_sync_count(1, 128);
+
+      MatrixARow dw_operand;
+      wmma::load_matrix_sync(
+          dw_operand, shared.key.left + row_start * kStrip, kStrip);
+#pragma unroll
+      for (int column_tile = 0; column_tile < 4; ++column_tile) {
+        MatrixBCol q_operand;
+        wmma::load_matrix_sync(
+            q_operand,
+            Q + (static_cast<int64_t>(local_n) * kChunk +
+                 column_tile * kStrip) * kDim + key_start,
+            kDim);
+        wmma::mma_sync(
+            local_adjoint[column_tile], dw_operand, q_operand,
+            local_adjoint[column_tile]);
+      }
+
+      Accumulator dQ_fragment;
+      wmma::fill_fragment(dQ_fragment, 0.0f);
+      for (int inner_start = 0; inner_start < kChunk;
+           inner_start += kStrip) {
+        MatrixACol t_fragment;
+        MatrixBRow dw_inner_fragment;
+        wmma::load_matrix_sync(
+            t_fragment, T + matrix_base + inner_start * kChunk + row_start,
+            kChunk);
+        wmma::load_matrix_sync(
+            dw_inner_fragment,
+            shared.key.left + inner_start * kStrip, kStrip);
+        wmma::mma_sync(
+            dQ_fragment, t_fragment, dw_inner_fragment, dQ_fragment);
+      }
+
+      // Consume the same fixed SM121 accumulator layout and preserve the
+      // original direct-update order for each ascending key strip.
+      float beta_lower = 0.0f;
+      float beta_upper = 0.0f;
+#pragma unroll
+      for (int element = 0; element < dQ_fragment.num_elements; ++element) {
+        const int local_row = (lane >> 2) + ((element & 2) ? 8 : 0);
+        const int local_key = ((lane & 3) << 1) + (element & 1) +
+            ((element & 4) ? 8 : 0);
+        const int row = row_start + local_row;
+        const int key = key_start + local_key;
+        const int64_t local =
+            (static_cast<int64_t>(local_n) * kChunk + row) * kDim + key;
+        const int64_t source = chunk_vector_index(n, row, key);
+        const float dQ_value = dQ_fragment.x[element];
+        const float exp_g = expf(prefix_g[source]);
+        const float beta_row =
+            beta[static_cast<int64_t>(n) * kChunk + row];
+        dkhat[local] += dQ_value * beta_row * exp_g;
+        dprefix[local] += dQ_value * beta_row * exp_g * khat[source];
+        const float contribution = dQ_value * exp_g * khat[source];
+        if (element & 2) {
+          beta_upper += contribution;
+        } else {
+          beta_lower += contribution;
+        }
+      }
+#pragma unroll
+      for (int offset = 2; offset > 0; offset >>= 1) {
+        beta_lower += __shfl_down_sync(0xffffffffu, beta_lower, offset, 4);
+        beta_upper += __shfl_down_sync(0xffffffffu, beta_upper, offset, 4);
+      }
+      if ((lane & 3) == 0) {
+        const int local_row = lane >> 2;
+        const int lower_row = row_start + local_row;
+        const int upper_row = lower_row + 8;
+        dbeta[static_cast<int64_t>(local_n) * kChunk + lower_row] +=
+            beta_lower;
+        dbeta[static_cast<int64_t>(local_n) * kChunk + upper_row] +=
+            beta_upper;
+      }
+
+      // Warp zero updates row 63 only after every owner has completed dQ.
+      __barrier_sync_count(1, 128);
+      if (threadIdx.x < kStrip) {
+        const int key = key_start + threadIdx.x;
+        float end_contribution =
+            dD[static_cast<int64_t>(n) * kDim + key] *
+            expf(prefix_g[chunk_vector_index(n, kChunk - 1, key)]);
+        for (int row_index = 0; row_index < kChunk; ++row_index) {
+          const int index = row_index * kStrip + threadIdx.x;
+          const int64_t source = chunk_vector_index(n, row_index, key);
+          const float end_g =
+              prefix_g[chunk_vector_index(n, kChunk - 1, key)];
+          const float E_value =
+              khat[source] * expf(end_g - prefix_g[source]);
+          end_contribution += consumed[kStripElements + index] * E_value;
+        }
+        const int64_t end_local =
+            (static_cast<int64_t>(local_n) * kChunk + kChunk - 1) *
+            kDim + key;
+        dprefix[end_local] += end_contribution;
+      }
+      __barrier_sync_count(1, 128);
     }
-    __barrier_sync_count(1, 128);
+
+    __syncthreads();
+  }
+
+  // Key seven has been consumed at the final full-CTA boundary. Helpers can
+  // now leave while owners reuse the aliased shared storage for the unchanged
+  // full-matrix transforms below.
+  if (warp >= 4) {
+    return;
   }
 
   // Complete dM = -T^T (dZ P^T + dW Q^T) T^T. The required dM output is
