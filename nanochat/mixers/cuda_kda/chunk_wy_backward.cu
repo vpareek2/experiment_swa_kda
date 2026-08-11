@@ -4163,8 +4163,7 @@ nanochat_kda_chunk_wy_backward_c64(
 #if defined(NANOCHAT_DISABLE_SELECTIVE_PTX)
     nanochat_kda_wy_backward_group_boundary_wmma_c64_kernel<<<
         kRecurrences * (kDim / 16), 256, 0, stream>>>(
-        retained_prefix, reinterpret_cast<const __nv_bfloat16*>(
-            U_group.data_ptr<at::BFloat16>()), W_group,
+        retained_prefix, U_group.data_ptr<float>(), W_group,
         reinterpret_cast<const __nv_bfloat16*>(
             kg_transposed_group_bf16.data_ptr<at::BFloat16>()),
         reinterpret_cast<const __nv_bfloat16*>(
@@ -4184,7 +4183,8 @@ nanochat_kda_chunk_wy_backward_c64(
     nanochat_kda_wy_backward_fused_boundary_register_dh_group_c64_kernel<<<
         kRecurrences * (kDim / 16), 160,
         kFusedBoundaryRegisterDhSharedBytes, stream>>>(
-        retained_prefix, U_group.data_ptr<float>(), W_group,
+        retained_prefix, reinterpret_cast<const __nv_bfloat16*>(
+            U_group.data_ptr<at::BFloat16>()), W_group,
         reinterpret_cast<const __nv_bfloat16*>(
             kg_transposed_group_bf16.data_ptr<at::BFloat16>()),
         reinterpret_cast<const __nv_bfloat16*>(
