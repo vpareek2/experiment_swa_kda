@@ -15625,3 +15625,32 @@ Attempt334 was also bitwise exact with unchanged REG132/STACK0/SHARED29696/LOCAL
 ### Next
 
 Retain attempt325. Close dead-plane exponential caching and host cache-carveout hints; neither produces a defensible operator reduction. A next candidate must change a material same-group program shape rather than move exact values through more shared memory or tune metadata. The fixed 43,680 tok/s target remains unmet.
+
+
+## 2026-08-11 [agent] Attempts335-337 compact retention and boundary-consumer residency
+
+### Context
+
+Attempt325 remained 108 tok/s below the fixed 43,680 tok/s target. Three same-group directions then tested whether compact forward retention, consumer-side factor recomputation, or highly reused dO residency could remove material backward work without revisiting rejected adjacent-group batching.
+
+### Commands
+
+Attempt335 appended recurrence-major BF16 qbar/khat and grouped BF16 P to the hidden output sidecar. The fused forward producer published qbar/khat from the exact normalized FP32 expressions and redirected its existing P publication into the retained sidecar. Backward then consumed those surfaces directly and removed its qbar/khat/P allocations plus the rebuild launch. Attempt336 replaced the production group U/qg/kg producer with a 192-thread boundary consumer: warp 5 rebuilt BF16 U in alternating shared slots, while the boundary and reverse-dh teams rebuilt E/qg/kg at their use sites. Attempt337 asynchronously staged each CTA's immutable 8x64x16 dO panel into 16 KiB of extra shared memory and redirected both dO WMMA consumers there. All three used independent random-dO comparisons, isolated caches, resource inspection, and interleaved Nsight profiles. Attempt335 additionally used initcheck and six ordered direct trainers.
+
+### Artifacts
+
+- Attempt335 branch `kda-cuda/compact-retain-qkp-335`, commit `d8f0a7456015ce3fb33610f71993d1e0adcf916c`; evidence under `runs/kda-cuda-development/attempt-00335-raw-evidence`.
+- Attempt336 branch `kda-cuda/boundary-consumer-factor-elision-336`, commit `9196c4dff608bdfa9961e1f98d2339376e2b506d`; evidence under `runs/kda-cuda-development/attempt-00336-raw-evidence`.
+- Attempt337 branch `kda-cuda/boundary-async-do-panel-337`, commit `c57fac28103d0d41af038c927915a9d98195222c`; evidence under `runs/kda-cuda-development/attempt-00337-raw-evidence`.
+
+### Result
+
+Attempt335 was bitwise equal to attempt325 for output and all seven gradients, bitwise equal to attempt325's fallback, finite against attempt218, and producer-complete under initcheck. Forward peak rose exactly 18,874,368 B to 132,073,472 B, but the removed backward work reduced whole-operator peak from 143,001,088 to 142,476,800 B. Three paired whole-NVTX samples saved 0.072624, 0.190736, and 0.144560 ms; the canonical paired median saving was 0.144560 ms. Ordered direct trainer medians were parent 42,901 / 43,366 / 43,329 and candidate 43,503 / 43,645 / 43,572, giving matched medians 43,329 to 43,572 (+0.561%). Candidate trainer peak was 5780.596 MiB. This is a real compact-retention gain and useful scaffold, but its absolute median is still 108 tok/s short, so it is not accepted.
+
+Attempt336 was bitwise exact and spill-free, but raised the fused consumer to REG233 with 59,392 B dynamic shared. Its replacement cost 1.542304 / 1.544128 / 1.550656 ms versus the parent's producer-plus-consumer 0.716480 / 0.723680 / 0.726272 ms. Recomputing kg twice and serializing U behind the boundary handoff dominated the eight removed launches and global surfaces.
+
+Attempt337 was bitwise exact with unchanged REG220/STACK0/LOCAL0 and 71,680 B dynamic shared. The 16-KiB panel raised fused time from median 0.402176 to 0.442528 ms (+10.03%) and whole NVTX from 4.065456 to 4.139664 ms (+1.83%). The extra shared traffic/synchronization and reduced cache flexibility outweighed reuse.
+
+### Next
+
+Use attempt335 only as the closest exact compact-retention scaffold; retain attempt266 as the fully accepted baseline. Do not retry whole-group dO panels or consumer-side U/qg/kg recomputation. Explore locality improvements to the retained surfaces or a distinct exact program shape, and require an absolute trainer median of at least 43,680 tok/s. Quality and statistical confirmation remain blocked.
