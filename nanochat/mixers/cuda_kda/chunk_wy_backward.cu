@@ -627,7 +627,9 @@ __device__ __forceinline__ void wy_ldmatrix_a_m16k16(
 }
 
 // GB10 exposes warp mma.sync but not the data-center Blackwell TMEM/TCGen05
-// programming model. Two warps split the BV32 value strip into BV16 owners.
+// programming model. This backward clone preserves the attempt211 documented
+// accumulator/B mapping and the standard-CUDA disabled fallback exactly.
+// Two warps split the BV32 value strip into BV16 owners.
 // Each warp keeps all 128x16 FP32 state elements in the register layout used
 // by the PTX m16n8 accumulator/B operand. Only the W/E master panel and BF16 Z
 // cross a shared-memory boundary. This mirrors FLA's 64-thread register-state
