@@ -15389,3 +15389,24 @@ Continued from accepted attempt231 toward the fixed 43,680 tok/s FLA training re
 
 ### Next
 Continue from `d55821c`, not rejected branches. Target a broad forward WY product/build path or a genuinely new full-tile VJP schedule; small convolution tiling and retained full-sequence surfaces are closed. Require fresh random-dO comparison, fallback parity, resource inspection, sanitizer gates, matched Level 1, and ordered Level 2 before replacing attempt255.
+
+## 2026-08-11 [agent] Accepted BF16 WMMA forward WY products (attempt256)
+
+### Context
+Attempt255 left two FP32 ATen batched products and duplicated Q/W packing on the forward WY path. The intervention kept public interfaces and backing lifetimes fixed while changing the internal forward product precision to the already-validated BF16 publication boundary.
+
+### Commands
+- Replaced `U=T@P` and `W=T@Q` ATen FP32 BMMs with a project CUDA BF16 WMMA kernel, published retained Q during preprocess, and removed the pack barrier made unnecessary by Q’s earlier publication.
+- Ran protected checker, independent random upstream-gradient comparisons, selective-PTX fallback parity, resource inspection, matched Nsys, Level 1, ordered Level 2, and all four sanitizers.
+
+### Artifacts
+- Branch `kda-cuda/bf16-forward-wy-products-256`, commit `7a3835d`.
+- Level 1: `runs/kda-cuda-development/attempt-00256-bf16-forward-wy-products-level1/`.
+- Level 2: `runs/kda-cuda-development/attempt-00256-bf16-forward-wy-products-level2/`.
+- Profile and sanitizer manifests are recorded in `runs/kda-cuda-development/attempt-index.jsonl`.
+
+### Result
+Checker and sanitizers completed; fallback was bitwise equivalent. Versus attempt255 the largest random-dO output difference was 0.00048828125 and gradient differences were smaller. The new WMMA kernel used 48 registers, 3,584 B shared, and zero stack/local spill. Matched operator time was 4.541504 ms and production peak 169,920,512 B. Level 1 advanced with T4096 forward+backward +15.468%; the largest important regression was T4096 forward at 3.596%. Ordered Level 2 was 40,979 -> 42,109 tok/s (+2.758%), with peak memory 5,668.221 MiB. Attempt256 replaces attempt255 as the accepted candidate. No quality/statistical claim was run. The remaining fixed-reference gap is 1,571 tok/s (3.73%).
+
+### Next
+Continue from `7a3835d`. The highest-value active design is an output-owned whole-chunk local VJP schedule replacing colored pair launches without attempt225’s pair-serial fusion.

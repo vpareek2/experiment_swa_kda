@@ -5,7 +5,7 @@ a PyTorch nanochat fork; SWA means sliding-window attention. The correctness-fir
 K3 KDA mixer and its FLA Triton backend are integrated on GB10/SM121. Controlled
 memory-probe and discovery experiments remain outstanding, so no architecture
 quality result is claimed yet. The CUDA-ownership performance stream currently
-retains attempt255 at 41,922 tok/s against the fixed 43,680 tok/s FLA reference.
+retains attempt256 at 42,109 tok/s against the fixed 43,680 tok/s FLA reference.
 
 ## Active streams
 
