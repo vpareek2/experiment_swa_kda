@@ -188,9 +188,22 @@ __global__ void nanochat_kda_wy_preprocess_c64_kernel(
     const __nv_bfloat16 rounded_Q = __float2bfloat16_rn(
         beta_value * exp_g * normalized_k);
     P[destination] = rounded_P;
-    Q[destination] = rounded_Q;
     retained_Q[chunk_vector_index(grouped_n, row, d)] = rounded_Q;
     __syncthreads();
+  }
+
+  // The recurrence-major compact Q operand is no longer consumed: W reads the
+  // group-major retained Q published above. Reuse Q's FP32 backing for the
+  // key-major restored-k scan operand once this CTA has finished its producer
+  // loop. Each channel follows rows in the same fixed ascending order.
+  __syncthreads();
+  const float end_g = running_g;
+#pragma unroll
+  for (int row = 0; row < kChunk; ++row) {
+    const int64_t source = chunk_vector_index(n, row, d);
+    Q[packed_strided_transpose_index(n, d, row)] =
+        __float2bfloat16_rn(
+            khat[source] * expf(end_g - prefix_g[source]));
   }
 }
 
@@ -651,39 +664,6 @@ __global__ void nanochat_kda_wy_scan_state_add_c64_kernel(
   }
 }
 
-// Q is dead after U/W are formed. Convert only the restored key into its
-// existing allocation. Preprocess already published retained Q, and the WMMA
-// producer publishes retained W directly, so this launch has no dependency
-// barrier or retained-sidecar work.
-__global__ void nanochat_kda_wy_pack_async_scan_vectors_c64_kernel(
-    const float* khat,
-    const float* prefix_g,
-    float* restored_storage) {
-  constexpr int kChunkElements = kChunk * kDim;
-  constexpr int kPackThreads = 1024;
-  constexpr int kElementsPerThread = kChunkElements / kPackThreads;
-  const int n = blockIdx.x;
-  if (n >= kChunkRows) {
-    return;
-  }
-  const int64_t source_base = static_cast<int64_t>(n) * kChunkElements;
-  auto* packed_k = reinterpret_cast<__nv_bfloat16*>(restored_storage);
-  const int thread_key = threadIdx.x % kDim;
-  const float end_g =
-      prefix_g[chunk_vector_index(n, kChunk - 1, thread_key)];
-
-#pragma unroll
-  for (int item = 0; item < kElementsPerThread; ++item) {
-    const int within = threadIdx.x + item * kPackThreads;
-    const int row = within / kDim;
-    const int key = within - row * kDim;
-    const int64_t source = source_base + within;
-    packed_k[packed_strided_transpose_index(n, key, row)] =
-        __float2bfloat16_rn(
-            khat[source] * expf(end_g - prefix_g[source]));
-  }
-}
-
 // F4 tensor-core scan: one persistent CTA owns 32 adjacent V rows for one
 // (batch, head) recurrence.  A 32-value tile keeps the 24 CTAs large enough
 // to cover GB10 while sharing each W/qgamma/E master-operand load across two
@@ -704,13 +684,13 @@ __global__ void nanochat_kda_wy_pack_async_scan_vectors_c64_kernel(
 // surfaces. Adjacent four-warp CTAs own U and W for the same chunk/value tile,
 // so the products run independently while every warp retains one FP32
 // accumulator. Each completed tile is rounded once: U into recurrence-major
-// scratch and W directly into the group-major retained sidecar. T is retained
-// group-major; P/Q occupy the compact first BF16 half of their recurrence-major
-// FP32 backing. The inner tiles are visited in fixed K order.
+// scratch and W directly into the group-major retained sidecar. T and retained
+// Q are group-major, while P remains recurrence-major. The inner tiles are
+// visited in fixed K order.
 __global__ void nanochat_kda_wy_forward_uw_wmma_c64_kernel(
     const __nv_bfloat16* retained_T,
     const __nv_bfloat16* P,
-    const __nv_bfloat16* Q,
+    const __nv_bfloat16* grouped_retained_Q,
     __nv_bfloat16* U_bf,
     __nv_bfloat16* grouped_retained_W) {
   namespace wmma = nvcuda::wmma;
@@ -751,7 +731,9 @@ __global__ void nanochat_kda_wy_forward_uw_wmma_c64_kernel(
 
   Accumulator accumulator;
   wmma::fill_fragment(accumulator, 0.0f);
-  const __nv_bfloat16* vector_operand = product == 0 ? P : Q;
+  const __nv_bfloat16* vector_operand =
+      product == 0 ? P : grouped_retained_Q;
+  const int vector_n = product == 0 ? n : grouped_n;
 
   for (int inner_start = 0; inner_start < kChunk; inner_start += kTile) {
     for (int element = lane; element < kTileElements; element += warpSize) {
@@ -767,7 +749,7 @@ __global__ void nanochat_kda_wy_forward_uw_wmma_c64_kernel(
       const int inner = element / kTile;
       const int value = element - inner * kTile;
       const int64_t source =
-          (static_cast<int64_t>(n) * kChunk + inner_start + inner) *
+          (static_cast<int64_t>(vector_n) * kChunk + inner_start + inner) *
           kDim + value_start + value;
       right[element] = vector_operand[source];
     }
@@ -1642,17 +1624,13 @@ at::Tensor nanochat_kda_chunk_wy_forward_c64(
       kChunkRows * (kDim / 16) * 2, 128, 0, stream>>>(
       retained_T,
       reinterpret_cast<const __nv_bfloat16*>(P.data_ptr<float>()),
-      reinterpret_cast<const __nv_bfloat16*>(Q.data_ptr<float>()),
+      retained_Q,
       reinterpret_cast<__nv_bfloat16*>(U_bf.data_ptr<at::BFloat16>()),
       retained_W);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 
-  nanochat_kda_wy_pack_async_scan_vectors_c64_kernel<<<
-      kChunkRows, 1024, 0, stream>>>(
-      khat.data_ptr<float>(), prefix_g.data_ptr<float>(), Q.data_ptr<float>());
-  C10_CUDA_KERNEL_LAUNCH_CHECK();
-
-  // After U/W and compact restored-k are formed, M and P are dead. M's
+  // After U/W are formed, M and P are dead. Preprocess has already published
+  // compact restored-k into Q's backing. M's
   // FP32 bytes plus Q's unused BF16 upper half exactly hold the full incoming-H
   // history; P's bytes hold the smaller Z history. No allocation or public
   // output-sidecar growth is introduced.
