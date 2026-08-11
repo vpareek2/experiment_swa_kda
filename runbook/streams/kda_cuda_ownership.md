@@ -15544,3 +15544,32 @@ Attempt325 is output-bitwise to attempt323; gradient/fallback deltas remain with
 
 ### Next
 Retain attempt325 as the closest post324 scaffold, not as accepted completion. Attempt266 remains the audited accepted baseline until a candidate reaches 43,680 and clears all gates. The remaining absolute shortfall is now smaller than the machine-state drift between FLA captures; any further code candidate still needs direct absolute evidence rather than normalization.
+
+
+## 2026-08-11 [agent] Attempts328-330 launch attribution and adjacent-boundary batching failures
+
+### Context
+
+Attempt325 remained the closest scaffold at a 43,572 tok/s trainer median, 108 tok/s below the fixed 43,680 target. A matched full-trainer Nsight capture was used to distinguish custom-KDA work from convolution and common trainer kernels before changing the reverse schedule.
+
+### Commands
+
+Profiled matched attempt325 and FLA full trainers with Nsight Systems using `--sample=none --cpuctxsw=none`, then tested two exact adjacent-group reverse schedules from attempt325. Attempt329 deferred and batched every independent post-boundary tail over two groups. Attempt330 retained only the preceding group's BF16 dZ/dstate histories, batched dD plus the exact-order parameter reducer, and otherwise reused the single-group tail. Both used isolated caches, independent production random-dO comparisons, fallback/resource checks where applicable, target-shape peak allocation, and matched operator profiles. No trainer was launched after either operator profile failed.
+
+### Artifacts
+
+- Full-trainer attribution: `runs/kda-cuda-development/attempt-00328-full-trainer-attribution`.
+- Attempt329 branch `kda-cuda/two-group-tail-329`, commit `c929f3173a4b9d8dd85f7d73a62d4ce22f609672`; raw-evidence manifest SHA-256 `df8e4a8b6b7fe545a1cbbfd68689ef1b85a3a4e41a528423bceef612d16ecb31`.
+- Attempt330 branch `kda-cuda/two-boundary-minimal-330`, commit `cfaafc8b1ab580e6a29b4d290edb8cb74ba97e70`; raw-evidence manifest SHA-256 `e6ab15b06686bd2a98f66497da18aea945b30c2085b345a1d6a28b6688721e40`.
+
+### Result
+
+The full trainer attributed approximately 109 project launches per KDA operator versus 33 for FLA. Project KDA core work was 671.14 ms/17,136 launches versus FLA 637.37 ms/3,528 launches over the capture, while project convolution was already faster at 76.35 versus 91.53 ms. Launch count was therefore a valid mechanism to test, but not sufficient by itself.
+
+Attempt329 removed 40 launches (105 to 65 in the bounded C64 range) and was bitwise equal to attempt325 for output and all seven gradients. Peak allocation was 148,567,552 bytes, below accepted266's 151,046,144-byte operator peak. Nevertheless matched kernel sum regressed 3.701408 to 4.067264 ms and span regressed 3.881568 to 4.193216 ms: doubled complete grids rose 0.768128 to 0.885440 ms and colored grids rose 0.497792 to 0.695808 ms.
+
+Attempt330 removed only eight launches and was also production-bitwise exact. It used 145,409,536 bytes with REG21/STACK0/LOCAL0 pair dD and REG40/STACK0/LOCAL0 paired parameter reduction. Matched kernel sum regressed 3.674368 to 3.876096 ms and span regressed 3.994624 to 4.195344 ms. Merely delaying the high group's complete kernel through the next boundary raised complete time from 0.753088 to 0.918208 ms, demonstrating a material cache-locality cost even without widened complete/colored grids. Both candidates are rejected; crashes from attempt329's initially incorrect pair-loop bound were corrected before conclusion-bearing evidence and remain preserved in raw logs.
+
+### Next
+
+Retain attempt325 as the closest scaffold and attempt266 as accepted. Close adjacent-boundary deferral and full post-boundary batching: GB10 cache/tensor-core penalties overwhelm launch savings. Continue with same-group arithmetic savings that preserve immediate boundary-to-complete locality; do not run trainers for candidates that fail matched operator profiles. The fixed 43,680 tok/s target remains unmet.
