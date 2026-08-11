@@ -15490,3 +15490,21 @@ Attempt313 was bitwise exact, initcheck-clean, and used REG42/STACK0/LOCAL0 for 
 
 ### Next
 The fixed target remains unmet. Current matched evidence indicates project CUDA is approximately contemporaneous-FLA parity, so further progress requires a real >=4.7 ms/step improvement rather than another threshold/branch/barrier microvariant. Retain attempt266 as accepted and attempts301/306/308 only as scaffolds.
+
+
+## 2026-08-11 [agent] Attempts318-322 compact decay and forward normalized-scratch precision
+
+### Context
+Sought the remaining 0.624% absolute gap from attempt308's cold 43,409 tok/s without changing public tensors or retained backward ABI.
+
+### Commands
+Tested a hidden-half FP16 multiplicative decay history, BF16 and FP16 forward qbar/khat scratch, independent random-`dO` and attempt218 comparisons, paired Nsight profiles, and three ordered direct trainer pairs. Preserved raw evidence/manifests and pushed every branch.
+
+### Artifacts
+Attempts318 `eacf4da`, 319 `b5cbca5`, 320 `9bb67b9`, 321 `fbc781f`, and 322 `d34467c`; durable summaries are indexed and raw evidence is under `attempt-00318-raw-evidence` through `attempt-00322-raw-evidence`.
+
+### Result
+Compact multiplicative decay regressed preprocess. BF16 qbar/khat saved operator time but exceeded the established attempt218 explicit-zero envelope (attempt319 output 0.000732 and dq 0.00293 max versus the oracle), so it was correctness-rejected. FP16 qbar/khat stayed closer: attempt322 saved about 0.09555 ms in the paired operator and used 12 MiB less transient scratch, but direct trainer medians were 43,282, 43,225, and 43,293 versus attempt308 43,158, 43,172, and 43,278; paired median gain was only +0.123%. It is rejected below the trainer gate and below both attempt308's cold 43,409 and the 43,680 target.
+
+### Next
+Do not accept reduced-precision forward normalized scratch on profile evidence. Attempt308 remains the closest observed scaffold, while attempt266 remains the accepted baseline.
