@@ -48,13 +48,14 @@ __global__ void nanochat_kda_causal_convolution_forward_kernel(
     int64_t channels,
     int64_t width,
     int64_t element_count) {
-  const int64_t index = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (index >= element_count) {
+  const int64_t c =
+      static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  const int64_t token_index = blockIdx.y;
+  const int64_t b = blockIdx.z;
+  if (c >= channels || token_index >= length) {
     return;
   }
-  const int64_t c = index % channels;
-  const int64_t token_index = (index / channels) % length;
-  const int64_t b = index / (length * channels);
+  const int64_t index = (b * length + token_index) * channels + c;
 
   float preactivation = 0.0f;
   for (int64_t tap = 0; tap < width; ++tap) {
@@ -68,6 +69,51 @@ __global__ void nanochat_kda_causal_convolution_forward_kernel(
       __bfloat162float(__float2bfloat16_rn(preactivation));
   const float sigmoid = stable_sigmoid_forward(rounded_preactivation);
   output[index] = __float2bfloat16_rn(rounded_preactivation * sigmoid);
+}
+
+__global__ void nanochat_kda_causal_convolution_forward_w4_t4_kernel(
+    const __nv_bfloat16* x,
+    const __nv_bfloat16* weight,
+    const __nv_bfloat16* initial_state,
+    __nv_bfloat16* output,
+    int64_t length,
+    int64_t channels) {
+  const int64_t c =
+      static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  const int64_t token_start = static_cast<int64_t>(blockIdx.y) * 4;
+  const int64_t b = blockIdx.z;
+  if (c >= channels) {
+    return;
+  }
+  const float w0 = __bfloat162float(weight[c * 4]);
+  const float w1 = __bfloat162float(weight[c * 4 + 1]);
+  const float w2 = __bfloat162float(weight[c * 4 + 2]);
+  const float w3 = __bfloat162float(weight[c * 4 + 3]);
+  for (int local = 0; local < 4; ++local) {
+    const int64_t token = token_start + local;
+    if (token >= length) {
+      continue;
+    }
+    float preactivation = 0.0f;
+    const float x0 = convolution_source_value(
+        x, initial_state, b, c, token - 3, length, channels, 4);
+    preactivation += __bfloat162float(__float2bfloat16_rn(x0 * w0));
+    const float x1 = convolution_source_value(
+        x, initial_state, b, c, token - 2, length, channels, 4);
+    preactivation += __bfloat162float(__float2bfloat16_rn(x1 * w1));
+    const float x2 = convolution_source_value(
+        x, initial_state, b, c, token - 1, length, channels, 4);
+    preactivation += __bfloat162float(__float2bfloat16_rn(x2 * w2));
+    const float x3 = convolution_source_value(
+        x, initial_state, b, c, token, length, channels, 4);
+    preactivation += __bfloat162float(__float2bfloat16_rn(x3 * w3));
+    const float rounded_preactivation =
+        __bfloat162float(__float2bfloat16_rn(preactivation));
+    const float sigmoid = stable_sigmoid_forward(rounded_preactivation);
+    const int64_t destination = (b * length + token) * channels + c;
+    output[destination] =
+        __float2bfloat16_rn(rounded_preactivation * sigmoid);
+  }
 }
 
 __global__ void nanochat_kda_causal_convolution_final_state_kernel(
@@ -135,17 +181,38 @@ std::tuple<at::Tensor, c10::optional<at::Tensor>> causal_convolution_forward_cud
   const int threads = 256;
   const int64_t output_elements = batch * length * channels;
   if (output_elements > 0) {
-    const int blocks = static_cast<int>((output_elements + threads - 1) / threads);
-    nanochat_kda_causal_convolution_forward_kernel<<<blocks, threads, 0,
-        at::cuda::getCurrentCUDAStream(x.get_device())>>>(
-        reinterpret_cast<const __nv_bfloat16*>(x.data_ptr<at::BFloat16>()),
-        reinterpret_cast<const __nv_bfloat16*>(weight.data_ptr<at::BFloat16>()),
-        initial_pointer,
-        reinterpret_cast<__nv_bfloat16*>(output.data_ptr<at::BFloat16>()),
-        length,
-        channels,
-        width,
-        output_elements);
+    constexpr int forward_threads = 128;
+    const dim3 blocks(
+        static_cast<unsigned int>((channels + forward_threads - 1) /
+                                  forward_threads),
+        static_cast<unsigned int>(length),
+        static_cast<unsigned int>(batch));
+    if (width == 4) {
+      const dim3 tiled_blocks(
+          static_cast<unsigned int>((channels + forward_threads - 1) /
+                                    forward_threads),
+          static_cast<unsigned int>((length + 3) / 4),
+          static_cast<unsigned int>(batch));
+      nanochat_kda_causal_convolution_forward_w4_t4_kernel<<<
+          tiled_blocks, forward_threads, 0,
+          at::cuda::getCurrentCUDAStream(x.get_device())>>>(
+          reinterpret_cast<const __nv_bfloat16*>(x.data_ptr<at::BFloat16>()),
+          reinterpret_cast<const __nv_bfloat16*>(weight.data_ptr<at::BFloat16>()),
+          initial_pointer,
+          reinterpret_cast<__nv_bfloat16*>(output.data_ptr<at::BFloat16>()),
+          length, channels);
+    } else {
+      nanochat_kda_causal_convolution_forward_kernel<<<blocks, forward_threads, 0,
+          at::cuda::getCurrentCUDAStream(x.get_device())>>>(
+          reinterpret_cast<const __nv_bfloat16*>(x.data_ptr<at::BFloat16>()),
+          reinterpret_cast<const __nv_bfloat16*>(weight.data_ptr<at::BFloat16>()),
+          initial_pointer,
+          reinterpret_cast<__nv_bfloat16*>(output.data_ptr<at::BFloat16>()),
+          length,
+          channels,
+          width,
+          output_elements);
+    }
     C10_CUDA_KERNEL_LAUNCH_CHECK();
   }
 
