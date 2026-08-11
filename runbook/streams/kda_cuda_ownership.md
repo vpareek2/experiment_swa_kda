@@ -14871,3 +14871,69 @@ uv run --no-sync python scripts/kda_cuda_development.py /home/veer/Master/projec
 **Next**
 
 - Preserve attempt211 as the exact GB10 register-state/PTX scaffold, but do not accept it; attempt204 remains the accepted baseline. Do not spend another attempt on forward state microvariants alone. Continue only with an additional operator-scale reduction, prioritizing the backward tail while retaining attempt211's forward mechanism conditionally.
+
+
+## 2026-08-10 [Codex] Full-sequence reverse-state replay is exact but rejected
+
+**Context**
+
+- Attempt212 starts from attempt211 and ports the earlier all-64-chunk reverse-state scan while preserving the current grouped checkpoint/storage semantics. This was an explicit early-abort check against replaying attempt202's scan-only family.
+
+**Commands**
+
+```bash
+# Fresh-cache B=2/H=3/T=4096 gradient capture and comparison to attempt211.
+nsys profile --trace=cuda,nvtx,osrt --sample=none --cpuctxsw=none <production operator runner>
+uv run --no-sync python scripts/kda_cuda_development.py /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_204 /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_212 runs/kda-cuda-development/attempt-00212-gb10-fullseq-reverse-state-level1 --level2-order baseline-first
+```
+
+**Artifacts**
+
+- Branch `kda-cuda/gb10-fullseq-reverse-state-212`, pushed commit `94686e79bd9430cc53e17724d2d9e793c362bc08`.
+- Profile manifest `839ad1430fcec94600a6a7cb45e588c732f5086a7ac78c9c69a0f6c5d8fd72cd`; Level-1 manifest `b7558125d971ee8e653e64461ec910b51417515ea5267366446bfd3951b77c40`.
+
+**Result**
+
+- Output and every gradient are finite and bitwise equal to attempt211. The implementation is complete and initializes the full grouped operands; it is not one of the invalid attempts205-208 variants.
+- The mechanism regresses the production profile to 144 launches / 7.387072 ms kernel sum / 7.786464 ms span, versus attempt211's 151 / 7.179392 / 7.604384. The full-sequence register scan alone is 0.551040 ms and the forward history reconstruction rises to 0.616448 ms.
+- Matched Level 1 rejects: T=4096 forward+backward is `8.252224 -> 8.259024 ms` (-0.0824%), and the short-shape important guard also fails. No Level 2, quality evaluation, or statistical claim ran.
+
+**Next**
+
+- Close the scan-only full-sequence reverse family. Preserve attempt211's eight-group reverse topology and seek a broad backward boundary rather than another history/scan replay.
+
+
+## 2026-08-10 [Codex] Retained forward WY factors become the accepted baseline
+
+**Context**
+
+- Attempt213 starts exactly from attempt211 and retains the forward BF16 `A` and tensor-core-rounded BF16 `T` operands in the saved output backing. Backward views those operands and deletes its redundant stable-pair rebuild and triangular solve. The visible output ABI, separate `A^T dO`, eight reverse groups, FP32 checkpoints, publication boundaries, and selective-PTX forward mechanism remain unchanged.
+
+**Commands**
+
+```bash
+uv run --no-sync research cuda-candidate-check --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_213 --lane optimization <isolated artifacts/caches>
+# Two independent seed-4101 production captures plus NANOCHAT_DISABLE_SELECTIVE_PTX=1 fallback capture.
+compute-sanitizer --tool {memcheck,initcheck,synccheck,racecheck} <production-shape runner>
+nsys profile --trace=cuda,nvtx,osrt --sample=none --cpuctxsw=none <production operator runner>
+uv run --no-sync python scripts/kda_cuda_development.py /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_204 /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_213 runs/kda-cuda-development/attempt-00213-retain-forward-wy-factors-level1-retest-baseline-first --level2-order baseline-first
+# Execute the emitted baseline-first sparse Level-2 plan exactly once.
+```
+
+**Artifacts**
+
+- Branch `kda-cuda/retain-forward-wy-factors-213`, pushed commit `6bb5c3cc2e42d58f2d8da500ab2bb1f24db6b345`.
+- Checker manifest `aa3c072c138ab3ceaa54e44d2243b7caac8a6076af2e81670f684fe8f14e1b3b`; gradient manifest `c68612e01665e3367ec2921ea1efeb5a5fa054a62006f8c6df75999c85a7bc2a`; sanitizer manifest `b5ad820d48fcdd284de7271631727f5f95dc8b420e9797bf9e5bd958ecbf194c`; profile manifest `2b04696e0c57f9503eb919cef935d3d791e140aa04a817068c579a6bdf7b9dc5`; advancing Level-1 retest manifest `f3f8ff89a1a7471e32d875479812e037d298a3eb1f57de3fdd79e40bd261296f`; Level-2 manifest `8511a280236a27ebf4fa4b9c88fde3f1f6c5a84db9153300f74fdd945f87c56a`.
+- Append-only development index SHA-256 after attempt213: `c1e6cd1744e5c476b8bb02214734d1d302a99b7df4472149e1b4797680bd9cbd`.
+
+**Result**
+
+- Ownership is 1.0 and runtime/profile FLA freedom passes. Fresh-cache captures are bitwise deterministic. Output is bitwise equal to attempt211; gradient differences are finite and tiny (largest max absolute difference `1.2369127944111824e-08`) and pass the frozen tolerances. The disabled standard-CUDA fallback is bitwise equal to enabled.
+- Memcheck, initcheck, and synccheck report zero errors. Racecheck reports 36 inherited WMMA shared-operand warnings and zero errors only in group-da and dZ-base, with no mention of the new retention kernel.
+- Profile improves attempt211 from 7.179392 to 6.672896 ms summed kernels and from 7.604384 to 7.082784 ms span while removing one net launch. The 0.063104-ms retention kernel deletes the 0.387168-ms backward pair rebuild and 0.082176-ms solve; direct retained-BF16 dZ-base also falls to 0.169088 ms.
+- The first candidate-first Level-1 capture was marked `do_not_advance` solely because T=1024 forward samples cooled from about 3.84 to 3.55 ms during that candidate run, creating a non-mechanistic 10.19% short-shape outlier; it is retained as uncertainty. The declared baseline-first retest clears every guard and improves T=4096 forward+backward `8.397808 -> 7.343344 ms` (+12.556%) while reducing peak allocation 4.27%.
+- Sparse baseline-first Level 2 accepts the candidate: attempt204 steps `[38932,39006,38974,39120,39225]`, median **39,006 tok/s**; attempt213 `[40260,40241,40038,40076,40048]`, median **40,076 tok/s**. Gain **2.743%** exceeds the declared 2% gate; peak memory ratio is 1.0061. No quality or statistical evaluation ran. Attempt213 is the new accepted baseline and remains 3,604 tok/s below FLA's 43,680.
+
+**Next**
+
+- Continue from attempt213, not attempt204/211. Retain forward factor lifetime and the validated selective-PTX state kernel. The remaining profile is 150 launches / 6.672896 ms sum / 7.082784 ms span; target another broad backward reduction, especially complete local VJP (1.032256 ms), colored pair work (0.533376 ms), boundary reconstruction (0.616480 ms), or redundant forward/backward preprocessing.
