@@ -611,32 +611,66 @@ __global__ void nanochat_kda_wy_scan_state_add_c64_kernel(
   }
 }
 
-// Q/T are dead after U/W are formed. Convert only the restored key and W into
-// those existing allocations: preprocess already emitted qgamma, and the pair
-// builder wrote A directly at its scan precision.
+// Q/T are dead after U/W are formed. Convert the restored key and W into
+// those existing allocations while retaining the rounded vector operands for
+// backward. One CTA owns a complete chunk so every Q value is retained before
+// the compact restored-key writes reuse the first half of Q's FP32 backing.
 __global__ void nanochat_kda_wy_pack_async_scan_vectors_c64_kernel(
     const float* khat,
     const float* prefix_g,
     const float* W,
+    const float* P,
+    const float* Q,
     float* restored_storage,
-    float* W_storage) {
-  constexpr int kElements = kChunkRows * kChunk * kDim;
-  const int index = blockIdx.x * blockDim.x + threadIdx.x;
-  if (index >= kElements) {
+    float* W_storage,
+    __nv_bfloat16* retained_W,
+    __nv_bfloat16* retained_P,
+    __nv_bfloat16* retained_Q) {
+  constexpr int kChunkElements = kChunk * kDim;
+  constexpr int kPackThreads = 1024;
+  constexpr int kElementsPerThread = kChunkElements / kPackThreads;
+  const int n = blockIdx.x;
+  if (n >= kChunkRows) {
     return;
   }
-  constexpr int kChunkElements = kChunk * kDim;
-  const int n = index / kChunkElements;
-  const int within = index - n * kChunkElements;
-  const int row = within / kDim;
-  const int key = within - row * kDim;
-  const int64_t source = chunk_vector_index(n, row, key);
-  const float end_g = prefix_g[chunk_vector_index(n, kChunk - 1, key)];
+  const int chunk_id = n % kChunks;
+  const int recurrence = n / kChunks;
+  const int grouped_n =
+      (chunk_id / 8) * (kRecurrences * 8) +
+      recurrence * 8 + chunk_id % 8;
+  const int64_t source_base = static_cast<int64_t>(n) * kChunkElements;
+  const int64_t retained_base =
+      static_cast<int64_t>(grouped_n) * kChunkElements;
   auto* packed_k = reinterpret_cast<__nv_bfloat16*>(restored_storage);
   auto* packed_W = reinterpret_cast<__nv_bfloat16*>(W_storage);
-  packed_k[packed_strided_transpose_index(n, key, row)] =
-      __float2bfloat16_rn(khat[source] * expf(end_g - prefix_g[source]));
-  packed_W[index] = __float2bfloat16_rn(W[source]);
+  const int thread_key = threadIdx.x % kDim;
+  const float end_g =
+      prefix_g[chunk_vector_index(n, kChunk - 1, thread_key)];
+
+#pragma unroll
+  for (int item = 0; item < kElementsPerThread; ++item) {
+    const int within = threadIdx.x + item * kPackThreads;
+    const int64_t source = source_base + within;
+    const int64_t destination = retained_base + within;
+    const float W_value = W[source];
+    const __nv_bfloat16 rounded_W = __float2bfloat16_rn(W_value);
+    packed_W[source] = rounded_W;
+    retained_W[destination] = rounded_W;
+    retained_P[destination] = __float2bfloat16_rn(P[source]);
+    retained_Q[destination] = __float2bfloat16_rn(Q[source]);
+  }
+  __syncthreads();
+
+#pragma unroll
+  for (int item = 0; item < kElementsPerThread; ++item) {
+    const int within = threadIdx.x + item * kPackThreads;
+    const int row = within / kDim;
+    const int key = within - row * kDim;
+    const int64_t source = source_base + within;
+    packed_k[packed_strided_transpose_index(n, key, row)] =
+        __float2bfloat16_rn(
+            khat[source] * expf(end_g - prefix_g[source]));
+  }
 }
 
 // F4 tensor-core scan: one persistent CTA owns 32 adjacent V rows for one
@@ -652,22 +686,14 @@ __global__ void nanochat_kda_wy_pack_async_scan_vectors_c64_kernel(
 // M's bytes hold values 0..63 for every H row. Restored-k occupies the
 // first BF16 half of each doubled Q chunk stride; its interleaved second half
 // holds H values 64..127. Both halves therefore expose a compact lda=64 tile.
-__global__ void nanochat_kda_wy_retain_forward_operands_c64_kernel(
+__global__ void nanochat_kda_wy_retain_a_t_c64_kernel(
     const __nv_bfloat16* A,
     const float* T,
-    const float* W,
-    const float* P,
-    const float* Q,
     __nv_bfloat16* retained_A,
-    __nv_bfloat16* retained_T,
-    __nv_bfloat16* retained_W,
-    __nv_bfloat16* retained_P,
-    __nv_bfloat16* retained_Q) {
+    __nv_bfloat16* retained_T) {
   const int index = blockIdx.x * blockDim.x + threadIdx.x;
   constexpr int kMatrixElements = kChunkRows * kChunk * kChunk;
-  constexpr int kVectorElements = kChunkRows * kChunk * kDim;
   constexpr int kChunkMatrixElements = kChunk * kChunk;
-  constexpr int kChunkVectorElements = kChunk * kDim;
   if (index < kMatrixElements) {
     const int n = index / kChunkMatrixElements;
     const int within = index - n * kChunkMatrixElements;
@@ -680,21 +706,6 @@ __global__ void nanochat_kda_wy_retain_forward_operands_c64_kernel(
         static_cast<int64_t>(grouped_n) * kChunkMatrixElements + within;
     retained_A[destination] = A[index];
     retained_T[destination] = __float2bfloat16_rn(T[index]);
-  }
-  if (index < kVectorElements) {
-    const int n = index / kChunkVectorElements;
-    const int within = index - n * kChunkVectorElements;
-    const int chunk_id = n % kChunks;
-    const int recurrence = n / kChunks;
-    // Backward slices each retained vector as [group, recurrence, chunk].
-    const int grouped_n =
-        (chunk_id / 8) * (kRecurrences * 8) +
-        recurrence * 8 + chunk_id % 8;
-    const int64_t destination =
-        static_cast<int64_t>(grouped_n) * kChunkVectorElements + within;
-    retained_W[destination] = __float2bfloat16_rn(W[index]);
-    retained_P[destination] = __float2bfloat16_rn(P[index]);
-    retained_Q[destination] = __float2bfloat16_rn(Q[index]);
   }
 }
 
@@ -1511,23 +1522,21 @@ at::Tensor nanochat_kda_chunk_wy_forward_c64(
   at::bmm_out(U, T, P);
   at::bmm_out(W, T, Q);
 
-  // Retain the rounded backward operands after both products complete and
-  // before scan packing reuses Q/T/P storage.
-  nanochat_kda_wy_retain_forward_operands_c64_kernel<<<
-      (kRetainedVectorElements + kThreads - 1) / kThreads,
+  // Retain the matrix operands separately; the vector operands are folded into
+  // scan packing before Q/T/P storage is reused.
+  nanochat_kda_wy_retain_a_t_c64_kernel<<<
+      (kRetainedMatrixElements + kThreads - 1) / kThreads,
       kThreads, 0, stream>>>(
       reinterpret_cast<const __nv_bfloat16*>(
           A.data_ptr<at::BFloat16>()),
-      T.data_ptr<float>(), W.data_ptr<float>(), P.data_ptr<float>(),
-      Q.data_ptr<float>(), retained_A, retained_T, retained_W, retained_P,
-      retained_Q);
+      T.data_ptr<float>(), retained_A, retained_T);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 
-  constexpr int kVectorElements = kChunkRows * kChunk * kDim;
   nanochat_kda_wy_pack_async_scan_vectors_c64_kernel<<<
-      (kVectorElements + kThreads - 1) / kThreads, kThreads, 0, stream>>>(
+      kChunkRows, 1024, 0, stream>>>(
       khat.data_ptr<float>(), prefix_g.data_ptr<float>(), W.data_ptr<float>(),
-      Q.data_ptr<float>(), T.data_ptr<float>());
+      P.data_ptr<float>(), Q.data_ptr<float>(), Q.data_ptr<float>(),
+      T.data_ptr<float>(), retained_W, retained_P, retained_Q);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 
   // After U/W and compact restored-k/W are formed, M and P are dead. M's
