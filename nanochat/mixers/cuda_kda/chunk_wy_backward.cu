@@ -2967,6 +2967,7 @@ __global__ void nanochat_kda_wy_backward_complete_four_warp_vjp_c64_kernel(
     const __nv_bfloat16* state_history,
     const __nv_bfloat16* dstate_history,
     const float* dD,
+    float* dA,
     float* dM,
     float* dqbar,
     float* dkhat,
@@ -3004,7 +3005,15 @@ __global__ void nanochat_kda_wy_backward_complete_four_warp_vjp_c64_kernel(
     KeyPipelineStorage key;
     FinalTransformStorage final;
   };
-  __shared__ __align__(16) SharedStorage shared;
+  struct CompleteStorage {
+    SharedStorage owner;
+    // Helpers reuse no owner-tail storage after the final key handoff. Keep the
+    // dA operand tiles disjoint so both four-warp teams can finish concurrently.
+    __nv_bfloat16 da_left[4 * kStrip * kStrip];
+  };
+  __shared__ __align__(16) CompleteStorage complete_shared;
+  SharedStorage& shared = complete_shared.owner;
+  __nv_bfloat16* da_left = complete_shared.da_left;
   __nv_bfloat16* left = shared.final.left;
   float* result = shared.final.result;
 
@@ -3330,10 +3339,53 @@ __global__ void nanochat_kda_wy_backward_complete_four_warp_vjp_c64_kernel(
     __syncthreads();
   }
 
-  // Key seven has been consumed at the final full-CTA boundary. Helpers can
-  // now leave while owners reuse the aliased shared storage for the unchanged
+  // Key seven has been consumed at the final full-CTA boundary. Helpers now
+  // form the same dA = dO Z^T tiles as the former 128-thread group-dA CTAs
+  // while owners reuse only the disjoint aliased storage for the unchanged
   // full-matrix transforms below.
   if (warp >= 4) {
+    Accumulator accumulator[4];
+#pragma unroll
+    for (int column_tile = 0; column_tile < 4; ++column_tile) {
+      wmma::fill_fragment(accumulator[column_tile], 0.0f);
+    }
+    for (int value_start = 0; value_start < kDim;
+         value_start += kStrip) {
+      for (int element = lane; element < kStrip * kStrip;
+           element += warpSize) {
+        const int row = element / kStrip;
+        const int value = element - row * kStrip;
+        da_left[local_warp * kStrip * kStrip + element] =
+            dO[input_vector_index(
+                b, chunk_id * kChunk + row_start + row, h,
+                value_start + value)];
+      }
+      __syncwarp();
+      MatrixARow do_fragment;
+      wmma::load_matrix_sync(
+          do_fragment,
+          da_left + local_warp * kStrip * kStrip, kStrip);
+#pragma unroll
+      for (int column_tile = 0; column_tile < 4; ++column_tile) {
+        MatrixBCol z_fragment;
+        const int64_t z_offset =
+            (static_cast<int64_t>(local_n) * kChunk +
+             column_tile * kStrip) * kDim + value_start;
+        wmma::load_matrix_sync(z_fragment, z + z_offset, kDim);
+        wmma::mma_sync(
+            accumulator[column_tile], do_fragment, z_fragment,
+            accumulator[column_tile]);
+      }
+    }
+#pragma unroll
+    for (int column_tile = 0; column_tile < 4; ++column_tile) {
+      const int64_t destination =
+          (static_cast<int64_t>(local_n) * kChunk + row_start) * kChunk +
+          column_tile * kStrip;
+      wmma::store_matrix_sync(
+          dA + destination, accumulator[column_tile], kChunk,
+          wmma::mem_row_major);
+    }
     return;
   }
 
@@ -4299,14 +4351,6 @@ nanochat_kda_chunk_wy_backward_c64(
     at::Tensor dA_group = at::empty(
         {kGroupRows, kChunk, kChunk}, fp32);
     at::Tensor dT_group = at::empty_like(dA_group);
-    nanochat_kda_wy_backward_group_da_wmma_c64_kernel<<<
-        kGroupRows * (kChunk / 16), 128, 0, stream>>>(
-        reinterpret_cast<const __nv_bfloat16*>(
-            grad_output.data_ptr<at::BFloat16>()),
-        reinterpret_cast<const __nv_bfloat16*>(
-            z_group_bf16.data_ptr<at::BFloat16>()),
-        dA_group.data_ptr<float>(), chunk_start, kGroupChunks);
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
     at::Tensor dqbar_group = at::empty_like(P_group);
     at::Tensor dkhat_group = at::empty_like(Q_group);
     at::Tensor dprefix_group = at::empty_like(P_group);
@@ -4332,8 +4376,9 @@ nanochat_kda_chunk_wy_backward_c64(
                 .data_ptr<at::BFloat16>()),
         reinterpret_cast<const __nv_bfloat16*>(
             dstate_next_group_bf16.data_ptr<at::BFloat16>()),
-        dD.data_ptr<float>(), dT_group.data_ptr<float>(),
-        dqbar_group.data_ptr<float>(), dkhat_group.data_ptr<float>(),
+        dD.data_ptr<float>(), dA_group.data_ptr<float>(),
+        dT_group.data_ptr<float>(), dqbar_group.data_ptr<float>(),
+        dkhat_group.data_ptr<float>(),
         reinterpret_cast<__nv_bfloat16*>(dv.data_ptr<at::BFloat16>()),
         dbeta_group.data_ptr<float>(),
         dprefix_group.data_ptr<float>(), chunk_start, kGroupChunks);
