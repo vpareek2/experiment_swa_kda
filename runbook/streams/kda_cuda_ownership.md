@@ -14982,3 +14982,37 @@ uv run --no-sync python scripts/kda_cuda_development.py /home/veer/Master/projec
 
 - Never use square-mean-only gradients as the correctness gate again; require an independent random upstream and explicit producer-complete initialization for every dense operand.
 - Continue from corrected attempt217. A later U/W/P/Q retention attempt must scatter every vector with the analogous grouped destination; raw recurrence-major sidecar copies are forbidden.
+
+
+## 2026-08-11 [Codex] Reject attempt219 grouped forward U/W/P/Q retention at Level 1
+
+**Context**
+
+- Attempt219 tested the broad post-correction boundary: save the exact forward `U/W/P/Q` operands in group-major output backing, consume them directly in backward, and delete backward P/Q production, group-UW reconstruction, W repacking, and P/Q BF16 packing.
+- It starts only from corrected attempt217. Every retained vector scatters recurrence-major source `n` to `grouped_n=(chunk/8)*48+recurrence*8+chunk%8`; it does not reuse the invalid raw-copy layout from attempts213-216.
+
+**Commands**
+
+```bash
+<production independent-random-dO runner on attempt217, attempt219 enabled, and NANOCHAT_DISABLE_SELECTIVE_PTX=1 with fresh caches>
+uv run --no-sync research cuda-candidate-check --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_219 --lane optimization <isolated caches/artifact>
+nsys profile --trace=cuda,nvtx,osrt --sample=none --cpuctxsw=none <attempt219 production runner>
+uv run --no-sync python scripts/kda_cuda_development.py /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_217 /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_219 runs/kda-cuda-development/attempt-00219-retain-grouped-forward-uwpq-level1 --level2-order baseline-first
+```
+
+**Artifacts**
+
+- Branch `kda-cuda/retain-grouped-forward-uwpq-219`, commit `4869848afc91cc373a8798d328127936504797a2`.
+- Gradient/diagnostic manifest `b5de9b88a9d0435d5c5cf404c7605963b2f3b78f61cc320345fc8ce9471d5931`; checker `3ccbfc12dab23a1407948d3cccda0b976699aa122c3e5739c4a8715b14325701`; profile `54b09015c84cd1ba36c3ff5abec29c4af0d9b88e21be2e85b7819c6c1ea42c7f`; Level 1 `46fba37f3111890a91d1b06a99eb30b179c86a058850c1a80b219a46057ae4e8`.
+- Append-only development index SHA-256 after attempt219: `c08ab3a62cdda713054fa962b2212266438b787dc1a98bd8557af2819100f6ab`.
+
+**Result**
+
+- Backing is exactly 46,792,704 bytes. Enabled and standard-CUDA fallback are bitwise equal under independent random dO. Output remains bitwise attempt217. Retaining the exact forward FP32/BF16 reconstruction operands changes gradients versus attempt217's backward recomputation (max `dq/dk=0.00048828125`, `dv/dbeta=0.0001220703125`, `dA_log=0.004095599`, `ddt_bias=0.000810742`); checker passes. Offline FLA and aggregate BF16 finite-difference diagnostics are preserved but do not justify a stronger production-shape oracle claim.
+- Mechanistic result is too small: 142 launches / 6.409984 ms sum / 6.810752 ms span versus attempt217 150 / 6.495360 / 6.885440. The 0.431456-ms retention copy and a cold-sidecar boundary regression consume most of the deleted 0.371680-ms group-UW work.
+- Level 1 rejects: T4096 forward+backward `7.034576 -> 7.038512 ms`, **-0.056%**, and peak allocation `182,979,072 -> 190,728,192` bytes, **+4.235%**, above the 3% memory limit. No Level 2, sanitizer, quality, or statistical claim is permitted.
+
+**Next**
+
+- Keep attempt217. Close full grouped `U/W/P/Q` retention and larger saved-preprocessing sidecars; saved-factor traffic/coldness and memory outweigh reconstruction deletion on GB10.
+- Seek compute-side acceleration of the 1.04-ms complete VJP or on-chip producer/consumer reuse without full-sequence backing growth.
