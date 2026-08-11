@@ -541,3 +541,77 @@ uv run --no-sync research doctor --config configs/research/kda_training_speed.to
   baseline; `run` measures that parent before and after the candidate, so there
   is no standalone or no-op baseline trial. Do not apply a candidate directly
   outside the intake/run loop.
+
+## 2026-08-11 [codex] archive and retire CUDA campaign worktrees
+
+**Context**
+
+- The completed CUDA-ownership campaign left 399 registered worktrees: the
+  coordinator, 341 attempt checkouts, 43 validation checkouts, two restricted
+  confirmation checkouts, and twelve temporary checkouts.
+- Cleanup had to preserve the complete branch topology, dirty validation
+  instrumentation, worktree-local diagnostics, ledgers, and publication-grade
+  evidence without inspecting private confirmation state.
+- The canonical ignored `runs/` tree is 156 GiB while the only mounted
+  filesystem had 43 GiB free, so a second full raw-data copy could not be made
+  safely on this host.
+
+**Commands**
+
+```bash
+uv run --no-sync python /tmp/archive_swa_kda_worktrees.py
+git bundle create <archive>/refs/all-refs.bundle --all
+git bundle verify <archive>/refs/all-refs.bundle
+tar --null --files-from=<archive>/publication-files.null --zstd \
+  -cf <archive>/publication-evidence.tar.zst
+sha256sum -c --quiet <archive>/publication-files.sha256
+uv run --no-sync python /tmp/verify_swa_kda_cleanup_archive.py
+uv run --no-sync python /tmp/remove_archived_swa_kda_worktrees.py
+git worktree prune --dry-run --verbose
+uv run --no-sync research doctor --config configs/research/discovery.toml
+```
+
+**Artifacts**
+
+- Preservation archive:
+  `<Master>/archives/experiment_swa_kda/2026-08-11-worktree-cleanup/`.
+- The archive contains a complete 1,133-ref Git bundle, the 399-worktree
+  manifest, 56 exact binary patches, 21 worktree-local diagnostic files, six
+  integrity-checked SQLite snapshots, an 18,901-file checksummed publication
+  archive, the removal ledger, and final verification JSON.
+- The canonical ignored `runs/` tree remains unchanged in the coordinator.
+  Its publication evidence is packaged, but compiler caches, checkpoints, and
+  the complete raw tree do not yet have an independent second-volume backup.
+
+**Result**
+
+- The first archive process incorrectly began copying the coordinator's entire
+  ignored `runs/` tree into the worktree-local area. It was terminated before
+  writing a manifest; the exact 15 GiB partial archive was deleted, no
+  worktree or source state changed, and the corrected process explicitly
+  excludes the coordinator from local-artifact copying.
+- All 251 ledger rows that name an artifact resolve to an existing path. The
+  other 115 later rows intentionally omit the singular `artifact` field; they
+  are recorded separately rather than misclassified as missing evidence.
+- Pre-removal verification proved 339 targets had clean tracked state and 56
+  dirty targets exactly matched their archived patches. All 395 removals then
+  returned zero. No branch, tag, run artifact, or coordinator file was
+  deleted.
+- Four worktrees remain: `main`, accepted attempt342, and the two restricted
+  confirmation checkouts. The latter were neither diffed nor archived and
+  remain reserved for supervisor handling.
+- All 362 local CUDA branches, 338 remote-tracking CUDA branches, and six CUDA
+  tags remain. The Git bundle also preserves local-only refs and the removed
+  worktree HEADs. `git worktree prune --dry-run` is empty.
+- `research doctor` remains valid and reports `research_ready=true` on the
+  clean coordinator.
+
+**Next**
+
+- Copy the complete 156 GiB raw `runs/` tree to an independent storage volume
+  before treating it as disaster-recoverable; the local checksummed
+  publication archive is not an off-device backup.
+- Have the supervisor resolve the two private confirmation worktrees. Do not
+  inspect or derive their private state in the candidate workspace.
+- Integrate and validate attempt342 on `main`, then retire its final secondary
+  worktree. Keep branch/tag pruning as a separately reviewed archival action.
