@@ -628,6 +628,19 @@ __global__ void nanochat_kda_wy_pack_async_scan_vectors_c64_kernel(
 // M's bytes hold values 0..63 for every H row. Restored-k occupies the
 // first BF16 half of each doubled Q chunk stride; its interleaved second half
 // holds H values 64..127. Both halves therefore expose a compact lda=64 tile.
+__global__ void nanochat_kda_wy_retain_a_t_c64_kernel(
+    const __nv_bfloat16* A,
+    const float* T,
+    __nv_bfloat16* retained_A,
+    __nv_bfloat16* retained_T) {
+  const int index = blockIdx.x * blockDim.x + threadIdx.x;
+  constexpr int kMatrixElements = kChunkRows * kChunk * kChunk;
+  if (index < kMatrixElements) {
+    retained_A[index] = A[index];
+    retained_T[index] = __float2bfloat16_rn(T[index]);
+  }
+}
+
 __device__ __forceinline__ __nv_bfloat16* wy_forward_h_value_half(
     __nv_bfloat16* history_lo,
     __nv_bfloat16* restored_k_storage,
@@ -1372,16 +1385,24 @@ at::Tensor nanochat_kda_chunk_wy_forward_c64(
       static_cast<int64_t>(kBatch) * kLength * kHeads * kDim;
   constexpr int64_t kCheckpointElements =
       static_cast<int64_t>(kChunks / 8 - 1) * kRecurrences * kDim * kDim;
-  // The visible tensor is a contiguous prefix.  Its saved storage keeps seven
-  // FP32 group-boundary states alive until the protected backward receives the
-  // exact same output tensor, without changing the public shape or dtype.
+  constexpr int64_t kRetainedMatrixElements =
+      static_cast<int64_t>(kChunkRows) * kChunk * kChunk;
+  // The visible tensor is a contiguous prefix. Its saved storage keeps the
+  // seven FP32 group-boundary states plus the exact BF16 A/T tensor-core
+  // operands required by backward. Backward therefore deletes its pair
+  // rebuild and triangular solve instead of copying public intermediates.
   at::Tensor output_storage = at::empty(
-      {kOutputElements + 2 * kCheckpointElements}, v.options());
+      {kOutputElements + 2 * kCheckpointElements +
+       2 * kRetainedMatrixElements}, v.options());
   at::Tensor output = output_storage.narrow(0, 0, kOutputElements).view(
       {kBatch, kLength, kHeads, kDim});
-  float* group_state_checkpoints = reinterpret_cast<float*>(
-      reinterpret_cast<__nv_bfloat16*>(
-          output_storage.data_ptr<at::BFloat16>()) + kOutputElements);
+  __nv_bfloat16* output_sidecar = reinterpret_cast<__nv_bfloat16*>(
+      output_storage.data_ptr<at::BFloat16>()) + kOutputElements;
+  float* group_state_checkpoints =
+      reinterpret_cast<float*>(output_sidecar);
+  __nv_bfloat16* retained_A =
+      output_sidecar + 2 * kCheckpointElements;
+  __nv_bfloat16* retained_T = retained_A + kRetainedMatrixElements;
 
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream(q.get_device());
   constexpr int kThreads = 256;
@@ -1432,6 +1453,14 @@ at::Tensor nanochat_kda_chunk_wy_forward_c64(
   at::Tensor W = at::empty_like(Q);
   at::bmm_out(U, T, P);
   at::bmm_out(W, T, Q);
+
+  nanochat_kda_wy_retain_a_t_c64_kernel<<<
+      (kRetainedMatrixElements + kThreads - 1) / kThreads,
+      kThreads, 0, stream>>>(
+      reinterpret_cast<const __nv_bfloat16*>(
+          A.data_ptr<at::BFloat16>()),
+      T.data_ptr<float>(), retained_A, retained_T);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
 
   constexpr int kVectorElements = kChunkRows * kChunk * kDim;
   nanochat_kda_wy_pack_async_scan_vectors_c64_kernel<<<
