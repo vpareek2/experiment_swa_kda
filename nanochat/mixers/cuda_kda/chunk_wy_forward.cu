@@ -84,7 +84,7 @@ __device__ __forceinline__ void wy_async_copy_bf16_tile(
       16);
 }
 
-// F0: one CTA advances four rows at a time. Four warps retain the exact
+// F0: one CTA advances eight rows at a time. Four warps retain the exact
 // channel-to-partial association for each row, while 128 channel owners retain
 // running_g locally across the complete 64-token chunk.
 __global__ void nanochat_kda_wy_preprocess_c64_kernel(
@@ -122,14 +122,14 @@ __global__ void nanochat_kda_wy_preprocess_c64_kernel(
   const int b = recurrence / kHeads;
   const int token_start = chunk_id * kChunk;
 
-  __shared__ float q_warp_sums[4][4];
-  __shared__ float k_warp_sums[4][4];
-  __shared__ float q_inverse[4];
-  __shared__ float k_inverse[4];
-  __shared__ float beta_value[4];
-  __shared__ float normalized_q_shared[4][kDim];
-  __shared__ float normalized_k_shared[4][kDim];
-  __shared__ float gate_input_shared[4][kDim];
+  __shared__ float q_warp_sums[8][4];
+  __shared__ float k_warp_sums[8][4];
+  __shared__ float q_inverse[8];
+  __shared__ float k_inverse[8];
+  __shared__ float beta_value[8];
+  __shared__ float normalized_q_shared[8][kDim];
+  __shared__ float normalized_k_shared[8][kDim];
+  __shared__ float gate_input_shared[8][kDim];
 
   const int lane = threadIdx.x & 31;
   const int warp = threadIdx.x >> 5;
@@ -138,7 +138,7 @@ __global__ void nanochat_kda_wy_preprocess_c64_kernel(
   const int d = warp_in_row * 32 + lane;
   const float a = expf(A_log[h]);
   float running_g = 0.0f;
-  for (int r0 = 0; r0 < kChunk; r0 += 4) {
+  for (int r0 = 0; r0 < kChunk; r0 += 8) {
     const int row = r0 + row_in_batch;
     const int token = token_start + row;
     const int64_t source = input_vector_index(b, token, h, d);
@@ -200,7 +200,7 @@ __global__ void nanochat_kda_wy_preprocess_c64_kernel(
     if (threadIdx.x < kDim) {
       const int owner_d = threadIdx.x;
 #pragma unroll
-      for (int batch_row = 0; batch_row < 4; ++batch_row) {
+      for (int batch_row = 0; batch_row < 8; ++batch_row) {
         const int owner_row = r0 + batch_row;
         const int64_t owner_destination =
             chunk_vector_index(n, owner_row, owner_d);
@@ -1621,7 +1621,7 @@ at::Tensor nanochat_kda_chunk_wy_forward_c64(
       static_cast<size_t>(kRetainedMatrixElements) * sizeof(__nv_bfloat16),
       stream));
   nanochat_kda_wy_preprocess_c64_kernel<<<
-      kChunkRows, 512, 0, stream>>>(
+      kChunkRows, 1024, 0, stream>>>(
       reinterpret_cast<const __nv_bfloat16*>(q.data_ptr<at::BFloat16>()),
       reinterpret_cast<const __nv_bfloat16*>(k.data_ptr<at::BFloat16>()),
       reinterpret_cast<const __nv_bfloat16*>(v.data_ptr<at::BFloat16>()),
