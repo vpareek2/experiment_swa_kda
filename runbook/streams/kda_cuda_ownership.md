@@ -15265,3 +15265,28 @@ nsys profile --trace=cuda,nvtx,osrt --sample=none --cpuctxsw=none <matched synch
 **Next**
 
 - Preserve concurrent attempt227 scheduling; close full serialization of these teams.
+
+
+## 2026-08-11 [Codex] Reject attempts229-230; accept attempt231
+
+**Context**
+
+- Attempt229 fuses reverse prefix scan with finalize; attempt230 fuses it with parameter-chunk accumulation. Attempt231 instead uses complete-VJP helper warps, after their last key handoff, to compute exact group dA concurrently with the owner-warps' final dM tail.
+
+**Artifacts**
+
+- Attempt229 branch `kda-cuda/fuse-prefix-finalize-229`, commit `ad85be7d9b98ea86df6e020331843b5961681c75`, parent attempt227; profile manifest `57a153b305f3bded6cd26761b0f18c494d376169114d2dbf2115eaf0126ce47b`.
+- Attempt230 branch `kda-cuda/fuse-prefix-parameter-230`, commit `0ba657aa449385fc928e9f1dfc2077b65f1b9f9e`, parent attempt227; profile manifest `5b91bdb62b959b6dd9dca91358f78a11255f225b6b72849175fd764f156af438`.
+- Attempt231 branch `kda-cuda/hide-da-in-complete-tail-231`, commit `29ae24c0da47b84a1a6116cb1b11c84a474ae0af`, parent attempt227. Manifests: profile/gradient `2b96a3ad196c760dc28e51e9413bb5f36df6154baa158fc6bc62f109c529950b`, checker+sanitizers `7657a36056ee539898b73e1442c0e03f2ecb39cf224bdc99cd29ced112a46590`, Level 1 `11e0b043cea798a1b02a6fe2e0c935cf6d031fc062da226cf91b8c5501f773ca`, Level 2 `38d42057d7e425eab7ecd93316ee945dab13cb93593c99f12101e43f3442f652`.
+- Append-only development index SHA-256 after attempt231: `67201cc6057c44842a9fa60490ebefd2fe6d769856ae06bcd4ed72cb8d790d12`.
+
+**Result**
+
+- Attempts229-230 are bitwise exact but rejected: prefix+finalize regresses 0.167616 -> 0.796224 ms; fused prefix-parameter gives no net kernel-sum saving and regresses the marker.
+- Attempt231 final random-upstream output/all gradients are bitwise attempt227/222/217 and fallback. Protected checker and all sanitizers complete; synccheck is zero-error. Complete-with-dA is **0.809360 ms** versus old complete+group-dA **0.854512 ms**; final resources are 132 regs/thread, 29,696 B shared, zero spill; peak allocation unchanged.
+- Level 1 T4096 forward+backward improves **11.978%** (7.055216 -> 6.210176 ms), with all guards passing.
+- Ordered Level 2 improves **39,709 -> 40,834 tok/s**, **+2.833%**. Attempt231 is accepted as the new exact baseline. It remains **2,846 tok/s below FLA's 43,680 tok/s**. No quality/statistical claim.
+
+**Next**
+
+- Continue from attempt231. Preserve attempt227 as its exact parent scaffold and close serialized/fused prefix scans.
