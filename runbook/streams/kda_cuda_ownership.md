@@ -15157,3 +15157,27 @@ nsys profile --trace=cuda,nvtx,osrt --sample=none --cpuctxsw=none <matched synch
 **Next**
 
 - Keep attempt217 accepted and attempt222 as the fastest exact scaffold. Do not reuse group-local kg serialization. Saved forward normalization scalars are the next exact small-sidecar boundary.
+
+
+## 2026-08-11 [Codex] Reject attempt224 saved normalization scalars at profile
+
+**Context**
+
+- Attempt224 carries cumulative exact attempt222 and saves only forward FP32 q-inverse, k-inverse, and beta scalars in hidden output backing. Backward reuses those scalars, deleting norm reductions, rsqrt, beta sigmoid, and row barriers while reconstructing qbar/khat/prefix/P/Q in the same order.
+- The sidecar grows only 294,912 bytes/operator; no full preprocessing basis is retained.
+
+**Artifacts**
+
+- Branch `kda-cuda/save-preprocess-scalars-224`, commit `814c627c8614ba6e95cd813cc11daa9a111c913d`, parent attempt222.
+- Gradient manifest `9d0b0167272227a1e556d17a8f5f0dad02777ea8204f5789b10624670cb1632c`; checker `7ccd703139fb67bb5e0a7659916499f2ec105fe90210c537a6f66a02f3dfbdf5`; corrected profile `62507d263dda4cfcc4f843c9991169c229545fe580a3d7ed5eb607079e852382`.
+- Append-only development index SHA-256 after attempt224: `1e0418fdc8a936b45e4fd51376db809efe8519caeb631872ef0bdf993aece228`.
+
+**Result**
+
+- Output and every independent-random-upstream gradient are bitwise attempts217/222 and enabled/fallback. Checker passes. Output backing grows `15,335,424 -> 15,630,336` bytes, but measured operator peak stays 182,453,760 bytes.
+- The scalar-reuse backward preprocess is effectively flat, `0.413920 -> 0.409792 ms`; exponentials and global vector traffic dominate the removed reductions. Added forward stores and paired variance make the whole profile regress: sum `5.627488 -> 5.722176 ms`, span `5.924896 -> 5.992704 ms`, with 141 launches unchanged.
+- Rejected before Level 1. No sanitizer, Level 2, quality, or statistical claim.
+
+**Next**
+
+- Keep attempt217 accepted and attempt222 as the fastest exact scaffold. Close saved-scalar-only preprocessing; it does not remove the dominant vector/exponential work.
