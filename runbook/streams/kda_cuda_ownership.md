@@ -15472,3 +15472,21 @@ The current matched trainer profile measured attempt282 at 42,540 and FLA at 42,
 
 ### Next
 Retain attempt266 as the accepted audited baseline until a candidate clears both the direct >=2% trainer gate and the fixed 43,680 tok/s target. Preserve attempt301, attempt306, and the tiny exact attempt310/311 reductions only as scaffolds. Do not revisit exact-pointer graphs, graph capture, retained Q/Z swaps, cluster DSM `ldmatrix`, host allocator/O3, launch-only memset changes, or ratio-factorized exponent paths. The next candidate must remove at least about 9-10 ms/step from the current 43.1k stack, most plausibly through a new project-owned CUDA program shape for forward A/T/U/W production rather than another barrier, allocation, or launch microvariant.
+
+
+## 2026-08-11 [agent] Attempts313-317 forward-local decomposition and exponential diagnostics
+
+### Context
+Attempt308 reached a cold absolute recheck of 43,409 tok/s, leaving 271 tok/s (0.624%) to the fixed 43,680 target, but its direct accepted266 paired gain remained below the required 2%. The current FLA recheck remained 43,183 tok/s, confirming that system state is about 1.15% below the retained historical FLA capture.
+
+### Commands
+Tested a single-grid parallel triangular A/M producer plus separate unit-lower solve, intra-CTA parallel BF16 publication, guaranteed-underflow exponential guards, an FTZ threshold diagnostic across three random seeds, and branchless sigmoid in matched isolated builds. Ran random-`dO`/fallback comparisons, resource inspection, initcheck for the broad decomposition, and three interleaved Nsight pairs. Preserved raw evidence and manifests under `attempt-00313-raw-evidence` through `attempt-00317-raw-evidence`.
+
+### Artifacts
+Attempt313 `f0dd085`; attempt314 `919d807`; attempt315 `fba9cc4`; attempt316 `f903bcc`; attempt317 `071684a`. Exact metrics and parents are appended to `runs/kda-cuda-development/attempt-index.jsonl`.
+
+### Result
+Attempt313 was bitwise exact, initcheck-clean, and used REG42/STACK0/LOCAL0 for the pair producer and REG38/STACK0/LOCAL0 for solve. Parallel pairs reduced the pair portion to about 0.224 ms, but solve plus producer-complete M zeroing brought the combined phase to 0.313451 versus 0.318293 ms, only 0.004843 ms saved; rejected. Parallel publication and exponential guards were exact but neutral/regressive. Branchless sigmoid remained within the established tolerance envelope but did not improve the whole profile. Attempt308's cold 43,409 tok/s remains the closest observed candidate result but is not accepted: it is below 43,680 and below the direct 2% trainer gate.
+
+### Next
+The fixed target remains unmet. Current matched evidence indicates project CUDA is approximately contemporaneous-FLA parity, so further progress requires a real >=4.7 ms/step improvement rather than another threshold/branch/barrier microvariant. Retain attempt266 as accepted and attempts301/306/308 only as scaffolds.
