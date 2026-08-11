@@ -15410,3 +15410,22 @@ Checker and sanitizers completed; fallback was bitwise equivalent. Versus attemp
 
 ### Next
 Continue from `7a3835d`. The highest-value active design is an output-owned whole-chunk local VJP schedule replacing colored pair launches without attempt225’s pair-serial fusion.
+
+## 2026-08-11 [agent] Attempts257–268 and accepted direct BF16 U/W publication
+
+### Context
+Continued from accepted attempt256. Profiling showed the remaining training-kernel gap concentrated in the complete/colored local VJP and forward product/publication paths.
+
+### Commands
+Implemented and checked whole-chunk/output-tile VJP schedules, direct retained A/T/W publication, build-pair concurrency, BF16 U/W direct publication, and fused qg/kg reconstruction. Used independent random upstream gradients, protected checker, fallback comparisons, Nsys, resource dumps, Level 1/2, direct accepted-parent training comparisons, and sanitizers for the accepted result.
+
+### Artifacts
+Append-only details and manifests are in `runs/kda-cuda-development/attempt-index.jsonl`. Accepted branch `kda-cuda/bf16-uw-direct-publication-266`, commit `7a07e5a`; Level 1/2 directories are `attempt-00266-bf16-uw-direct-level1` and `attempt-00266-bf16-uw-direct-level2`.
+
+### Result
+Attempts257–265 were preserved but rejected: one-CTA whole-chunk VJP regressed; four output-tile owners improved the colored phase mechanically but not trainer throughput; 512-thread, single-panel, cached-factor, and double-pair variants regressed or spilled; direct retained A/T/W publication saved about 0.055 ms but was too small; its stack with register VJP did not beat accepted256 in direct Level 2. Attempt267’s fused qg/kg producer saved 0.150 ms locally but downstream cold-cache penalties erased it. Attempt268 improved micro/Level 1 but directly regressed accepted266 trainer throughput.
+
+Attempt266 writes BF16 U to compact scratch and W directly to grouped retained storage, removes FP32 U/W surfaces, makes pack restored-k-only, and consumes BF16 U/W in both state paths. Output differed from attempt256 by at most 0.000244140625 while all seven random-dO gradients were bitwise identical; fallback was bitwise identical. Checker and all four sanitizers completed. Level 1 T4096 forward+backward improved 18.713% versus attempt231, with important shapes/memory inside limits. Ordered Level 2 was 40,105 -> 42,237 tok/s (+5.316%); peak was 5,669.971 MiB. Attempt266 is the accepted candidate. No quality/statistical claim was run. It remains 1,443 tok/s (3.42%) below 43,680.
+
+### Next
+Continue from `7a07e5a`. Small launch/memory fusions are not translating reliably to trainer throughput. The next broad direction is a direct CUDA program-shape port of FLA’s raw-q/k/g WY backward equations, rather than another colored-pair rearrangement.
