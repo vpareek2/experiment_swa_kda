@@ -14937,3 +14937,48 @@ uv run --no-sync python scripts/kda_cuda_development.py /home/veer/Master/projec
 **Next**
 
 - Continue from attempt213, not attempt204/211. Retain forward factor lifetime and the validated selective-PTX state kernel. The remaining profile is 150 launches / 6.672896 ms sum / 7.082784 ms span; target another broad backward reduction, especially complete local VJP (1.032256 ms), colored pair work (0.533376 ms), boundary reconstruction (0.616480 ms), or redundant forward/backward preprocessing.
+
+
+## 2026-08-11 [Codex] Arbitrary-upstream VJP invalidates attempts213-216; corrected attempt217 is accepted
+
+**Context**
+
+- While extending forward-factor retention, a layout audit found that attempt213 copied forward `A/T` in recurrence-major order but backward sliced the sidecar as `[group][recurrence][local_chunk]`. The earlier square-mean loss divided the upstream by millions of elements and hid this structural error inside the frozen absolute tolerances.
+- A second inherited issue was then isolated: attempts204/211 allocated backward FP32 `A` with `empty_like`, while the triangular pair kernel did not write the six upper 16x16 tiles. `A^T dO` read those bytes. CUDA initcheck did not diagnose the allocator-reused bytes as uninitialized, but an explicit zero initialization changes arbitrary-upstream gradients and matches the corrected retained-forward factors exactly.
+
+**Commands**
+
+```bash
+# Production B=2,H=3,T=4096,K=V=128 with independent BF16 random dO (seed 9917),
+# rather than output.square().mean() as the only upstream.
+<attempt211 runner> output.backward(torch.randn_like(output))
+<attempt213/216/217 runners with fresh extension and CUDA caches>
+# Diagnostic reference: attempt211 plus A=zeros_like(M), then the same random dO.
+uv run --no-sync research cuda-candidate-check --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_217 --lane optimization <isolated caches/artifact>
+compute-sanitizer --tool {memcheck,initcheck,synccheck,racecheck} <attempt217 production runner>
+uv run --no-sync python scripts/kda_cuda_development.py /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_218 /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_217 runs/kda-cuda-development/attempt-00217-correct-retained-wy-layout-level1 --level2-order baseline-first
+# Execute the emitted one-block baseline-first Level-2 plan exactly once.
+```
+
+**Artifacts**
+
+- Attempt214 `7b46353feb8e7589f4ab9e020ced2545db661dd8` split the local inverse into a second kernel; exact versus its parent but profile-regressed to 158 launches / 6.913536 ms sum / 7.358560 ms span. Closed without Level 1.
+- Attempt215 `05ca499d047cc80e892a6ffc4f3c6cd1e052ae5b` removed the colored kernel's coalescing shared result surface; exact versus its parent but profile-regressed to 150 / 7.409280 / 7.813856 ms. Closed without Level 1.
+- Attempt216 branch commit `b5000e2ee8762c25697f56401cb29b0a5caa048a`; its register-held boundary mechanism improves boundary `0.621056 -> 0.274400 ms`, but it inherits attempt213's factor-layout error. Its apparent Level-2 `40,102 -> 40,338 tok/s` (+0.588%) is invalid for acceptance. Profile manifest `2c4609d76f11da7efca400e181f19a3822a40c345086a188ce7873ffb378f8e8`; Level-2 manifest `006956bd7bbe555c91c3830f87f51790da3b22d169fe2394b5279052acb519dd`.
+- Attempt218 diagnostic reference branch `kda-cuda/zero-backward-upper-a-218`, commit `11e6d7311d6a057856a8191d0d51753b705a8ab9` initializes all backward `A` bytes before the triangular builder.
+- Attempt217 corrected branch `kda-cuda/correct-retained-wy-layout-217`, commits `a5dcfd95bbc8998bfac7f89f89e013d1cdb25394` and `c619407c18c3170487fdcf03df350549d23ab958`.
+- Attempt217 manifests: arbitrary-upstream gradient `7d14b18573909346df1b80a3bd97dfdc0c41b134f6febe6539585b0fcd0f74f3`; checker `71be373fbcdfd472c9de7cbf1e20402f705695a7437899ffaac7e76171682b6d`; sanitizers `046287206f075f936956e53f7273c75b3c337a820a57ee45d66cb3f439d64270`; profile `2af4ccaaf601220b18103da4f33afb1f8233e9abd253491aea733586f61073df`; Level 1 `89ec72a56db4bd1c4086ce030ec19ecc1d7ecb8d3c2beae0ef6744ccac7c3925`; Level 2 `a3cb75ce0633a5ebcc724e9be69ce3032e341503599fa3c19a9ab409233647cb`.
+- Append-only development index SHA-256 after the invalidation and corrected acceptance: `1153c6c214b51596ab65eb341c5f00dec0ab2c00b5df0f0871f4f843b2ee97bd`.
+
+**Result**
+
+- Attempt213 versus attempt211 under random dO is not a tolerance edge: maxima include `dv=0.100098`, `dbeta=0.205078`, and `dA_log=0.074373`. Attempts213-216 and all acceptance claims derived from them are invalidated. Attempt204/211 are also not valid arbitrary-upstream references because their unread upper-A backing is allocator-dependent.
+- Correct scatter destination is `grouped_n=(chunk/8)*48 + recurrence*8 + chunk%8`. Attempt217 applies it to both retained `A` and `T`. Attempt217 enabled, disabled fallback, a fresh-cache repeat, and attempt218's explicit-zero reference are bitwise equal for output and every gradient under independent random dO.
+- Checker runtime/profile audits pass. Memcheck, initcheck, and synccheck have zero errors. Racecheck has zero errors and 36 inherited WMMA warnings only, with no retained-scatter or register-boundary mention.
+- Attempt217 profile is 150 launches / 6.495360 ms sum / 6.885440 ms span. Level 1 versus the corrected attempt218 reference advances: T4096 forward+backward `7.896736 -> 7.086112 ms` (+10.265%); memory decreases.
+- Corrected sparse Level 2 accepts attempt217: reference steps `[39619,39517,39466,39450,39576]`, median **39,517 tok/s**; candidate `[40347,40305,40450,40140,40367]`, median **40,347 tok/s**; gain **2.100%**, peak-memory ratio 1.0061. No quality/statistical evaluation ran. Attempt217 is the new accepted correct baseline and remains 3,333 tok/s below FLA.
+
+**Next**
+
+- Never use square-mean-only gradients as the correctness gate again; require an independent random upstream and explicit producer-complete initialization for every dense operand.
+- Continue from corrected attempt217. A later U/W/P/Q retention attempt must scatter every vector with the analogous grouped destination; raw recurrence-major sidecar copies are forbidden.
