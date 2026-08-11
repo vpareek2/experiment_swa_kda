@@ -2658,16 +2658,23 @@ __global__ void nanochat_kda_wy_backward_group_dD_c64_kernel(
   const int chunk_id = chunk_start + local_chunk;
   const int64_t offset =
       (static_cast<int64_t>(group_n) * kDim + key) * kDim + value;
-  __shared__ float terms[kDim];
-  terms[value] = __bfloat162float(dstate_next_group[offset]) *
+  float term = __bfloat162float(dstate_next_group[offset]) *
       __bfloat162float(state[offset]);
+  for (int lane_offset = 16; lane_offset > 0; lane_offset >>= 1) {
+    term += __shfl_down_sync(0xffffffffu, term, lane_offset);
+  }
+  __shared__ float warp_terms[4];
+  const int lane = value & 31;
+  const int warp = value >> 5;
+  if (lane == 0) {
+    warp_terms[warp] = term;
+  }
   __syncthreads();
   if (value == 0) {
-    float sum = 0.0f;
-    for (int reduction_value = 0; reduction_value < kDim;
-         ++reduction_value) {
-      sum += terms[reduction_value];
-    }
+    float sum = warp_terms[0];
+    sum += warp_terms[1];
+    sum += warp_terms[2];
+    sum += warp_terms[3];
     dD[(static_cast<int64_t>(recurrence) * kChunks + chunk_id) * kDim + key] =
         sum;
   }
