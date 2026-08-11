@@ -15089,3 +15089,40 @@ compute-sanitizer --tool {memcheck,initcheck,synccheck,racecheck} --error-exitco
 
 - Keep attempt217 accepted. Preserve attempts220-221 only as exact subthreshold building blocks; do not call the composite accepted.
 - A successor must make a materially broader backward reduction before another Level 2; pair micro-tuning alone cannot close the FLA gap.
+
+
+## 2026-08-11 [Codex] Reject attempt222 exact complete-key pipeline at Level 2
+
+**Context**
+
+- Attempt222 carries exact attempts220-221 and overlaps the complete VJP's independent key products. Helpers warm key0 then compute next-strip dR/dE/dW into double-buffered shared FP32 while owner warps consume the current strip, append dWQ to the same live adjoint, and compute dQ/scalar VJP in the original key order.
+- A shared union aliases the pipeline buffers with the later full-matrix transforms; there is no new allocation or reassociation.
+
+**Commands**
+
+```bash
+<fresh-cache independent-random-dO comparisons versus attempts217/221 and enabled/fallback>
+uv run --no-sync research cuda-candidate-check --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_222 --lane optimization <isolated artifact>
+nsys profile --trace=cuda,nvtx,osrt --sample=none --cpuctxsw=none <matched random-dO runner>
+uv run --no-sync python scripts/kda_cuda_development.py /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_217 /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_222 runs/kda-cuda-development/attempt-00222-pipelined-complete-key-products-level1 --level2-order baseline-first
+<one bounded baseline-first Level-2 block from the generated plan>
+compute-sanitizer --tool {memcheck,initcheck,synccheck,racecheck} --error-exitcode 99 <production runner>
+```
+
+**Artifacts**
+
+- Branch `kda-cuda/pipeline-complete-key-products-222`, commit `353d3cd9fe2f1bf1b9325651d644f6e0a8c3b480`, parent attempt221 `50693b8da9fbe4582b7d1e1e725b7c8ef040994d`; accepted comparison remains attempt217.
+- Gradient `f9f0cfb85bf773394426df9a4793e9cebf57c77509099d087f45e9b8442eecf3`; checker `3ad87ffdf5828e867a3b49ccafd49c3438ea4bf96db5fd9dbee266806dccaa53`; profile `630bbc33510c14fcf30647c80e47d4c28883af8771734944e55dc06636df215b`; sanitizers `3ed1e6f50ef7876066049a5eed18766ee3806f50a643b13e67006a1659de28a9`; Level 1 `7f36f0b93bebd82eccb0a06d1b866f7b07e4c831a69348d5218a8e69cde16be3`; Level 2 `103c6a8c9435e673e846d4e268fcdd5c01ec7f572e6226eff7761b4474bb3a3f`.
+- Append-only development index SHA-256 after attempt222: `ac9aabc344edec8d0d7342ff93b1fca2b473d2c587e22fe9c6f7d145c0e83c06`.
+
+**Result**
+
+- Output/all independent-random-upstream gradients are bitwise attempts217/221 and enabled/fallback. Checker passes. Complete kernel is 130 regs/thread, 26,624 B source shared (27,648 B including toolchain allocation), zero local/stack.
+- Matched complete VJP improves `0.923200 -> 0.770304 ms`, **16.56%**. Level 1 advances: T4096 forward+backward improves **6.144%** with identical memory and all guards pass.
+- Sanitizers report zero errors; racecheck's 37 warnings mention only inherited `group_dz_base/group_da`, never the pipeline.
+- The single ordered Level 2 rejects: attempt217 `[40203,40271,40425,40582,40495]`, median **40,425 tok/s**; attempt222 `[40565,40590,40724,40632,40717]`, median **40,632 tok/s**; gain **0.512%**, below 2%. Peak memory is identical. The candidate remains 3,048 tok/s below FLA. No quality/statistical claim.
+
+**Next**
+
+- Keep attempt217 accepted. Preserve attempt222 only as an exact cumulative scaffold.
+- Continue with a broader reverse-group-local preprocessing/packing and memory-lifetime reduction before another Level 2.
