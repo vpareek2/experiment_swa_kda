@@ -15126,3 +15126,34 @@ compute-sanitizer --tool {memcheck,initcheck,synccheck,racecheck} --error-exitco
 
 - Keep attempt217 accepted. Preserve attempt222 only as an exact cumulative scaffold.
 - Continue with a broader reverse-group-local preprocessing/packing and memory-lifetime reduction before another Level 2.
+
+
+## 2026-08-11 [Codex] Reject attempt223 group-local backward prepack at profile
+
+**Context**
+
+- Attempt223 tested a broad memory/lifetime boundary on exact attempt221: replace full-sequence backward normalization/P/Q/history/dD workspaces with reverse-group-local data, fuse P/Q/qg production into preprocessing, fuse W BF16 publication into group-UW, and remove the qg/kg/W pack.
+- The final bounded correction uses 128 threads/CTA and preserves original serial norm sums; the initial one-warp version was even slower.
+
+**Commands**
+
+```bash
+<three independent-random-dO comparisons versus attempt221, seed4101 versus explicit-zero attempt218, and fresh enabled/fallback>
+nsys profile --trace=cuda,nvtx,osrt --sample=none --cpuctxsw=none <matched synchronized baseline/candidate runners>
+```
+
+**Artifacts**
+
+- Branch `kda-cuda/group-local-prepack-223`, commit `56349d4b0df652547d12773c8e3ec9bf9883c529`, parent attempt221; staged patch SHA before commit `b0ab73e54931b8616cdb87da182ec4abf5bc6fb6af6dfeeb35f04b50555d3541`.
+- Gradient manifest `09969102f4063a885a040f45e5a640959031766de0dcc71ee9851724e0aa26b0`; profile `2bf26e07e0629953bfbbfdfb7879290583f15ba8f98d86cb227be356d10416b6`.
+- Append-only development index SHA-256 after attempt223: `d4d3e8121dab7677f28c62a38572e6c40d14c20556608ee184adac198c6afd34`.
+
+**Result**
+
+- Output and all gradients are bitwise attempt221 for three independent upstream seeds, bitwise attempt218 at seed4101, and bitwise enabled/fallback. No numerical or producer failure occurred.
+- Peak allocation falls `182,453,760 -> 165,562,368` bytes (-9.26%), but performance rejects: sum `5.725728 -> 6.179296 ms` (+7.92%), span `6.179168 -> 6.696608 ms` (+8.37%). Eight corrected prepack launches cost 1.292512 ms versus old preprocess+pack 0.708192 ms. Including faster group-UW, the declared boundary is 1.195904 ms versus required <=0.416 ms.
+- The per-chunk second pass serializes kg/kgT rows and loses the high-parallel pack schedule. No Level 1/2, sanitizer, quality, or statistical claim.
+
+**Next**
+
+- Keep attempt217 accepted and attempt222 as the fastest exact scaffold. Do not reuse group-local kg serialization. Saved forward normalization scalars are the next exact small-sidecar boundary.
