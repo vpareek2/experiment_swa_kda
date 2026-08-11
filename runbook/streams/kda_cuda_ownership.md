@@ -15051,3 +15051,41 @@ uv run --no-sync python scripts/kda_cuda_development.py /home/veer/Master/projec
 
 - Keep attempt217 as accepted. Preserve attempt220's exact mechanism as a validated subthreshold building block, but do not call it accepted.
 - The next composite successor may add one exact forward build+solve axis on top of attempt220; it must compare against attempt217 and independently clear every gate.
+
+
+## 2026-08-11 [Codex] Reject attempt221 exact persistent build+solve at Level 2
+
+**Context**
+
+- Attempt221 carries attempt220's exact but subthreshold dP helper and adds one forward axis: one 384-CTA persistent WMMA kernel builds all ten lower A/M tile pairs and performs the ascending triangular solve.
+- A 4,096-float shared surface aliases M and T. Before overwriting solve row r, the kernel copies that full M row to a 64-float surface, preserving attempt217's inner order and prior solved T rows. The existing full upper-A zero initialization remains.
+
+**Commands**
+
+```bash
+<fresh-cache independent-random-dO attempt220/attempt221 and enabled/fallback comparisons>
+uv run --no-sync research cuda-candidate-check --worktree /home/veer/Master/projects/experiment_swa_kda_cuda_attempt_221 --lane optimization <isolated artifact>
+nsys profile --trace=cuda,nvtx,osrt --sample=none --cpuctxsw=none <matched marker runner>
+<three preserved ordered Level-1 captures; final declared baseline-first retest advanced>
+<one bounded baseline-first Level-2 trainer block from the generated plan>
+compute-sanitizer --tool {memcheck,initcheck,synccheck,racecheck} --error-exitcode 99 <production runner>
+```
+
+**Artifacts**
+
+- Branch `kda-cuda/persistent-build-solve-221`, commit `50693b8da9fbe4582b7d1e1e725b7c8ef040994d`, parent attempt220 `ff39227da8018ea88f8503b232462ba334f29cb5`; accepted comparison remains attempt217.
+- Gradient `0387ba712ff96ae7e91a810771b20315fbd7ddcb45d539dfef50948899ad9ee5`; checker `57b75475d78bd95f62e82794b0169a717d543b7622d6e3505a1de95a99b17009`; profile `2515304aec31fd1d54f7dc63774f32797ff9a971f527639311a5d88771581f2f`; sanitizers `16ef63011d56bc5f884911f7f2e2fd8fac6598f16aa188b9918b379e74ba5d95`.
+- Level 1 initial `29cc88bc865d69ee6ca345371d9fde1d918c1f685ebe3dad46d5074d70886005`; candidate-first retest `8112c8f4e8e274db82ba2ae225a4dc1bcbf6646ffcc83d9b77202b7c12a6d800`; declared baseline-first retest `2da41c50158dfdcf18cfdfcb628906a916c1a53c969ded715a289f4b26ec87c3`; Level 2 `988aaea1b04f345795feeb9ff7c4d9d97401341ffebd41c2537b2dbc4ca91d36`.
+- Append-only development index SHA-256 after attempt221: `644128f84947b8f6701d1ba136b1db2a21f5410f41f99dd1d41b4fc3330b0e09`.
+
+**Result**
+
+- Candidate is bitwise attempt220/attempt217 for output and every independent-random-upstream gradient. Enabled and fallback are bitwise. Checker passes. Mem/init/sync report zero errors; racecheck reports zero errors and 37 inherited backward-WMMA warnings, with no new fused-forward kernel mention.
+- Fused builder+solve is 0.318400 ms versus attempt220 0.393792+0.080928=0.474720 ms, **32.93% lower**; it uses 36 regs/thread, 30,976 B shared, no local/stack. Combined attempt221 profile is 141 launches / 5.769568 ms sum / 6.036512 ms span.
+- Level 1 was thermally variable. The preserved initial baseline-first run cleared the long gate (+3.574%) but had a 5.743% short regression; candidate-first cleared regressions but reached only +2.049% long. The final declared baseline-first retest cleared all guards and improved T4096 forward+backward `7.043776 -> 6.817488 ms`, **+3.2126%**.
+- The single ordered Level 2 rejects: attempt217 `[39558,39465,39469,39378,39366]`, median **39,465 tok/s**; attempt221 `[35635,39784,39794,39664,39969]`, median **39,784 tok/s**; gain **0.808%**, below 2%. Peak memory is identical. Attempt221 also remains below the previously accepted 40,347 tok/s and 3,896 tok/s below FLA. No quality/statistical claim.
+
+**Next**
+
+- Keep attempt217 accepted. Preserve attempts220-221 only as exact subthreshold building blocks; do not call the composite accepted.
+- A successor must make a materially broader backward reduction before another Level 2; pair micro-tuning alone cannot close the FLA gap.
