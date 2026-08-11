@@ -635,19 +635,17 @@ __global__ void nanochat_kda_wy_scan_state_add_c64_kernel(
 }
 
 // Q/T are dead after U/W are formed. Convert the restored key and W into
-// those existing allocations while retaining the rounded vector operands for
+// those existing allocations while retaining the rounded W/Q operands for
 // backward. One CTA owns a complete chunk so every Q value is retained before
 // the compact restored-key writes reuse the first half of Q's FP32 backing.
 __global__ void nanochat_kda_wy_pack_async_scan_vectors_c64_kernel(
     const float* khat,
     const float* prefix_g,
     const float* W,
-    const float* P,
     const float* Q,
     float* restored_storage,
     float* W_storage,
     __nv_bfloat16* retained_W,
-    __nv_bfloat16* retained_P,
     __nv_bfloat16* retained_Q) {
   constexpr int kChunkElements = kChunk * kDim;
   constexpr int kPackThreads = 1024;
@@ -679,7 +677,6 @@ __global__ void nanochat_kda_wy_pack_async_scan_vectors_c64_kernel(
     const __nv_bfloat16 rounded_W = __float2bfloat16_rn(W_value);
     packed_W[source] = rounded_W;
     retained_W[destination] = rounded_W;
-    retained_P[destination] = __float2bfloat16_rn(P[source]);
     retained_Q[destination] = __float2bfloat16_rn(Q[source]);
   }
   __syncthreads();
@@ -1484,11 +1481,11 @@ at::Tensor nanochat_kda_chunk_wy_forward_c64(
   constexpr int64_t kRetainedScalarElements =
       static_cast<int64_t>(kChunkRows) * kChunk;
   // The visible tensor is a contiguous prefix. Its backing is, in order:
-  // visible BF16 output | FP32 checkpoints | grouped BF16 A/T/W/P/Q |
+  // visible BF16 output | FP32 checkpoints | grouped BF16 A/T/W/Q |
   // recurrence-major FP16 prefix | recurrence-major FP32 beta/qinv/kinv.
   at::Tensor output_storage = at::empty(
       {kOutputElements + 2 * kCheckpointElements +
-       2 * kRetainedMatrixElements + 4 * kRetainedVectorElements +
+       2 * kRetainedMatrixElements + 3 * kRetainedVectorElements +
        6 * kRetainedScalarElements},
       v.options());
   at::Tensor output = output_storage.narrow(0, 0, kOutputElements).view(
@@ -1501,8 +1498,7 @@ at::Tensor nanochat_kda_chunk_wy_forward_c64(
       output_sidecar + 2 * kCheckpointElements;
   __nv_bfloat16* retained_T = retained_A + kRetainedMatrixElements;
   __nv_bfloat16* retained_W = retained_T + kRetainedMatrixElements;
-  __nv_bfloat16* retained_P = retained_W + kRetainedVectorElements;
-  __nv_bfloat16* retained_Q = retained_P + kRetainedVectorElements;
+  __nv_bfloat16* retained_Q = retained_W + kRetainedVectorElements;
   __half* retained_prefix = reinterpret_cast<__half*>(
       retained_Q + kRetainedVectorElements);
   float* retained_beta = reinterpret_cast<float*>(
@@ -1555,8 +1551,8 @@ at::Tensor nanochat_kda_chunk_wy_forward_c64(
   at::bmm_out(U, T, P);
   at::bmm_out(W, T, Q);
 
-  // Retain the matrix operands separately; the vector operands are folded into
-  // scan packing before Q/T/P storage is reused.
+  // Retain the matrix operands separately; W/Q are folded into scan packing
+  // before Q/T/P storage is reused.
   nanochat_kda_wy_retain_a_t_c64_kernel<<<
       (kRetainedMatrixElements + kThreads - 1) / kThreads,
       kThreads, 0, stream>>>(
@@ -1568,8 +1564,8 @@ at::Tensor nanochat_kda_chunk_wy_forward_c64(
   nanochat_kda_wy_pack_async_scan_vectors_c64_kernel<<<
       kChunkRows, 1024, 0, stream>>>(
       khat.data_ptr<float>(), prefix_g.data_ptr<float>(), W.data_ptr<float>(),
-      P.data_ptr<float>(), Q.data_ptr<float>(), Q.data_ptr<float>(),
-      T.data_ptr<float>(), retained_W, retained_P, retained_Q);
+      Q.data_ptr<float>(), Q.data_ptr<float>(), T.data_ptr<float>(),
+      retained_W, retained_Q);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 
   // After U/W and compact restored-k/W are formed, M and P are dead. M's

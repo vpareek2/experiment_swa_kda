@@ -118,15 +118,19 @@ __device__ __forceinline__ int64_t grouped_matrix_index(
           kChunk + column);
 }
 
-// Rebuild the two normalized operands from retained exact inverse norms. Each
-// CTA owns one recurrence-major chunk row; every thread owns one channel.
+// Rebuild the two normalized operands and grouped P from retained exact
+// scalars. Each CTA owns one recurrence-major chunk row; every thread owns one
+// channel.
 __global__ void nanochat_kda_wy_backward_rebuild_norms_c64_kernel(
     const __nv_bfloat16* q,
     const __nv_bfloat16* k,
+    const __nv_bfloat16* v,
     const float* q_inverse,
     const float* k_inverse,
+    const float* beta,
     __nv_bfloat16* qbar,
     __nv_bfloat16* khat,
+    __nv_bfloat16* P,
     float scale) {
   const int n = blockIdx.x;
   const int d = threadIdx.x;
@@ -135,6 +139,8 @@ __global__ void nanochat_kda_wy_backward_rebuild_norms_c64_kernel(
   }
   const int chunk_id = n % kChunks;
   const int recurrence = n / kChunks;
+  const int grouped_n =
+      (chunk_id / 8) * 48 + recurrence * 8 + chunk_id % 8;
   const int h = recurrence % kHeads;
   const int b = recurrence / kHeads;
   const int token_start = chunk_id * kChunk;
@@ -143,12 +149,16 @@ __global__ void nanochat_kda_wy_backward_rebuild_norms_c64_kernel(
     const int64_t source = input_vector_index(b, token, h, d);
     const int64_t scalar = static_cast<int64_t>(n) * kChunk + row;
     const int64_t destination = chunk_vector_index(n, row, d);
+    const int64_t grouped_destination =
+        (static_cast<int64_t>(grouped_n) * kChunk + row) * kDim + d;
     const float q_value = __bfloat162float(q[source]);
     const float k_value = __bfloat162float(k[source]);
     qbar[destination] = __float2bfloat16_rn(
         (q_value * q_inverse[scalar]) * scale);
     khat[destination] = __float2bfloat16_rn(
         k_value * k_inverse[scalar]);
+    P[grouped_destination] = __float2bfloat16_rn(
+        beta[scalar] * __bfloat162float(v[source]));
   }
 }
 
@@ -4011,8 +4021,7 @@ nanochat_kda_chunk_wy_backward_c64(
   const __nv_bfloat16* retained_T =
       retained_A + kRetainedMatrixElements;
   const __nv_bfloat16* retained_W = retained_T + kRetainedMatrixElements;
-  const __nv_bfloat16* retained_P = retained_W + kRetainedVectorElements;
-  const __nv_bfloat16* retained_Q = retained_P + kRetainedVectorElements;
+  const __nv_bfloat16* retained_Q = retained_W + kRetainedVectorElements;
   const __half* retained_prefix = reinterpret_cast<const __half*>(
       retained_Q + kRetainedVectorElements);
   const float* retained_beta = reinterpret_cast<const float*>(
@@ -4023,20 +4032,26 @@ nanochat_kda_chunk_wy_backward_c64(
       retained_q_inverse + kRetainedScalarElements;
   constexpr int kGroupMatrixElements = kGroupRows * kChunk * kChunk;
 
-  // Rebuild only the two BF16 normalized vector surfaces. The exact norm
-  // inverses are retained by forward, so this path performs no reductions.
+  // Rebuild the two BF16 normalized vector surfaces and grouped BF16 P. The
+  // exact scalar operands are retained by forward, so this path performs no
+  // reductions.
   at::Tensor qbar = at::empty(
       {kChunkRows, kChunk, kDim}, q.options());
   at::Tensor khat = at::empty_like(qbar);
+  at::Tensor P = at::empty_like(qbar);
   __nv_bfloat16* qbar_ptr = reinterpret_cast<__nv_bfloat16*>(
       qbar.data_ptr<at::BFloat16>());
   __nv_bfloat16* khat_ptr = reinterpret_cast<__nv_bfloat16*>(
       khat.data_ptr<at::BFloat16>());
+  __nv_bfloat16* P_ptr = reinterpret_cast<__nv_bfloat16*>(
+      P.data_ptr<at::BFloat16>());
   nanochat_kda_wy_backward_rebuild_norms_c64_kernel<<<
       kChunkRows, kDim, 0, stream>>>(
       reinterpret_cast<const __nv_bfloat16*>(q.data_ptr<at::BFloat16>()),
       reinterpret_cast<const __nv_bfloat16*>(k.data_ptr<at::BFloat16>()),
-      retained_q_inverse, retained_k_inverse, qbar_ptr, khat_ptr, scale);
+      reinterpret_cast<const __nv_bfloat16*>(v.data_ptr<at::BFloat16>()),
+      retained_q_inverse, retained_k_inverse, retained_beta,
+      qbar_ptr, khat_ptr, P_ptr, scale);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 
   at::Tensor chunk_state_history = at::empty(
@@ -4073,7 +4088,7 @@ nanochat_kda_chunk_wy_backward_c64(
     const __nv_bfloat16* W_group =
         retained_W + static_cast<int64_t>(group_id) * kGroupVectorElements;
     const __nv_bfloat16* P_group =
-        retained_P + static_cast<int64_t>(group_id) * kGroupVectorElements;
+        P_ptr + static_cast<int64_t>(group_id) * kGroupVectorElements;
     const __nv_bfloat16* Q_group =
         retained_Q + static_cast<int64_t>(group_id) * kGroupVectorElements;
     at::Tensor U_group = at::empty(
