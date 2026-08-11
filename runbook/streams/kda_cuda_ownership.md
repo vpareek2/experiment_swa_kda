@@ -15654,3 +15654,29 @@ Attempt337 was bitwise exact with unchanged REG220/STACK0/LOCAL0 and 71,680 B dy
 ### Next
 
 Use attempt335 only as the closest exact compact-retention scaffold; retain attempt266 as the fully accepted baseline. Do not retry whole-group dO panels or consumer-side U/qg/kg recomputation. Explore locality improvements to the retained surfaces or a distinct exact program shape, and require an absolute trainer median of at least 43,680 tok/s. Quality and statistical confirmation remain blocked.
+
+
+## 2026-08-11 [agent] Attempts338-339 retained-norm locality layouts
+
+### Context
+
+Attempt335 removed the exact backward rebuild but left retained qbar/khat recurrence-major even though every backward consumer traverses one eight-chunk group at a time. Two layout-only diagnostics tested whether group locality or paired loads could add enough performance without changing memory or arithmetic.
+
+### Commands
+
+Attempt338 published qbar/khat in the same group-major physical order as retained P, derived group-local pointers in each reverse iteration, and changed only qbar/khat indexing in the U/qgkg pack, complete, colored, and finalize consumers. Prefix, beta, inverses, and all update ordering stayed recurrence-major. Attempt339 then packed each group-major `(qbar,khat)` pair into an aligned BF16x2 value, using vector loads when both values were consumed and the odd lane for khat-only reads. Both used fresh random-dO and fallback comparisons, resource inspection, and three balanced interleaved profiles.
+
+### Artifacts
+
+- Attempt338 branch `kda-cuda/group-major-retained-norms-338`, commit `19625dfc639264ef5c6ee38f8d42a1cc0eab22e5`; evidence under `runs/kda-cuda-development/attempt-00338-raw-evidence`.
+- Attempt339 branch `kda-cuda/group-major-interleaved-qk-339`, commit `dbd1d51c75ee53dcafa0d685cb88e08d61b84594`; evidence under `runs/kda-cuda-development/attempt-00339-raw-evidence`.
+
+### Result
+
+Attempt338 was bitwise exact in production and fallback. Its whole-NVTX paired savings were 0.067376, 0.021536, and 0.019008 ms; paired median kernel-span and kernel-sum savings were 0.044672 and 0.037728 ms. It was faster in every pair, but the 0.021536-ms paired whole median missed the declared 0.04-ms gate, so it remained a positive subthreshold diagnostic and did not run a trainer. Resources were unchanged except finalize REG30 to REG31, with no new local spill.
+
+Attempt339 was also bitwise exact, but pack registers rose 48 to 56 and complete rose 132 to 134. Ignoring one complete-kernel system-delay outlier, robust independent medians moved whole NVTX 3.877984 to 3.887072 ms and kernel span 3.745376 to 3.755968 ms; kernel sum was effectively flat at 3.556896 to 3.556672 ms. Interleaving is rejected.
+
+### Next
+
+Retain attempt335 as the material compact-retention scaffold and treat attempt338 only as supporting locality evidence. Do not extend q/k interleaving: reduced instruction count did not reduce bytes and increased register pressure. The absolute trainer target remains unmet by 108 tok/s.
