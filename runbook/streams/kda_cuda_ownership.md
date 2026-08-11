@@ -15599,3 +15599,29 @@ Attempt332 was bitwise equal across all 81 hot-path tensors and all fallback/sta
 ### Next
 
 Retain attempt325 and reject attempts331-332. Do not cache colored factors in reduced precision or treat isolated convolution gains as trainer gains. Continue only with exact same-group reuse that reduces a dominant KDA kernel without widening grids, deferring boundaries, or increasing global lifetimes. The fixed 43,680 tok/s target remains active.
+
+
+## 2026-08-11 [agent] Attempts333-334 complete-kernel recomputation and cache diagnostics
+
+### Context
+
+Attempt325 remained below the fixed target after exact convolution input-halo staging failed to improve the trainer. Two exact same-group diagnostics then targeted the dominant complete VJP without changing its 48-CTA group schedule.
+
+### Commands
+
+Attempt333 overwrote the dead dR plane of each ping-pong key-product buffer with exact FP32 `exp(g)` after dR's final use, then reused that value in the later dQ fragment loop. Attempt334 requested the maximum-L1 preferred shared-memory carveout for the complete kernel through checked CUDA runtime metadata. Both used independent random-dO/fallback comparisons, resource inspection, and three interleaved attempt325/candidate Nsight profiles. Neither launched a trainer after its mechanism gate failed.
+
+### Artifacts
+
+- Attempt333 branch `kda-cuda/complete-reuse-expg-333`, commit `b340cd46b99e34baf9e4794ab246228c3de47050`; evidence under `runs/kda-cuda-development/attempt-00333-raw-evidence`.
+- Attempt334 branch `kda-cuda/complete-prefer-l1-334`, commit `846f7f8`; evidence under `runs/kda-cuda-development/attempt-00334-raw-evidence`.
+
+### Result
+
+Attempt333 was bitwise equal to attempt325 and reduced complete resources from REG132 to REG130 with STACK0/SHARED29696/LOCAL0 unchanged. The alias was producer-complete and preserved dE/dW consumers, but the added shared RAW path consistently slowed complete: the three parent samples were 0.763840, 0.757024, and 0.784160 ms versus candidate 0.778688, 0.772160, and 0.791040 ms. Whole movement was mixed/noisy. Exact recomputation is cheaper than this shared reuse.
+
+Attempt334 was also bitwise exact with unchanged REG132/STACK0/SHARED29696/LOCAL0. Its robust complete median moved only 0.768384 to 0.763392 ms, while whole NVTX regressed 4.069136 to 4.087536 ms, kernel span regressed 3.921600 to 3.938848 ms, and kernel sum regressed 3.721568 to 3.734560 ms. The cache-carveout hint is rejected.
+
+### Next
+
+Retain attempt325. Close dead-plane exponential caching and host cache-carveout hints; neither produces a defensible operator reduction. A next candidate must change a material same-group program shape rather than move exact values through more shared memory or tune metadata. The fixed 43,680 tok/s target remains unmet.
