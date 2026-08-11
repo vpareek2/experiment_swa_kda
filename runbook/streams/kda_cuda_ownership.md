@@ -15526,3 +15526,21 @@ Attempt323 built at REG40/STACK0/LOCAL0 and stayed within the FP16 normalized-sc
 
 ### Next
 After restart, resume from main documentation state after attempt324. Do not port implicit-M backward or tile-layout consumers unless a new forward schedule first clears the recorded hard timing gate. The contemporaneous FLA slowdown (43,183 versus historical 43,680) remains a machine-state diagnostic, not a lowered target.
+
+
+## 2026-08-11 [agent] Attempts325-327 contemporaneous FLA parity and convolution reduction diagnostics
+
+### Context
+After the session restart, the machine recovered from the earlier 43,183 FLA capture. Two fresh FLA trainer medians were 43,455 and 43,534 tok/s. Attempt323 produced 43,530, motivating a stack of already-audited independent savings while retaining the fixed 43,680 target.
+
+### Commands
+Stacked attempt323 with BF16 backward-U publication/vector loads, warp dD, warp finalize, and safe underflow guards; ran independent random-dO, selective-PTX-disabled comparison, a project operator profile, and repeated direct trainers. Then tested 512-thread four-lane and 256-thread paired dweight reductions in the width-four convolution backward, with all audit shapes and interleaved isolated profiles. Pushed all branches and preserved raw evidence.
+
+### Artifacts
+Attempt325 `ee35928` on `kda-cuda/best-stack-325`; attempt326 `9e79081`; attempt327 `e48247b`. Direct artifacts are under `runs/kda-cuda-development/attempt-00325-system-state-recheck`; raw evidence/manifests are under attempts325-327 raw-evidence directories.
+
+### Result
+Attempt325 is output-bitwise to attempt323; gradient/fallback deltas remain within the established envelope. Its KDA operator is 3.881680 ms versus contemporaneous FLA 3.896128 ms. Valid trainer medians were 43,598, 43,493, and 43,572 tok/s (median 43,572), while FLA medians were 43,455 and 43,534 (median 43,494.5). Thus the project stack now matches/slightly exceeds contemporaneous FLA, but remains 108 tok/s below the fixed 43,680 target and is not accepted as campaign completion. One attempt325 run was invalid due two collapsed 27k measurements and is recorded as invalid, not a poor score. Attempts326 and327 were bitwise correct but regressed convolution backward from ~0.088-0.089 ms to 0.108608 and 0.089920 ms respectively; both rejected.
+
+### Next
+Retain attempt325 as the closest post324 scaffold, not as accepted completion. Attempt266 remains the audited accepted baseline until a candidate reaches 43,680 and clears all gates. The remaining absolute shortfall is now smaller than the machine-state drift between FLA captures; any further code candidate still needs direct absolute evidence rather than normalization.
