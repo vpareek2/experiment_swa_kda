@@ -15573,3 +15573,29 @@ Attempt330 removed only eight launches and was also production-bitwise exact. It
 ### Next
 
 Retain attempt325 as the closest scaffold and attempt266 as accepted. Close adjacent-boundary deferral and full post-boundary batching: GB10 cache/tensor-core penalties overwhelm launch savings. Continue with same-group arithmetic savings that preserve immediate boundary-to-complete locality; do not run trainers for candidates that fail matched operator profiles. The fixed 43,680 tok/s target remains unmet.
+
+
+## 2026-08-11 [agent] Attempts331-332 local factor reuse and convolution input-halo diagnostics
+
+### Context
+
+After adjacent-group scheduling regressed, work returned to same-group arithmetic and locality while preserving attempt325's immediate boundary-to-complete order. Attempt331 targeted duplicated colored-VJP exponent work. Attempt332 targeted repeated input reads inside the already-fused width-four convolution backward.
+
+### Commands
+
+Attempt331 tested two shared FP16 factors, two shared BF16 factors, and a precision-safe single FP32 target-factor panel inside the colored kernel. Attempt332 staged a producer-complete 70-by-32 BF16 input halo for each 64-by-32 convolution tile and reused it for both preactivation gradients and the original serial dweight partials. Both used isolated SM121 builds, independent parent comparisons, resource inspection, and interleaved profiles. Attempt332 additionally ran 27 hot edge/production cases, six fallback/state cases, all four Compute Sanitizer tools, and ordered direct trainers from a clean pushed commit.
+
+### Artifacts
+
+- Attempt331 branch `kda-cuda/colored-half-factor-cache-331`, commit `a8c9eef3a68c4f6b2bf4333ab57d9f9e7c846c1d`; raw-evidence manifest SHA-256 `ff63054bd1993b5c313a405edd066002bd13aeb8507498c681f3fd714a6cd0b1`.
+- Attempt332 branch `kda-cuda/conv-shared-input-halo-332`, commit `23d23389772eded0f37d2d79f7c6005059d710fa`; evidence under `runs/kda-cuda-development/attempt-00332-raw-evidence` and `runs/kda-cuda-development/attempt-00332-direct-trainer`.
+
+### Result
+
+Attempt331's two FP16 factor panels were invalid because safe exponential differences exceeded FP16 range and produced non-finite gradients. BF16 restored range but violated the parameter-gradient precision envelope. The exact single FP32 target-factor cache was production-bitwise equal to attempt325 and inherited REG48/STACK16/LOCAL0 while raising reported shared storage from 39,936 to 48,128 bytes. Three interleaved profiles rejected it: whole-operator medians were 3.881040 ms parent versus 3.883680 ms candidate, and colored medians were 0.523504 versus 0.526592 ms. Added shared traffic/footprint outweighed the removed exponentiation.
+
+Attempt332 was bitwise equal across all 81 hot-path tensors and all fallback/state captures. Initcheck, memcheck, racecheck, and synccheck reported zero candidate errors. The fused convolution kernel changed REG40/SHARED9600 to REG38/SHARED14080 with STACK0/LOCAL0. Five interleaved isolated medians improved 0.088224 to 0.082416 ms (6.583%). That microgain did not survive the trainer: valid attempt325 medians were 43,407, 43,407, and 43,423 tok/s; candidate medians were 43,247 and 43,422, for aggregate medians 43,407 versus 43,334.5. The best candidate remained 258 tok/s below 43,680. A first candidate run containing a collapsed 25,124 tok/s measurement is recorded invalid rather than scored.
+
+### Next
+
+Retain attempt325 and reject attempts331-332. Do not cache colored factors in reduced precision or treat isolated convolution gains as trainer gains. Continue only with exact same-group reuse that reduces a dominant KDA kernel without widening grids, deferring boundaries, or increasing global lifetimes. The fixed 43,680 tok/s target remains active.
