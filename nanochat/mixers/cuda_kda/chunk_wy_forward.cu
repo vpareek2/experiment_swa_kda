@@ -635,11 +635,23 @@ __global__ void nanochat_kda_wy_retain_a_t_c64_kernel(
     __nv_bfloat16* retained_T) {
   const int index = blockIdx.x * blockDim.x + threadIdx.x;
   constexpr int kMatrixElements = kChunkRows * kChunk * kChunk;
+  constexpr int kChunkMatrixElements = kChunk * kChunk;
   if (index < kMatrixElements) {
-    retained_A[index] = A[index];
-    retained_T[index] = __float2bfloat16_rn(T[index]);
+    const int n = index / kChunkMatrixElements;
+    const int within = index - n * kChunkMatrixElements;
+    const int chunk_id = n % kChunks;
+    const int recurrence = n / kChunks;
+    const int group_id = chunk_id / 8;
+    const int local_chunk = chunk_id - group_id * 8;
+    const int grouped_n =
+        group_id * (kRecurrences * 8) + recurrence * 8 + local_chunk;
+    const int64_t destination =
+        static_cast<int64_t>(grouped_n) * kChunkMatrixElements + within;
+    retained_A[destination] = A[index];
+    retained_T[destination] = __float2bfloat16_rn(T[index]);
   }
 }
+
 
 __device__ __forceinline__ __nv_bfloat16* wy_forward_h_value_half(
     __nv_bfloat16* history_lo,
