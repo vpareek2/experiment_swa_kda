@@ -15314,3 +15314,28 @@ nsys profile --trace=cuda,nvtx,osrt --sample=none --cpuctxsw=none <matched synch
 **Next**
 
 - Keep attempt231 accepted. Close early-helper dD and forced-register colored occupancy; do not use the invalid immediate colored publication variant.
+
+
+## 2026-08-11 [Codex] Reject attempts235-238 after attempt231
+
+**Context**
+
+- Attempts235/237 pipeline exact serial norm reductions with double buffers, first using owner thread0 and then a dedicated reducer warp. Attempt236 overlaps group-UW with qg/kg/W packing. Attempt238 splits the selective forward register-state BV32 owner into BV16 grid48 owners.
+
+**Artifacts**
+
+- Attempt235 `058e11944a01134edc18bac59f815f962240ea32`, branch `kda-cuda/pipeline-preprocess-norms-235`, manifest `bdc74aa330be0c90ef91a2d245514ed7974f7e10d4839f0c4f014073ad3084d5`.
+- Attempt236 `b7ef018600bd331cf5e579eb3e55e7ba399d12a6`, branch `kda-cuda/fuse-groupuw-pack-236`, manifest `c514c415d9a206d9b0d25620f032b76786228a287d74e0aaf6ee582b9cdd3566`.
+- Attempt237 `feefac79fa1aac37d81a9132618042c29bc70603`, branch `kda-cuda/reducer-warp-preprocess-237`, manifest `e30aea6e62fa2cd46eaec67ec67e1c26150f7cdbc830456d30bbbdb9b5dfb74c`.
+- Attempt238 `9eb28e62f862ac511d727c661a3f4bc5f604e24f`, branch `kda-cuda/split-forward-state-value-238`, manifest `1ff8318e892b75f3dc73ff372b1524aba6898e236e746ef9b1bf21242395fa08`.
+- Append-only development index SHA-256 after attempt238: `ff02b285ddadaa6d843fe38fa279c0af19fa0f4c296c066b50ba185aadb94622`.
+
+**Result**
+
+- All four tested arithmetic candidates are random-upstream bitwise exact where run. Attempts235/237 are synccheck-clean but preprocess regresses from 0.852096 ms to 0.894880/0.896608 ms.
+- Attempt236 merged groupUW+pack is **0.651056 ms** versus **0.669744 ms**, only 0.018688-ms better, while whole kernel sum regresses 5.405360 -> 5.444848 ms; it misses the 0.15-ms gate.
+- Attempt238 uses 242 regs, zero spill and is exact, but forward state changes only **0.436560 -> 0.430656 ms** and whole saving is ~0.019 ms. No Level 1/2 for attempts235-238.
+
+**Next**
+
+- Keep attempt231 accepted. Pipelined serial norms, dual-team groupUW packing, and forward BV16 splitting are insufficient alone.
