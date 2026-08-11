@@ -652,29 +652,49 @@ __global__ void nanochat_kda_wy_pack_async_scan_vectors_c64_kernel(
 // M's bytes hold values 0..63 for every H row. Restored-k occupies the
 // first BF16 half of each doubled Q chunk stride; its interleaved second half
 // holds H values 64..127. Both halves therefore expose a compact lda=64 tile.
-__global__ void nanochat_kda_wy_retain_a_t_c64_kernel(
+__global__ void nanochat_kda_wy_retain_forward_operands_c64_kernel(
     const __nv_bfloat16* A,
     const float* T,
+    const float* W,
+    const float* P,
+    const float* Q,
     __nv_bfloat16* retained_A,
-    __nv_bfloat16* retained_T) {
+    __nv_bfloat16* retained_T,
+    __nv_bfloat16* retained_W,
+    __nv_bfloat16* retained_P,
+    __nv_bfloat16* retained_Q) {
   const int index = blockIdx.x * blockDim.x + threadIdx.x;
   constexpr int kMatrixElements = kChunkRows * kChunk * kChunk;
+  constexpr int kVectorElements = kChunkRows * kChunk * kDim;
   constexpr int kChunkMatrixElements = kChunk * kChunk;
+  constexpr int kChunkVectorElements = kChunk * kDim;
   if (index < kMatrixElements) {
     const int n = index / kChunkMatrixElements;
     const int within = index - n * kChunkMatrixElements;
     const int chunk_id = n % kChunks;
     const int recurrence = n / kChunks;
-    const int group_id = chunk_id / 8;
-    const int local_chunk = chunk_id - group_id * 8;
-    // Backward slices one group as [recurrence, local_chunk]; never copy the
-    // forward recurrence-major n directly into this retained group backing.
     const int grouped_n =
-        group_id * (kRecurrences * 8) + recurrence * 8 + local_chunk;
+        (chunk_id / 8) * (kRecurrences * 8) +
+        recurrence * 8 + chunk_id % 8;
     const int64_t destination =
         static_cast<int64_t>(grouped_n) * kChunkMatrixElements + within;
     retained_A[destination] = A[index];
     retained_T[destination] = __float2bfloat16_rn(T[index]);
+  }
+  if (index < kVectorElements) {
+    const int n = index / kChunkVectorElements;
+    const int within = index - n * kChunkVectorElements;
+    const int chunk_id = n % kChunks;
+    const int recurrence = n / kChunks;
+    // Backward slices each retained vector as [group, recurrence, chunk].
+    const int grouped_n =
+        (chunk_id / 8) * (kRecurrences * 8) +
+        recurrence * 8 + chunk_id % 8;
+    const int64_t destination =
+        static_cast<int64_t>(grouped_n) * kChunkVectorElements + within;
+    retained_W[destination] = __float2bfloat16_rn(W[index]);
+    retained_P[destination] = __float2bfloat16_rn(P[index]);
+    retained_Q[destination] = __float2bfloat16_rn(Q[index]);
   }
 }
 
@@ -1425,13 +1445,15 @@ at::Tensor nanochat_kda_chunk_wy_forward_c64(
       static_cast<int64_t>(kChunks / 8 - 1) * kRecurrences * kDim * kDim;
   constexpr int64_t kRetainedMatrixElements =
       static_cast<int64_t>(kChunkRows) * kChunk * kChunk;
-  // The visible tensor is a contiguous prefix. Its saved storage keeps the
-  // seven FP32 group-boundary states plus the exact BF16 A/T tensor-core
-  // operands required by backward. Backward therefore deletes its pair
-  // rebuild and triangular solve instead of copying public intermediates.
+  constexpr int64_t kRetainedVectorElements =
+      static_cast<int64_t>(kChunkRows) * kChunk * kDim;
+  // The visible tensor is a contiguous prefix. Its backing is, in order:
+  // visible BF16 output | FP32 checkpoints | BF16 A | BF16 T | BF16 W/P/Q.
+  // Retained operands are group-major for direct reverse-group consumption.
   at::Tensor output_storage = at::empty(
       {kOutputElements + 2 * kCheckpointElements +
-       2 * kRetainedMatrixElements}, v.options());
+       2 * kRetainedMatrixElements + 3 * kRetainedVectorElements},
+      v.options());
   at::Tensor output = output_storage.narrow(0, 0, kOutputElements).view(
       {kBatch, kLength, kHeads, kDim});
   __nv_bfloat16* output_sidecar = reinterpret_cast<__nv_bfloat16*>(
@@ -1441,6 +1463,9 @@ at::Tensor nanochat_kda_chunk_wy_forward_c64(
   __nv_bfloat16* retained_A =
       output_sidecar + 2 * kCheckpointElements;
   __nv_bfloat16* retained_T = retained_A + kRetainedMatrixElements;
+  __nv_bfloat16* retained_W = retained_T + kRetainedMatrixElements;
+  __nv_bfloat16* retained_P = retained_W + kRetainedVectorElements;
+  __nv_bfloat16* retained_Q = retained_P + kRetainedVectorElements;
 
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream(q.get_device());
   constexpr int kThreads = 256;
@@ -1486,12 +1511,16 @@ at::Tensor nanochat_kda_chunk_wy_forward_c64(
   at::bmm_out(U, T, P);
   at::bmm_out(W, T, Q);
 
-  nanochat_kda_wy_retain_a_t_c64_kernel<<<
-      (kRetainedMatrixElements + kThreads - 1) / kThreads,
+  // Retain the rounded backward operands after both products complete and
+  // before scan packing reuses Q/T/P storage.
+  nanochat_kda_wy_retain_forward_operands_c64_kernel<<<
+      (kRetainedVectorElements + kThreads - 1) / kThreads,
       kThreads, 0, stream>>>(
       reinterpret_cast<const __nv_bfloat16*>(
           A.data_ptr<at::BFloat16>()),
-      T.data_ptr<float>(), retained_A, retained_T);
+      T.data_ptr<float>(), W.data_ptr<float>(), P.data_ptr<float>(),
+      Q.data_ptr<float>(), retained_A, retained_T, retained_W, retained_P,
+      retained_Q);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 
   constexpr int kVectorElements = kChunkRows * kChunk * kDim;
