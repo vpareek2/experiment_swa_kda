@@ -15508,3 +15508,21 @@ Compact multiplicative decay regressed preprocess. BF16 qbar/khat saved operator
 
 ### Next
 Do not accept reduced-precision forward normalized scratch on profile evidence. Attempt308 remains the closest observed scaffold, while attempt266 remains the accepted baseline.
+
+
+## 2026-08-11 [agent] Attempts323-324 broad forward diagnostics before session restart
+
+### Context
+Continued from attempt322 while retaining attempt266 as accepted and attempt308 as the closest scaffold. Independent audit found the current KDA operator at about 4.03 ms versus contemporaneous FLA about 3.90 ms; no untried forward-only microvariant has a defensible 4.7 ms/trainer-step envelope.
+
+### Commands
+Implemented and profiled two bounded broad diagnostics from attempt308: a 96,768-byte opt-in-shared preprocess/build factory that eliminates global qbar/khat/prefix/beta surfaces, and an inverse-free retained-M unit-lower U/W solve. Used isolated caches, independent random inputs, paired Nsys, resource inspection, and explicit early gates. Pushed both branches and preserved raw evidence/manifests.
+
+### Artifacts
+Attempt323 `9997821` on `kda-cuda/fused-preprocess-build-323`; attempt324 `d582905` on `kda-cuda/implicit-m-solve-324`; raw evidence under `attempt-00323-raw-evidence` and `attempt-00324-raw-evidence`.
+
+### Result
+Attempt323 built at REG40/STACK0/LOCAL0 and stayed within the FP16 normalized-scratch tolerance envelope, but its fused phase was 0.678544 ms versus 0.798688 ms, only 0.120144 ms saved and above the 0.65 ms factory gate; rejected before trainer. Attempt324's forward output differed by only 0.000244140625, but build plus implicit solve was 0.631136 ms versus the required <=0.3236 ms; rejected before backward or trainer. Neither changes the accepted baseline or fixed 43,680 target.
+
+### Next
+After restart, resume from main documentation state after attempt324. Do not port implicit-M backward or tile-layout consumers unless a new forward schedule first clears the recorded hard timing gate. The contemporaneous FLA slowdown (43,183 versus historical 43,680) remains a machine-state diagnostic, not a lowered target.
