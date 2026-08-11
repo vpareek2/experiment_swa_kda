@@ -3864,8 +3864,8 @@ __global__ void nanochat_kda_wy_backward_finalize_c64_kernel(
   const int h = recurrence % kHeads;
   const int b = recurrence / kHeads;
   const int token_start = chunk_id * kChunk;
-  __shared__ float q_contribution[kDim];
-  __shared__ float k_contribution[kDim];
+  __shared__ float q_warp_contribution[4];
+  __shared__ float k_warp_contribution[4];
   __shared__ float q_dot;
   __shared__ float k_dot;
 
@@ -3873,16 +3873,28 @@ __global__ void nanochat_kda_wy_backward_finalize_c64_kernel(
   const int64_t offset = chunk_vector_index(n, row, d);
   const int64_t local_offset = chunk_vector_index(local_n, row, d);
   const float normalized_q = __bfloat162float(qbar[offset]) / scale;
-  q_contribution[d] = dqbar[local_offset] * normalized_q;
-  k_contribution[d] = dkhat[local_offset] * __bfloat162float(khat[offset]);
+  float q_term = dqbar[local_offset] * normalized_q;
+  float k_term = dkhat[local_offset] * __bfloat162float(khat[offset]);
+  for (int lane_offset = 16; lane_offset > 0; lane_offset >>= 1) {
+    q_term += __shfl_down_sync(0xffffffffu, q_term, lane_offset);
+    k_term += __shfl_down_sync(0xffffffffu, k_term, lane_offset);
+  }
+  const int lane = d & 31;
+  const int warp = d >> 5;
+  if (lane == 0) {
+    q_warp_contribution[warp] = q_term;
+    k_warp_contribution[warp] = k_term;
+  }
   __syncthreads();
   if (d == 0) {
-    float q_sum = 0.0f;
-    float k_sum = 0.0f;
-    for (int key = 0; key < kDim; ++key) {
-      q_sum += q_contribution[key];
-      k_sum += k_contribution[key];
-    }
+    float q_sum = q_warp_contribution[0];
+    float k_sum = k_warp_contribution[0];
+    q_sum += q_warp_contribution[1];
+    k_sum += k_warp_contribution[1];
+    q_sum += q_warp_contribution[2];
+    k_sum += k_warp_contribution[2];
+    q_sum += q_warp_contribution[3];
+    k_sum += k_warp_contribution[3];
     q_dot = q_sum;
     k_dot = k_sum;
   }
