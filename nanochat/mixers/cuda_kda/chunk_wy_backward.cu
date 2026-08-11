@@ -1176,7 +1176,11 @@ __global__ void nanochat_kda_wy_backward_fp32_to_bf16_c64_kernel(
 __global__ void nanochat_kda_wy_backward_group_u_pack_qgkg_bf16_c64_kernel(
     const __nv_bfloat16* T,
     const __nv_bfloat16* P,
+#if defined(NANOCHAT_DISABLE_SELECTIVE_PTX)
     float* U,
+#else
+    __nv_bfloat16* U,
+#endif
     const __nv_bfloat16* qbar,
     const __nv_bfloat16* khat,
     const __half* prefix_g,
@@ -1248,8 +1252,21 @@ __global__ void nanochat_kda_wy_backward_group_u_pack_qgkg_bf16_c64_kernel(
     const int64_t destination =
         (static_cast<int64_t>(local_n) * kChunk + row_start) * kDim +
         value_start;
+#if defined(NANOCHAT_DISABLE_SELECTIVE_PTX)
     wmma::store_matrix_sync(
         U + destination, u_accumulator, kDim, wmma::mem_row_major);
+#else
+#pragma unroll
+    for (int element = 0; element < u_accumulator.num_elements; element += 2) {
+      const int row = (lane >> 2) + ((element & 2) ? 8 : 0);
+      const int value = ((lane & 3) << 1) + ((element & 4) ? 8 : 0);
+      *reinterpret_cast<__nv_bfloat162*>(
+          U + destination + static_cast<int64_t>(row) * kDim + value) =
+          __halves2bfloat162(
+              __float2bfloat16_rn(u_accumulator.x[element]),
+              __float2bfloat16_rn(u_accumulator.x[element + 1]));
+    }
+#endif
   }
 
   // The direct state scan has four independent value owners. Pack qg/kg once
@@ -2053,7 +2070,7 @@ __device__ __forceinline__ void nanochat_kda_wy_register_dh_barrier() {
 __global__ __launch_bounds__(160, 1)
 void nanochat_kda_wy_backward_fused_boundary_register_dh_group_c64_kernel(
     const __half* prefix_g,
-    const float* U,
+    const __nv_bfloat16* U_bf16,
     const __nv_bfloat16* W_bf16,
     const __nv_bfloat16* E_transposed,
     const __nv_bfloat16* E,
@@ -2245,10 +2262,18 @@ void nanochat_kda_wy_backward_fused_boundary_register_dh_group_c64_kernel(
             const int64_t u01 = chunk_vector_index(group_n, row0, value_start + value1);
             const int64_t u10 = chunk_vector_index(group_n, row1, value_start + value0);
             const int64_t u11 = chunk_vector_index(group_n, row1, value_start + value1);
-            const float z00 = U[u00] - wh[row_tile][value_half][0];
-            const float z01 = U[u01] - wh[row_tile][value_half][1];
-            const float z10 = U[u10] - wh[row_tile][value_half][2];
-            const float z11 = U[u11] - wh[row_tile][value_half][3];
+            const __nv_bfloat162 u0 =
+                *reinterpret_cast<const __nv_bfloat162*>(U_bf16 + u00);
+            const __nv_bfloat162 u1 =
+                *reinterpret_cast<const __nv_bfloat162*>(U_bf16 + u10);
+            const float z00 = __bfloat162float(__low2bfloat16(u0)) -
+                wh[row_tile][value_half][0];
+            const float z01 = __bfloat162float(__high2bfloat16(u0)) -
+                wh[row_tile][value_half][1];
+            const float z10 = __bfloat162float(__low2bfloat16(u1)) -
+                wh[row_tile][value_half][2];
+            const float z11 = __bfloat162float(__high2bfloat16(u1)) -
+                wh[row_tile][value_half][3];
             const __nv_bfloat16 bz00 = __float2bfloat16_rn(z00);
             const __nv_bfloat16 bz01 = __float2bfloat16_rn(z01);
             const __nv_bfloat16 bz10 = __float2bfloat16_rn(z10);
@@ -4089,8 +4114,13 @@ nanochat_kda_chunk_wy_backward_c64(
         P_ptr + static_cast<int64_t>(group_id) * kGroupVectorElements;
     const __nv_bfloat16* Q_group =
         retained_Q + static_cast<int64_t>(group_id) * kGroupVectorElements;
+#if defined(NANOCHAT_DISABLE_SELECTIVE_PTX)
     at::Tensor U_group = at::empty(
         {kGroupRows, kChunk, kDim}, fp32);
+#else
+    at::Tensor U_group = at::empty(
+        {kGroupRows, kChunk, kDim}, q.options());
+#endif
     at::Tensor dZ_group_bf16 = at::empty(
         {kGroupRows, kChunk, kDim}, q.options());
     at::Tensor dstate_next_group_bf16 = at::empty(
@@ -4108,7 +4138,12 @@ nanochat_kda_chunk_wy_backward_c64(
         kGroupUBlocks > kGroupPackBlocks ? kGroupUBlocks : kGroupPackBlocks;
     nanochat_kda_wy_backward_group_u_pack_qgkg_bf16_c64_kernel<<<
         kGroupUPackBlocks, kGroupUPackThreads, 0, stream>>>(
+#if defined(NANOCHAT_DISABLE_SELECTIVE_PTX)
         T_group, P_group, U_group.data_ptr<float>(),
+#else
+        T_group, P_group, reinterpret_cast<__nv_bfloat16*>(
+            U_group.data_ptr<at::BFloat16>()),
+#endif
         qbar_ptr, khat_ptr, retained_prefix,
         reinterpret_cast<__nv_bfloat16*>(
             qg_group_bf16.data_ptr<at::BFloat16>()),
@@ -4128,7 +4163,8 @@ nanochat_kda_chunk_wy_backward_c64(
 #if defined(NANOCHAT_DISABLE_SELECTIVE_PTX)
     nanochat_kda_wy_backward_group_boundary_wmma_c64_kernel<<<
         kRecurrences * (kDim / 16), 256, 0, stream>>>(
-        retained_prefix, U_group.data_ptr<float>(), W_group,
+        retained_prefix, reinterpret_cast<const __nv_bfloat16*>(
+            U_group.data_ptr<at::BFloat16>()), W_group,
         reinterpret_cast<const __nv_bfloat16*>(
             kg_transposed_group_bf16.data_ptr<at::BFloat16>()),
         reinterpret_cast<const __nv_bfloat16*>(
