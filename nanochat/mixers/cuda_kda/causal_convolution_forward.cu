@@ -71,7 +71,7 @@ __global__ void nanochat_kda_causal_convolution_forward_kernel(
   output[index] = __float2bfloat16_rn(rounded_preactivation * sigmoid);
 }
 
-__global__ void nanochat_kda_causal_convolution_forward_w4_t4_kernel(
+__global__ void nanochat_kda_causal_convolution_forward_kernel_w4_t4(
     const __nv_bfloat16* x,
     const __nv_bfloat16* weight,
     const __nv_bfloat16* initial_state,
@@ -193,7 +193,7 @@ std::tuple<at::Tensor, c10::optional<at::Tensor>> causal_convolution_forward_cud
                                     forward_threads),
           static_cast<unsigned int>((length + 3) / 4),
           static_cast<unsigned int>(batch));
-      nanochat_kda_causal_convolution_forward_w4_t4_kernel<<<
+      nanochat_kda_causal_convolution_forward_kernel_w4_t4<<<
           tiled_blocks, forward_threads, 0,
           at::cuda::getCurrentCUDAStream(x.get_device())>>>(
           reinterpret_cast<const __nv_bfloat16*>(x.data_ptr<at::BFloat16>()),
