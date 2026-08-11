@@ -7,7 +7,6 @@
 
 #include "chunk_wy_common.cuh"
 
-#include <ATen/Context.h>
 #include <ATen/core/grad_mode.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAException.h>
@@ -104,8 +103,9 @@ __global__ void nanochat_kda_wy_preprocess_c64_kernel(
     float* retained_beta,
     float* retained_q_inverse,
     float* retained_k_inverse,
-    float* P,
-    float* Q,
+    __nv_bfloat16* P,
+    __nv_bfloat16* Q,
+    __nv_bfloat16* retained_Q,
     float lower_bound,
     float scale) {
   const int n = blockIdx.x;
@@ -115,6 +115,9 @@ __global__ void nanochat_kda_wy_preprocess_c64_kernel(
   }
   const int chunk_id = n % kChunks;
   const int recurrence = n / kChunks;
+  const int grouped_n =
+      (chunk_id / 8) * (kRecurrences * 8) +
+      recurrence * 8 + chunk_id % 8;
   const int h = recurrence % kHeads;
   const int b = recurrence / kHeads;
   const int token_start = chunk_id * kChunk;
@@ -180,8 +183,13 @@ __global__ void nanochat_kda_wy_preprocess_c64_kernel(
     qgamma[destination] = __float2bfloat16_rn(normalized_q * exp_g);
     prefix_g[destination] = running_g;
     retained_prefix[destination] = __float2half_rn(running_g);
-    P[destination] = beta_value * __bfloat162float(v[source]);
-    Q[destination] = beta_value * exp_g * normalized_k;
+    const __nv_bfloat16 rounded_P = __float2bfloat16_rn(
+        beta_value * __bfloat162float(v[source]));
+    const __nv_bfloat16 rounded_Q = __float2bfloat16_rn(
+        beta_value * exp_g * normalized_k);
+    P[destination] = rounded_P;
+    Q[destination] = rounded_Q;
+    retained_Q[chunk_vector_index(grouped_n, row, d)] = rounded_Q;
     __syncthreads();
   }
 }
@@ -635,18 +643,16 @@ __global__ void nanochat_kda_wy_scan_state_add_c64_kernel(
 }
 
 // Q/T are dead after U/W are formed. Convert the restored key and W into
-// those existing allocations while retaining the rounded W/Q operands for
-// backward. One CTA owns a complete chunk so every Q value is retained before
-// the compact restored-key writes reuse the first half of Q's FP32 backing.
+// those existing allocations while retaining the rounded W operand for
+// backward. Preprocess already published retained Q before this launch, so the
+// compact restored-key writes have no Q dependency or synchronization barrier.
 __global__ void nanochat_kda_wy_pack_async_scan_vectors_c64_kernel(
     const float* khat,
     const float* prefix_g,
     const float* W,
-    const float* Q,
     float* restored_storage,
     float* W_storage,
-    __nv_bfloat16* retained_W,
-    __nv_bfloat16* retained_Q) {
+    __nv_bfloat16* retained_W) {
   constexpr int kChunkElements = kChunk * kDim;
   constexpr int kPackThreads = 1024;
   constexpr int kElementsPerThread = kChunkElements / kPackThreads;
@@ -677,9 +683,7 @@ __global__ void nanochat_kda_wy_pack_async_scan_vectors_c64_kernel(
     const __nv_bfloat16 rounded_W = __float2bfloat16_rn(W_value);
     packed_W[source] = rounded_W;
     retained_W[destination] = rounded_W;
-    retained_Q[destination] = __float2bfloat16_rn(Q[source]);
   }
-  __syncthreads();
 
 #pragma unroll
   for (int item = 0; item < kElementsPerThread; ++item) {
@@ -729,6 +733,94 @@ __global__ void nanochat_kda_wy_retain_a_t_c64_kernel(
   }
 }
 
+
+
+// Form both rounded forward WY products without an allocator-backed library
+// call. Adjacent four-warp CTAs own U and W for the same chunk/value tile, so
+// the products run independently while every warp retains one FP32 accumulator.
+// T is retained group-major; P/Q occupy the compact first BF16 half of their
+// recurrence-major FP32 backing. The inner tiles are visited in fixed K order.
+__global__ void nanochat_kda_wy_forward_uw_wmma_c64_kernel(
+    const __nv_bfloat16* retained_T,
+    const __nv_bfloat16* P,
+    const __nv_bfloat16* Q,
+    float* U,
+    float* W) {
+  namespace wmma = nvcuda::wmma;
+  constexpr int kTile = 16;
+  constexpr int kTileElements = kTile * kTile;
+  constexpr int kValueTiles = kDim / kTile;
+
+  const int product_owner = blockIdx.x;
+  const int owner = product_owner / 2;
+  const int product = product_owner - owner * 2;
+  const int n = owner / kValueTiles;
+  const int value_tile = owner - n * kValueTiles;
+  if (n >= kChunkRows) {
+    return;
+  }
+  const int chunk_id = n % kChunks;
+  const int recurrence = n / kChunks;
+  const int grouped_n =
+      (chunk_id / 8) * (kRecurrences * 8) +
+      recurrence * 8 + chunk_id % 8;
+  const int value_start = value_tile * kTile;
+  const int warp = threadIdx.x / warpSize;
+  const int lane = threadIdx.x % warpSize;
+  const int row_start = warp * kTile;
+
+  __shared__ __align__(16) __nv_bfloat16 left[4 * kTileElements];
+  __shared__ __align__(16) __nv_bfloat16 right[kTileElements];
+
+  using MatrixA = wmma::fragment<
+      wmma::matrix_a, kTile, kTile, kTile,
+      __nv_bfloat16, wmma::row_major>;
+  using MatrixB = wmma::fragment<
+      wmma::matrix_b, kTile, kTile, kTile,
+      __nv_bfloat16, wmma::row_major>;
+  using Accumulator = wmma::fragment<
+      wmma::accumulator, kTile, kTile, kTile, float>;
+
+  Accumulator accumulator;
+  wmma::fill_fragment(accumulator, 0.0f);
+  const __nv_bfloat16* vector_operand = product == 0 ? P : Q;
+
+  for (int inner_start = 0; inner_start < kChunk; inner_start += kTile) {
+    for (int element = lane; element < kTileElements; element += warpSize) {
+      const int row = element / kTile;
+      const int inner = element - row * kTile;
+      const int64_t source =
+          (static_cast<int64_t>(grouped_n) * kChunk + row_start + row) *
+              kChunk + inner_start + inner;
+      left[warp * kTileElements + element] = retained_T[source];
+    }
+    for (int element = threadIdx.x; element < kTileElements;
+         element += blockDim.x) {
+      const int inner = element / kTile;
+      const int value = element - inner * kTile;
+      const int64_t source =
+          (static_cast<int64_t>(n) * kChunk + inner_start + inner) *
+          kDim + value_start + value;
+      right[element] = vector_operand[source];
+    }
+    __syncthreads();
+
+    MatrixA t_fragment;
+    MatrixB vector_fragment;
+    wmma::load_matrix_sync(
+        t_fragment, left + warp * kTileElements, kTile);
+    wmma::load_matrix_sync(vector_fragment, right, kTile);
+    wmma::mma_sync(
+        accumulator, t_fragment, vector_fragment, accumulator);
+    __syncthreads();
+  }
+
+  const int64_t destination =
+      (static_cast<int64_t>(n) * kChunk + row_start) * kDim + value_start;
+  float* output = product == 0 ? U : W;
+  wmma::store_matrix_sync(
+      output + destination, accumulator, kDim, wmma::mem_row_major);
+}
 
 __device__ __forceinline__ __nv_bfloat16* wy_forward_h_value_half(
     __nv_bfloat16* history_lo,
@@ -1509,7 +1601,6 @@ at::Tensor nanochat_kda_chunk_wy_forward_c64(
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream(q.get_device());
   constexpr int kThreads = 256;
   at::NoGradGuard no_grad;
-  at::NoTF32Guard no_tf32;
   // Pair-builder launches cover only the lower 16x16 tile triangle, while the
   // persistent WMMA scan loads all four source tiles for every output row.
   // Define the untouched upper tiles explicitly instead of depending on the
@@ -1531,7 +1622,9 @@ at::Tensor nanochat_kda_chunk_wy_forward_c64(
       reinterpret_cast<__nv_bfloat16*>(qgamma.data_ptr<at::BFloat16>()),
       prefix_g.data_ptr<float>(), beta.data_ptr<float>(), retained_prefix,
       retained_beta, retained_q_inverse, retained_k_inverse,
-      P.data_ptr<float>(), Q.data_ptr<float>(), lower_bound, scale);
+      reinterpret_cast<__nv_bfloat16*>(P.data_ptr<float>()),
+      reinterpret_cast<__nv_bfloat16*>(Q.data_ptr<float>()), retained_Q,
+      lower_bound, scale);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 
   nanochat_kda_wy_build_solve_wmma_c64_kernel<<<
@@ -1542,17 +1635,8 @@ at::Tensor nanochat_kda_chunk_wy_forward_c64(
       T.data_ptr<float>());
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 
-  // ATen uses the PyTorch allocator and the current stream for these two
-  // homogeneous FP32 products.  No private handle or hidden allocation exists.
-  // Explicit guards prevent autograd recording and TF32 contraction inside the
-  // custom-autograd operator.
-  at::Tensor U = at::empty_like(P);
-  at::Tensor W = at::empty_like(Q);
-  at::bmm_out(U, T, P);
-  at::bmm_out(W, T, Q);
-
-  // Retain the matrix operands separately; W/Q are folded into scan packing
-  // before Q/T/P storage is reused.
+  // Retain T in the grouped BF16 order consumed by backward and by the
+  // project-owned forward products before its FP32 backing is reused by W.
   nanochat_kda_wy_retain_a_t_c64_kernel<<<
       (kRetainedMatrixElements + kThreads - 1) / kThreads,
       kThreads, 0, stream>>>(
@@ -1561,11 +1645,20 @@ at::Tensor nanochat_kda_chunk_wy_forward_c64(
       T.data_ptr<float>(), retained_A, retained_T);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 
+  at::Tensor U = at::empty_like(P);
+  at::Tensor W = at::empty_like(Q);
+  nanochat_kda_wy_forward_uw_wmma_c64_kernel<<<
+      kChunkRows * (kDim / 16) * 2, 128, 0, stream>>>(
+      retained_T,
+      reinterpret_cast<const __nv_bfloat16*>(P.data_ptr<float>()),
+      reinterpret_cast<const __nv_bfloat16*>(Q.data_ptr<float>()),
+      U.data_ptr<float>(), W.data_ptr<float>());
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+
   nanochat_kda_wy_pack_async_scan_vectors_c64_kernel<<<
       kChunkRows, 1024, 0, stream>>>(
       khat.data_ptr<float>(), prefix_g.data_ptr<float>(), W.data_ptr<float>(),
-      Q.data_ptr<float>(), Q.data_ptr<float>(), T.data_ptr<float>(),
-      retained_W, retained_Q);
+      Q.data_ptr<float>(), T.data_ptr<float>(), retained_W);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 
   // After U/W and compact restored-k/W are formed, M and P are dead. M's

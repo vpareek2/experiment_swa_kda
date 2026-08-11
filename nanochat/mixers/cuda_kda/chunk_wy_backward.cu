@@ -7,7 +7,6 @@
 
 #include "chunk_wy_common.cuh"
 
-#include <ATen/Context.h>
 #include <ATen/core/grad_mode.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAException.h>
@@ -3991,7 +3990,6 @@ nanochat_kda_chunk_wy_backward_c64(
     float scale) {
   const at::TensorOptions fp32 = A_log.options();
   at::NoGradGuard no_grad;
-  at::NoTF32Guard no_tf32;
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream(q.get_device());
   constexpr int kThreads = 256;
   constexpr int kGroupChunks = 8;
