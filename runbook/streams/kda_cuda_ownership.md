@@ -15290,3 +15290,27 @@ nsys profile --trace=cuda,nvtx,osrt --sample=none --cpuctxsw=none <matched synch
 **Next**
 
 - Continue from attempt231. Preserve attempt227 as its exact parent scaffold and close serialized/fused prefix scans.
+
+
+## 2026-08-11 [Codex] Reject attempts232-234 after accepted attempt231
+
+**Context**
+
+- Attempt232 hides exact group dD in complete helpers before the first dD consumption. Attempt233 reduces colored-VJP shared storage using per-warp scratch and exact phased publication. Attempt234 forces four-CTA colored occupancy.
+
+**Artifacts**
+
+- Attempt232 branch `kda-cuda/hide-dd-in-group-uw-232`, commit `7cc8156c7b7543c6d7466a95673d9ce5d458bd28`, parent attempt231; manifest `d3df1c8b091f6d8aac01e00919040608baae107f04de646d345bb1cf573e35ea`.
+- Attempt233 branch `kda-cuda/low-shared-colored-publish-233`, commit `d1c1f0dd5c89156a15f3c79f95d0cf8db3ce4714`, parent attempt231; manifest `67368c998348ce8f126113c463ebc818b3fdec81992681b9bf423ca90d481140`.
+- Attempt234 branch `kda-cuda/force-four-cta-colored-234`, commit `1b80a584a8492c20304cc978512f116852c15ce6`, parent attempt233; manifest `c34aea18db5db2c949b8579fd13708f7578b614b64069abe5dbc30a8a948eff2`.
+- Append-only development index SHA-256 after attempt234: `7218278507e9f54ea3ce90102251c318b4d78fc7569869a422f9f20b6df59cca`.
+
+**Result**
+
+- Attempt232 is exact and synccheck-clean but complete+dA+dD regresses **0.889056 -> 0.920512 ms**; whole kernel sum is effectively flat. No Level 1.
+- Attempt233 is exact, fallback-equal, and synccheck-clean; colored shared falls to 22,528 B, but 78 regs permit only three CTAs and colored/whole time regress. No Level 1.
+- Attempt234 reaches 64 regs but spills 64 B stack/thread, failing the zero-spill microgate before correctness/profile.
+
+**Next**
+
+- Keep attempt231 accepted. Close early-helper dD and forced-register colored occupancy; do not use the invalid immediate colored publication variant.
