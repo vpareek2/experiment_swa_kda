@@ -15202,3 +15202,24 @@ nsys profile --trace=cuda,nvtx,osrt --sample=none --cpuctxsw=none <matched synch
 **Next**
 
 - Keep attempt217 accepted and attempt222 scaffold. Do not serialize ten colored pairs inside the complete owner CTA.
+
+
+## 2026-08-11 [Codex] Reject attempt226 fused boundary/register-dh at profile gate
+
+**Context**
+
+- Attempt226 overlaps independent selective-PTX boundary-state and register-dh work as disjoint 2-warp/4-warp teams in one 192-thread CTA; fallback keeps the separate standard-CUDA launches.
+
+**Artifacts**
+
+- Branch `kda-cuda/fuse-boundary-registerdh-226`, commit `9dfe39d40d2681c9363bc6cc8854d1147be7b80c`, parent attempt222; evidence manifest `cd9fe4f2907b9d8fb93bf0f66d87063d97e5c7555267c69928322d647f7f8720`.
+- Append-only development index SHA-256 after attempt226: `08cce97d9dab9f6e4caa90a8fa9d8d18ec1b2b5bb297535f79b2163c8910acff`.
+
+**Result**
+
+- Output and every independent-random-upstream gradient are bitwise attempts217/222 and selective-disabled fallback; synccheck reports zero errors. Fused kernel uses 230 registers/thread, 69,632 B dynamic plus 1,024 B static shared, and zero spill.
+- Matched old boundary+register-dh is **0.684320 ms**; fused is **0.521088 ms**, a 0.163232-ms saving that misses the required 0.20-ms profile gate. No Level 1/2 or quality/statistical claim.
+
+**Next**
+
+- Preserve the exact overlap scaffold but do not accept it. Attempt227 splits the independent 32-value strip into 16-value CTAs to fill all 48 SMs.
