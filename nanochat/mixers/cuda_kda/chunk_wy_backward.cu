@@ -31,7 +31,7 @@ constexpr int kChunkRows = kRecurrences * kChunks;
 constexpr int kTilePairs = 10;
 constexpr int kStorageGroupChunks = 8;
 constexpr int kStorageGroupRows = kRecurrences * kStorageGroupChunks;
-constexpr int kFusedBoundaryRegisterDhSharedBytes = 68 * 1024;
+constexpr int kFusedBoundaryRegisterDhSharedBytes = 54 * 1024;
 
 __device__ __forceinline__ void causal_tile_pair(
     int pair, int& target_tile, int& source_tile) {
@@ -2183,7 +2183,7 @@ __global__ void nanochat_kda_wy_backward_register_dh_group_c64_kernel(
 }
 #if !defined(NANOCHAT_DISABLE_SELECTIVE_PTX)
 __device__ __forceinline__ void nanochat_kda_wy_boundary_barrier() {
-  asm volatile("bar.sync 1, 64;\n" ::: "memory");
+  asm volatile("bar.sync 1, 32;\n" ::: "memory");
 }
 
 __device__ __forceinline__ void nanochat_kda_wy_register_dh_barrier() {
@@ -2191,9 +2191,9 @@ __device__ __forceinline__ void nanochat_kda_wy_register_dh_barrier() {
 }
 
 // The boundary recurrence and reverse dh recurrence have no data dependency
-// and publish disjoint histories.  Give their original two- and four-warp
-// teams separate shared-memory surfaces and named barriers inside one CTA.
-__global__ __launch_bounds__(192, 1)
+// and publish disjoint histories.  Give their one- and four-warp teams
+// separate shared-memory surfaces and named barriers inside one CTA.
+__global__ __launch_bounds__(160, 1)
 void nanochat_kda_wy_backward_fused_boundary_register_dh_group_c64_kernel(
     const float* prefix_g,
     const float* U,
@@ -2214,8 +2214,8 @@ void nanochat_kda_wy_backward_fused_boundary_register_dh_group_c64_kernel(
     __nv_bfloat16* dstate_next_history,
     int chunk_start,
     int group_chunks) {
-  // One 68-KiB opt-in allocation contains disjoint 40-KiB boundary and
-  // 28-KiB reverse-dh team surfaces.
+  // One 54-KiB opt-in allocation contains disjoint 40-KiB boundary and
+  // 14-KiB reverse-dh team surfaces.
   extern __shared__ __align__(16) unsigned char shared_bytes[];
   __nv_bfloat16* boundary_w_panel =
       reinterpret_cast<__nv_bfloat16*>(shared_bytes);
@@ -2225,14 +2225,13 @@ void nanochat_kda_wy_backward_fused_boundary_register_dh_group_c64_kernel(
       boundary_z_shared + 32 * 72);
   float* register_dh_shared = boundary_decay + kDim;
   __nv_bfloat16* register_dh_bf16 = reinterpret_cast<__nv_bfloat16*>(
-      register_dh_shared + kDim * 32);
-  __nv_bfloat16* register_dz_shared = register_dh_bf16 + kDim * 32;
+      register_dh_shared + kDim * 16);
+  __nv_bfloat16* register_dz_shared = register_dh_bf16 + kDim * 16;
 
-  if (threadIdx.x < 64) {
+  if (threadIdx.x < 32) {
     const int boundary_thread = threadIdx.x;
 
-      constexpr int kValueTile = 32;
-      constexpr int kWarpValues = 16;
+      constexpr int kValueTile = 16;
       constexpr int kMmaValues = 8;
       constexpr int kKeyTiles = kDim / 16;
       constexpr int kRowTiles = kChunk / 16;
@@ -2248,7 +2247,6 @@ void nanochat_kda_wy_backward_fused_boundary_register_dh_group_c64_kernel(
       const int value_tile = owner % (kDim / kValueTile);
       const int recurrence = owner / (kDim / kValueTile);
       const int value_start = value_tile * kValueTile;
-      const int warp = boundary_thread / warpSize;
       const int lane = boundary_thread % warpSize;
       const int group = lane / 4;
       const int thread = lane % 4;
@@ -2261,7 +2259,7 @@ void nanochat_kda_wy_backward_fused_boundary_register_dh_group_c64_kernel(
     #pragma unroll
         for (int value_half = 0; value_half < 2; ++value_half) {
           const int key_start = key_tile * 16;
-          const int value_base = warp * kWarpValues + value_half * kMmaValues;
+          const int value_base = value_half * kMmaValues;
           const int keys[4] = {
               key_start + 2 * thread, key_start + 2 * thread + 1,
               key_start + 2 * thread + 8, key_start + 2 * thread + 9};
@@ -2290,7 +2288,7 @@ void nanochat_kda_wy_backward_fused_boundary_register_dh_group_c64_kernel(
         const __nv_bfloat16* w_source =
             W_bf16 + chunk_vector_index(group_n, 0, 0);
         for (int vector = boundary_thread;
-             vector < kChunk * (kDim / 8); vector += 64) {
+             vector < kChunk * (kDim / 8); vector += 32) {
           const int row = vector / (kDim / 8);
           const int column_vector = vector - row * (kDim / 8);
           __pipeline_memcpy_async(
@@ -2300,7 +2298,7 @@ void nanochat_kda_wy_backward_fused_boundary_register_dh_group_c64_kernel(
         const __nv_bfloat16* e_source =
             E_transposed + static_cast<int64_t>(group_n) * kDim * kChunk;
         for (int vector = boundary_thread;
-             vector < kDim * (kChunk / 8); vector += 64) {
+             vector < kDim * (kChunk / 8); vector += 32) {
           const int key = vector / (kChunk / 8);
           const int source_vector = vector - key * (kChunk / 8);
           __pipeline_memcpy_async(
@@ -2315,7 +2313,7 @@ void nanochat_kda_wy_backward_fused_boundary_register_dh_group_c64_kernel(
     #pragma unroll
           for (int value_half = 0; value_half < 2; ++value_half) {
             const int key_start = key_tile * 16;
-            const int value_base = warp * kWarpValues + value_half * kMmaValues;
+            const int value_base = value_half * kMmaValues;
             const int key0 = key_start + 2 * thread;
             const int key1 = key0 + 1;
             const int key2 = key0 + 8;
@@ -2383,7 +2381,7 @@ void nanochat_kda_wy_backward_fused_boundary_register_dh_group_c64_kernel(
     #pragma unroll
           for (int value_half = 0; value_half < 2; ++value_half) {
             const int row_start = row_tile * 16;
-            const int value_base = warp * kWarpValues + value_half * kMmaValues;
+            const int value_base = value_half * kMmaValues;
             const int row0 = row_start + group;
             const int row1 = row0 + 8;
             const int value0 = value_base + 2 * thread;
@@ -2413,12 +2411,10 @@ void nanochat_kda_wy_backward_fused_boundary_register_dh_group_c64_kernel(
         nanochat_kda_wy_boundary_barrier();
 
         // E^T has been resident since the chunk-start async panel load.
-        if (warp == 0) {
     #pragma unroll
-          for (int key = lane; key < kDim; key += warpSize) {
-            boundary_decay[key] = expf(prefix_g[
-                chunk_vector_index(n, kChunk - 1, key)]);
-          }
+        for (int key = lane; key < kDim; key += warpSize) {
+          boundary_decay[key] = expf(prefix_g[
+              chunk_vector_index(n, kChunk - 1, key)]);
         }
 
         // Hnext = E^T Z. Keep the complete 128x16 result in accumulator registers
@@ -2446,7 +2442,7 @@ void nanochat_kda_wy_backward_fused_boundary_register_dh_group_c64_kernel(
                 a0, a1, a2, a3);
     #pragma unroll
             for (int value_half = 0; value_half < 2; ++value_half) {
-              const int value_base = warp * kWarpValues + value_half * kMmaValues;
+              const int value_base = value_half * kMmaValues;
               const int source0 = source_start + 2 * thread;
               const int source1 = source0 + 1;
               const int source2 = source0 + 8;
@@ -2530,11 +2526,11 @@ void nanochat_kda_wy_backward_fused_boundary_register_dh_group_c64_kernel(
       }
 
   } else {
-    const int register_thread = threadIdx.x - 64;
+    const int register_thread = threadIdx.x - 32;
 
       namespace wmma = nvcuda::wmma;
       constexpr int kTile = 16;
-      constexpr int kValueStrip = 32;
+      constexpr int kValueStrip = 16;
       constexpr int kValueTiles = kValueStrip / kTile;
       constexpr int kWarps = 4;
 
@@ -4233,7 +4229,7 @@ nanochat_kda_chunk_wy_backward_c64(
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 #if !defined(NANOCHAT_DISABLE_SELECTIVE_PTX)
     nanochat_kda_wy_backward_fused_boundary_register_dh_group_c64_kernel<<<
-        kRecurrences * (kDim / 32), 192,
+        kRecurrences * (kDim / 16), 160,
         kFusedBoundaryRegisterDhSharedBytes, stream>>>(
         prefix_g.data_ptr<float>(), U_group.data_ptr<float>(),
         W_group.data_ptr<float>(),
