@@ -1829,86 +1829,6 @@ __global__ void nanochat_kda_wy_backward_reverse_group_wmma_c64_kernel(
   }
 }
 
-// Form the independent dZ base = A^T dO with one chunk-parallel CTA per
-// 32-value strip.  FLA keeps this product outside its sequential state scan;
-// doing the same restores product concurrency without recreating dstate_base.
-__global__ void nanochat_kda_wy_backward_group_dz_base_wmma_c64_kernel(
-    const __nv_bfloat16* A,
-    const __nv_bfloat16* grad_output,
-    float* dZ_base,
-    int chunk_start,
-    int group_chunks) {
-  namespace wmma = nvcuda::wmma;
-  constexpr int kTile = 16;
-  constexpr int kValueStrip = 32;
-  constexpr int kValueTiles = kValueStrip / kTile;
-  constexpr int kTileElements = kTile * kTile;
-  constexpr int kWarps = 4;
-
-  const int owner = blockIdx.x;
-  const int local_n = owner / (kDim / kValueStrip);
-  const int value_strip = owner - local_n * (kDim / kValueStrip);
-  if (local_n >= kRecurrences * group_chunks) {
-    return;
-  }
-  const int recurrence = local_n / group_chunks;
-  const int local_chunk = local_n - recurrence * group_chunks;
-  const int chunk_id = chunk_start + local_chunk;
-  const int h = recurrence % kHeads;
-  const int b = recurrence / kHeads;
-  const int token_start = chunk_id * kChunk;
-  const int value_start = value_strip * kValueStrip;
-  const int warp = threadIdx.x / warpSize;
-  const int lane = threadIdx.x % warpSize;
-  const int row_start = warp * kTile;
-
-  __shared__ __align__(16) __nv_bfloat16 operand_a[kWarps * kTileElements];
-  __shared__ __align__(16) __nv_bfloat16 operand_b[kWarps * kTileElements];
-
-  using MatrixA = wmma::fragment<
-      wmma::matrix_a, kTile, kTile, kTile,
-      __nv_bfloat16, wmma::row_major>;
-  using MatrixB = wmma::fragment<
-      wmma::matrix_b, kTile, kTile, kTile,
-      __nv_bfloat16, wmma::row_major>;
-  using Accumulator = wmma::fragment<
-      wmma::accumulator, kTile, kTile, kTile, float>;
-
-#pragma unroll
-  for (int value_tile = 0; value_tile < kValueTiles; ++value_tile) {
-    Accumulator accumulator;
-    wmma::fill_fragment(accumulator, 0.0f);
-    const int local_value_start = value_tile * kTile;
-    for (int source_start = 0; source_start < kChunk;
-         source_start += kTile) {
-      for (int element = lane; element < kTileElements;
-           element += warpSize) {
-        const int row = element / kTile;
-        const int column = element - row * kTile;
-        operand_a[warp * kTileElements + element] = A[
-            (static_cast<int64_t>(local_n) * kChunk +
-             source_start + column) * kChunk + row_start + row];
-        operand_b[warp * kTileElements + element] = grad_output[
-            input_vector_index(
-                b, token_start + source_start + row, h,
-                value_start + local_value_start + column)];
-      }
-      __syncwarp();
-      MatrixA a_operand;
-      MatrixB do_operand;
-      wmma::load_matrix_sync(
-          a_operand, operand_a + warp * kTileElements, kTile);
-      wmma::load_matrix_sync(
-          do_operand, operand_b + warp * kTileElements, kTile);
-      wmma::mma_sync(accumulator, a_operand, do_operand, accumulator);
-    }
-    wmma::store_matrix_sync(
-        dZ_base +
-            (static_cast<int64_t>(local_n) * kChunk + row_start) * kDim +
-            value_start + local_value_start,
-        accumulator, kDim, wmma::mem_row_major);
-  }
-}
 
 // FLA's state-backward ownership keeps a 128x32 dh strip resident while it
 // walks chunks in reverse.  Four warps split the eight key tiles; each owns
@@ -1920,7 +1840,7 @@ __global__ void nanochat_kda_wy_backward_register_dh_group_c64_kernel(
     const __nv_bfloat16* kg,
     const float* prefix_g,
     const __nv_bfloat16* W,
-    const float* dZ_base,
+    const __nv_bfloat16* A,
     const __nv_bfloat16* grad_output,
     __nv_bfloat16* dZ_history,
     float* dstate_next,
@@ -2008,16 +1928,36 @@ __global__ void nanochat_kda_wy_backward_register_dh_group_c64_kernel(
     }
     __syncthreads();
 
-    // dZ = dZ_base + kg dh.  Four warps own the four token-row tiles and both
-    // value tiles, matching the compiled FLA state-backward topology.
+    // dZ = A^T dO + kg dh. Four warps own the four token-row tiles and
+    // both value tiles. Keep the two products in independent FP32 fragments.
     {
       const int row_tile = warp;
 #pragma unroll
       for (int value_tile = 0; value_tile < kValueTiles; ++value_tile) {
+        Accumulator base_fragment;
         Accumulator kg_dh;
+        wmma::fill_fragment(base_fragment, 0.0f);
         wmma::fill_fragment(kg_dh, 0.0f);
         const int row_start = row_tile * kTile;
         const int local_value_start = value_tile * kTile;
+        for (int source_start = 0; source_start < kChunk;
+             source_start += kTile) {
+          MatrixACol a_operand;
+          MatrixBRow do_operand;
+          wmma::load_matrix_sync(
+              a_operand,
+              A + (static_cast<int64_t>(group_n) * kChunk + source_start) *
+                      kChunk + row_start,
+              kChunk);
+          wmma::load_matrix_sync(
+              do_operand,
+              grad_output + input_vector_index(
+                  b, token_start + source_start, h,
+                  value_start + local_value_start),
+              kHeads * kDim);
+          wmma::mma_sync(
+              base_fragment, a_operand, do_operand, base_fragment);
+        }
         for (int key_start = 0; key_start < kDim; key_start += kTile) {
           MatrixARow kg_operand;
           MatrixBRow dh_operand;
@@ -2044,7 +1984,7 @@ __global__ void nanochat_kda_wy_backward_register_dh_group_c64_kernel(
               (static_cast<int64_t>(group_n) * kChunk + row) * kDim +
               value_start + value;
           const __nv_bfloat16 rounded = __float2bfloat16_rn(
-              dZ_base[offset] + kg_dh.x[element]);
+              base_fragment.x[element] + kg_dh.x[element]);
           dz_shared[row * kValueStrip + value] = rounded;
           dZ_history[offset] = rounded;
         }
@@ -2149,7 +2089,7 @@ void nanochat_kda_wy_backward_fused_boundary_register_dh_group_c64_kernel(
     __nv_bfloat16* z_history,
     const __nv_bfloat16* qg,
     const __nv_bfloat16* kg,
-    const float* dZ_base,
+    const __nv_bfloat16* A,
     const __nv_bfloat16* grad_output,
     __nv_bfloat16* dZ_history,
     float* dstate_next,
@@ -2548,16 +2488,36 @@ void nanochat_kda_wy_backward_fused_boundary_register_dh_group_c64_kernel(
         }
         nanochat_kda_wy_register_dh_barrier();
 
-        // dZ = dZ_base + kg dh.  Four warps own the four token-row tiles and both
-        // value tiles, matching the compiled FLA state-backward topology.
+        // dZ = A^T dO + kg dh. Four warps own the four token-row tiles.
+        // Keep the two products in independent FP32 fragments.
         {
           const int row_tile = warp;
     #pragma unroll
           for (int value_tile = 0; value_tile < kValueTiles; ++value_tile) {
+            Accumulator base_fragment;
             Accumulator kg_dh;
+            wmma::fill_fragment(base_fragment, 0.0f);
             wmma::fill_fragment(kg_dh, 0.0f);
             const int row_start = row_tile * kTile;
             const int local_value_start = value_tile * kTile;
+            for (int source_start = 0; source_start < kChunk;
+                 source_start += kTile) {
+              MatrixACol a_operand;
+              MatrixBRow do_operand;
+              wmma::load_matrix_sync(
+                  a_operand,
+                  A + (static_cast<int64_t>(group_n) * kChunk + source_start) *
+                          kChunk + row_start,
+                  kChunk);
+              wmma::load_matrix_sync(
+                  do_operand,
+                  grad_output + input_vector_index(
+                      b, token_start + source_start, h,
+                      value_start + local_value_start),
+                  kHeads * kDim);
+              wmma::mma_sync(
+                  base_fragment, a_operand, do_operand, base_fragment);
+            }
             for (int key_start = 0; key_start < kDim; key_start += kTile) {
               MatrixARow kg_operand;
               MatrixBRow dh_operand;
@@ -2584,7 +2544,7 @@ void nanochat_kda_wy_backward_fused_boundary_register_dh_group_c64_kernel(
                   (static_cast<int64_t>(group_n) * kChunk + row) * kDim +
                   value_start + value;
               const __nv_bfloat16 rounded = __float2bfloat16_rn(
-                  dZ_base[offset] + kg_dh.x[element]);
+                  base_fragment.x[element] + kg_dh.x[element]);
               register_dz_shared[row * kValueStrip + value] = rounded;
               dZ_history[offset] = rounded;
             }
@@ -4151,8 +4111,6 @@ nanochat_kda_chunk_wy_backward_c64(
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     at::Tensor dZ_group_bf16 = at::empty(
         {kGroupRows, kChunk, kDim}, q.options());
-    at::Tensor dZ_base = at::empty(
-        {kGroupRows, kChunk, kDim}, fp32);
     at::Tensor dstate_next_group_bf16 = at::empty(
         {kGroupRows, kDim, kDim}, q.options());
     at::Tensor qg_group_bf16 = at::empty(
@@ -4199,13 +4157,6 @@ nanochat_kda_chunk_wy_backward_c64(
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 #endif
 
-    nanochat_kda_wy_backward_group_dz_base_wmma_c64_kernel<<<
-        kGroupRows * (kDim / 32), 128, 0, stream>>>(
-        A_group,
-        reinterpret_cast<const __nv_bfloat16*>(
-            grad_output.data_ptr<at::BFloat16>()),
-        dZ_base.data_ptr<float>(), chunk_start, kGroupChunks);
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
 #if !defined(NANOCHAT_DISABLE_SELECTIVE_PTX)
     nanochat_kda_wy_backward_fused_boundary_register_dh_group_c64_kernel<<<
         kRecurrences * (kDim / 16), 160,
@@ -4226,7 +4177,7 @@ nanochat_kda_chunk_wy_backward_c64(
             qg_group_bf16.data_ptr<at::BFloat16>()),
         reinterpret_cast<const __nv_bfloat16*>(
             kg_group_bf16.data_ptr<at::BFloat16>()),
-        dZ_base.data_ptr<float>(),
+        A_group,
         reinterpret_cast<const __nv_bfloat16*>(
             grad_output.data_ptr<at::BFloat16>()),
         reinterpret_cast<__nv_bfloat16*>(
@@ -4242,8 +4193,7 @@ nanochat_kda_chunk_wy_backward_c64(
             qg_group_bf16.data_ptr<at::BFloat16>()),
         reinterpret_cast<const __nv_bfloat16*>(
             kg_group_bf16.data_ptr<at::BFloat16>()),
-        prefix_g.data_ptr<float>(), W_group,
-        dZ_base.data_ptr<float>(),
+        prefix_g.data_ptr<float>(), W_group, A_group,
         reinterpret_cast<const __nv_bfloat16*>(
             grad_output.data_ptr<at::BFloat16>()),
         reinterpret_cast<__nv_bfloat16*>(
