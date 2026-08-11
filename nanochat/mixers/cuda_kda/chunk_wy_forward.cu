@@ -643,6 +643,8 @@ __global__ void nanochat_kda_wy_retain_a_t_c64_kernel(
     const int recurrence = n / kChunks;
     const int group_id = chunk_id / 8;
     const int local_chunk = chunk_id - group_id * 8;
+    // Backward slices one group as [recurrence, local_chunk]; never copy the
+    // forward recurrence-major n directly into this retained group backing.
     const int grouped_n =
         group_id * (kRecurrences * 8) + recurrence * 8 + local_chunk;
     const int64_t destination =
