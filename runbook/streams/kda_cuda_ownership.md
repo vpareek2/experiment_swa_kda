@@ -15181,3 +15181,24 @@ nsys profile --trace=cuda,nvtx,osrt --sample=none --cpuctxsw=none <matched synch
 **Next**
 
 - Keep attempt217 accepted and attempt222 as the fastest exact scaffold. Close saved-scalar-only preprocessing; it does not remove the dominant vector/exponential work.
+
+
+## 2026-08-11 [Codex] Reject attempt225 fused complete+colored VJP at profile
+
+**Context**
+
+- Attempt225 tests one chunk-owned CTA for cumulative attempt222: retain final negated dM in shared, then traverse colors/pairs in exact order, removing dT global materialization and 32 colored launches.
+
+**Artifacts**
+
+- Branch `kda-cuda/fuse-complete-colored-225`, commit `6ecffd561ae73f8e43339c19c9c18f9aca24ab59`, parent attempt222; diagnostic manifest `adb2ce1748875f7f6b0a81233b5cd7b57eb49752575d53368e65d6b0afcfcabf`.
+- Append-only development index SHA-256 after attempt225: `d547e15ec6cd8e7cbafcef125f06c93f8ab469f41a64b25e9d66ce224ad01289`.
+
+**Result**
+
+- Output and all random-upstream gradients are bitwise attempts217/222 and fallback. Fused resources: 134 regs/thread, 54 KiB dynamic shared, zero spill.
+- Serialization rejects: fused 8-launch total **1.488736 ms** versus matched separate complete+colored **1.333472 ms**, and far above the <=0.81-ms gate. No Level 1/2 or quality/statistical claim.
+
+**Next**
+
+- Keep attempt217 accepted and attempt222 scaffold. Do not serialize ten colored pairs inside the complete owner CTA.
