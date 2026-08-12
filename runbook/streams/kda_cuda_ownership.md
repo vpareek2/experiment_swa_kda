@@ -16185,3 +16185,55 @@ trainer. Further throughput work requires a separately declared objective and
 explicit expansion beyond the current `cuda_kda`-only candidate scope, with a
 mechanism budget large enough to reach the existing 3.45-ms final-operator gate.
 Preserve all current branches, reports, ledgers, tags, and the default backend.
+
+## 2026-08-13 [codex] reject final asynchronous complete-VJP ring at kernel gate
+
+### Context
+
+A late independent synthesis after the internal-search stop identified one
+mechanism not covered by attempt347: keep the original single-key ping-pong
+storage, but replace each complete-VJP stage's full-CTA lockstep with per-buffer
+ready/free synchronization. Its claimed ceiling was 0.20--0.28 ms inside the
+0.801-ms phase, so exactly one bounded pilot reopened the stop decision.
+
+### Commands
+
+Created branch `kda-cuda/async-single-key-complete-349` from clean fused-norm
+foundation `eff658c`. In the complete four-warp VJP only, assigned named ready
+barriers to the two product buffers and named free barriers to their reuse. Four
+helper warps could advance the next single key strip while four owner warps
+finished the prior strip. Product storage, arithmetic order, BF16/FP16/FP32
+boundaries, owner-only barriers, and the final full-CTA dA handoff were unchanged.
+Built for SM121, ran one independent random-upstream complete-layer capture, and
+captured matched ten-call Nsight Systems traces. Stopped at the declared
+complete-kernel gate.
+
+### Artifacts
+
+- Rejected branch/commit `kda-cuda/async-single-key-complete-349` /
+  `0d2195a80fc2f787c5434ca80281779b28553dee`.
+- Build log, exact comparison, Nsight reports/CSV, raw logs, and summary under
+  `runs/kda-hardware-guided/20260812-ncu-counters/async-complete-pilot/`.
+
+### Result
+
+The sampled complete layer was bitwise equal for output, input gradient, and
+every parameter gradient. The proposed overlap did not materialize as useful
+latency hiding: aggregate complete-VJP time regressed from 0.7889696 to
+0.8521792 ms/call, while all-kernel sum regressed from 3.9939488 to 4.2023040
+ms/call. The predeclared requirement was at most 0.60 ms/call, so the pilot
+failed by a wide margin and was rejected immediately. No layer timing campaign,
+checker, sanitizer, trainer, quality evaluation, or private confirmation ran.
+
+This closes the last novel bounded mechanism from the counter review. Attempt347
+shows that batching keys adds footprint and regresses; attempt349 shows that
+single-key ready/free decoupling also regresses despite preserving footprint.
+The prior internal-kernel stop therefore stands with attempts1--349 evidence.
+
+### Next
+
+Do not stack attempts347-349 or reopen complete-pipeline synchronization under
+the current objective. Further throughput work requires explicit authorization
+for a larger native/block ABI or a newly declared algorithmic objective beyond
+the current `cuda_kda`-only scope. Preserve the integrated attempt342, advanced
+`eff658c` branch, all rejected branches, reports, tags, and the default backend.
