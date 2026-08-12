@@ -16118,3 +16118,70 @@ Keep `eff658c` as the only advanced candidate foundation and preserve attempts
 counter review for one mechanism with a credible at-least-0.20-ms complete-layer
 saving. Do not combine phase-only changes or launch a trainer until that fixed
 gate passes.
+
+## 2026-08-13 [codex] close the counter-guided internal-kernel search
+
+### Context
+
+Attempts347-348 supplied the two strongest novel mechanisms from the initial
+Nsight Compute review, but neither cleared the fixed at-least-0.20-ms
+complete-layer forward-plus-backward gate. Before another source edit, the
+remaining dominant phases received source-correlated review against the full
+attempt history. The current authorization still limits candidate changes to
+`nanochat/mixers/cuda_kda/`.
+
+### Commands
+
+Captured metadata-only `-lineinfo` full-set Nsight Compute reports for colored
+pair, fused boundary/register-dh, and group-U/pack in the same isolated build as
+the earlier preprocess, complete-VJP, and forward-output reports. Ranked each
+source hotspot by native Nsight Systems phase ceiling, then checked the apparent
+ownership, residency, staging, publication, and fusion mechanisms against
+attempts 1--348 and the hardware-guided plan's stop rules. No candidate source
+was changed and no trainer was launched.
+
+### Artifacts
+
+- `lineinfo-colored-pair.{ncu-rep,source.csv,details.csv}`
+- `lineinfo-fused-boundary.{ncu-rep,source.csv,details.csv}`
+- `lineinfo-group-u-pack.{ncu-rep,source.csv,details.csv}`
+- Updated consolidated evidence at
+  `runs/kda-hardware-guided/20260812-ncu-counters/summary.json`.
+
+### Result
+
+No remaining bounded internal-kernel mechanism has a credible 0.20-ms
+complete-layer ceiling. Colored pair is 0.5044896 ms/call but its remaining
+long-scoreboard samples concentrate in the final dqbar/dkhat/dprefix global
+read-modify-writes. Prior colored ownership, workspace/reduction, low-shared,
+forced-occupancy, output-owner, and complete-plus-colored schedules already test
+the obvious alternatives; they lose parallelism, locality, or deterministic
+order. The current kernel is REG48 with 38.91-KiB static shared and two waves/SM.
+
+Fused boundary is 0.3970304 ms/call, REG220, 55.30-KiB dynamic shared, and one
+wave/SM, but it is already the retained exact split-fused boundary/register-dh
+lineage after lower-residency, team, and grid variants. Group-U/pack is
+0.3374336 ms/call and exposes another strided publication, but its whole phase
+ceiling and attempts267/270/338/339/341 publication/factor history cannot support
+a 0.20-ms layer claim. Forward output is only 0.1741664 ms/call; even perfect
+removal misses the gate, while attempts210-213 establish the cost of moving its
+history boundary. Complete VJP remains 0.8012192 ms/call, but attempts222,
+225, 232-234, 257-265, 329, 331, 333-334, 340, and the exact-but-slower
+attempt347 close the apparent batching, ownership, occupancy, cache, and fusion
+rewrites exposed by its counters.
+
+This is the hardware-guided plan's declared stop condition, not a claim that all
+possible CUDA programs are exhausted. The narrower `cuda_kda` internal-kernel
+campaign is closed because every remaining counter hotspot is either below the
+fixed gate or maps to measured negative history. Attempt342 remains the
+fixed-target-matching integrated implementation and `eff658c` remains the only
+advanced separate vertical-fusion candidate. Attempts347-348 remain preserved
+negative/subthreshold evidence. No quality result is claimed.
+
+### Next
+
+Do not compose the subthreshold pilots, run their sanitizers, or launch a
+trainer. Further throughput work requires a separately declared objective and
+explicit expansion beyond the current `cuda_kda`-only candidate scope, with a
+mechanism budget large enough to reach the existing 3.45-ms final-operator gate.
+Preserve all current branches, reports, ledgers, tags, and the default backend.
