@@ -16237,3 +16237,76 @@ the current objective. Further throughput work requires explicit authorization
 for a larger native/block ABI or a newly declared algorithmic objective beyond
 the current `cuda_kda`-only scope. Preserve the integrated attempt342, advanced
 `eff658c` branch, all rejected branches, reports, tags, and the default backend.
+
+## 2026-08-13 [codex] launch protected optimized fixed-anchor attempt 5
+
+### Context
+
+A final objective audit found that the later development campaign had reached
+and integrated attempt342, but the independent CUDA-ownership supervisor still
+ended at immutable naive milestone 4. Its report had no retained optimization
+milestone and `release_runs` was empty. Therefore the protected nine-pair
+optimization gate and fifteen-pair fixed-anchor release requirement remained
+unfinished even though separate Level-1/Level-2 evidence had exceeded the old
+43,680 tok/s target.
+
+### Commands
+
+Created isolated branch `kda-cuda/ownership-release-350` directly from immutable
+naive commit `4d1a3b231da2c99882324efbda5306a1815e21c7`. Copied only the seven
+candidate-controlled CUDA source files from integrated attempt342; the protected
+README and every protected controller/config/test file stayed identical to the
+naive parent. The resulting CUDA directory is byte-identical to attempt342
+commit `a237205ccfb2c8b0575407c0e6575094b70f65d6` and current `main`.
+
+Staged the exact source snapshot and ran the ledger-free optimization checker
+with all four sanitizers through the coordinator environment and isolated
+extension/CUDA caches. The first wrapper invocation created its console log in
+the supposedly empty artifact directory before the checker started; the checker
+correctly rejected the nonempty directory. That raw invocation failure was
+preserved, and the corrected run used a sibling console log. Committed and
+pushed the checked snapshot, intook it against exact milestone 4, and launched
+supervisor attempt 5. An agent-owned 15-minute heartbeat monitors the long run
+without duplicating it and is instructed to retain and launch release
+verification only after explicit gate review.
+
+### Artifacts
+
+- Candidate branch/commit `kda-cuda/ownership-release-350` /
+  `095186b840d50c5c427d33e9dc7ec5cc11cc5b08`.
+- Preserved wrapper failure:
+  `runs/cuda-ownership-supervisor/release-350-candidate-check-001-invocation-failure.log`.
+- Successful checker:
+  `runs/cuda-ownership-supervisor/release-350-candidate-check-002/` and sibling
+  console log.
+- Supervisor attempt: ID 5, artifact directory
+  `runs/cuda-ownership-supervisor/6fdb0ec11d7e/attempt-00005/`.
+- Owned process/log receipts:
+  `runs/cuda-ownership-supervisor/attempt-00005-controller-{process.json,console.log}`.
+- Agent heartbeat `79b44900-131b-44be-8fe0-9f28316cab9d`.
+
+### Result
+
+The ledger-free checker completed in 35.89 seconds. Runtime and external Nsight
+profile audits passed, all five operators executed project-owned native CUDA,
+owned fraction was 1.0, runtime was FLA-free, and the mapped binary targeted
+SM121. Memcheck, racecheck, synccheck, and initcheck all completed with
+zero-error summaries. The staged patch was 356,626 bytes with SHA-256
+`6764c85ab0b2644f16617c77526f00f2d8e67a87620ba4e693e04e1e0f529e94`.
+
+The supervisor accepted attempt 5 in the optimization lane with parent milestone
+4 and ledger patch SHA-256
+`ab7e0768763180d11d828d2d716f44d65d43e8743f605dfbf6bde8c8a4d9c19b`.
+The protected run is active. Its naive anchor is intentionally slow, so the
+frozen nine-pair campaign can take substantially longer than an interactive
+turn. This is a launch state only: no optimization retention, release pass, or
+quality claim exists yet.
+
+### Next
+
+Let the protected attempt run without duplication or gate changes. When it
+exits, inspect every correctness, ownership, profile, sanitizer, kernel,
+memory, drift, training, and confidence result. Retain only if the supervisor
+reports `optimization_retained` eligibility. Only then launch the unchanged
+fifteen-pair `verify-release` gate for the new milestone. Preserve raw failures
+and do not switch the default backend.
