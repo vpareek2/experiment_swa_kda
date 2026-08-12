@@ -165,8 +165,9 @@ full incoming-H and Z histories plus one reverse group's local operands and
 adjoints.
 
 The 273 GB/s unified LPDDR fabric makes the worst case of unnecessary global
-materialization relevant, but the 24-MiB L2 may serve nearby consumers and
-compulsory tensor-core work still dominates the largest phases. A traffic
+materialization relevant, but the capacity of GB10's GPU L2 is undisclosed and
+nearby consumers may still hit cache. Compulsory tensor-core work also dominates
+the largest phases. A traffic
 optimization must remove a producer/consumer boundary, not merely exchange one
 global surface for another retained surface. Nsight Compute counters are needed
 before attributing a saving specifically to DRAM traffic.

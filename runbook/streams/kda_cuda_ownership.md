@@ -15830,3 +15830,72 @@ trainer before the complete operator reaches 3.45 ms. If the prototype cannot
 save roughly 0.25 ms, stop internal-kernel work and request explicit protected
 harness expansion for the fused-block ABI. Enable non-admin GPU performance
 counters before making roofline or DRAM-saturation claims.
+
+
+## 2026-08-12 [codex] reject streaming-C64 forward residency prototypes
+
+### Context
+
+The user authorized a bounded prototype of the boundary-deleting implementation
+paradigm, with 50,000 tok/s as the eventual trainer objective. Attempt342 at
+clean `main` commit `69bdb75c18759eeb5fff23988bf5c760520139cd` remained the
+comparison baseline. Work ran in isolated branch
+`kda-cuda/streaming-c64-factory-343`; no candidate source was applied to `main`.
+
+### Commands
+
+First fused the existing 1024-thread factory's rounded BF16 T epilogue directly
+into U/W while retaining the current solve and 96,768-B dynamic shared shape.
+Ran the protected optimization-lane runtime/profile checker, an independent
+exact B2/T4096/H3/K128/V128 random-upstream capture, three interleaved
+30-sample exact-shape forward and forward+backward timing blocks, a cubin
+resource dump, and Nsight Systems.
+
+Then implemented the actual residency proof: 512 threads, four-row preprocess
+waves, C16 solved-T-to-U/W panels, explicit upper-T zeros, and temporary reuse of
+already-allocated Q/Z forward backings. The factory compiled at REG64, 41,728 B
+dynamic plus 1,024 B static shared, zero stack/local bytes, so two CTAs fit the
+published GB10 register/shared/thread limits. Repeated the same checker,
+independent random-upstream comparison, resource dump, interleaved timings, and
+Nsight Systems. No sanitizer, frozen Level 1, trainer, quality evaluation, or
+private confirmation was run after the performance stop gate failed.
+
+### Artifacts
+
+- Full summaries, raw timing blocks, exact comparison JSON, checker outputs,
+  resource dumps, Nsight reports/SQLite exports, scripts, and the rejected
+  candidate patch under
+  `runs/kda-do-less-work/20260812-streaming-c64/`.
+- Rejected source remains staged only in
+  `/home/veer/Master/projects/experiment_swa_kda_streaming_c64`.
+
+### Result
+
+Both candidates were bitwise equal to attempt342 for the sampled production
+output and all seven gradients under an independent random upstream gradient.
+The 1024-thread fused-epilogue proof preserved REG40 and measured its combined
+factory at approximately 0.889 ms; three timing-block medians moved forward
+1.327 to 1.291 ms and forward+backward 3.916 to 3.873 ms. This confirms a real
+but roughly one-percent operator mechanism, not the required 0.25-ms saving.
+
+The 512-thread prototype met its static residency design exactly: REG64,
+41,728 B dynamic shared, 1,024 B static shared, and no spill. Nevertheless its
+Nsight factory average was approximately 0.916 ms versus the fresh plan's
+approximately 0.855-ms baseline factory-plus-U/W sum. Three timing-block medians
+were effectively flat in forward (1.331 to 1.325 ms) and regressed noisily in
+forward+backward (3.898 to 3.925 ms). The hard at-most-0.60-ms phase gate failed
+by a wide margin. Extra panel/global-backing traffic erased the intended
+independent-CTA latency hiding; lower resource residency alone is not a win.
+
+The companion plan's unsupported `24-MiB L2` statement was also corrected: the
+reviewed sources leave GB10 GPU L2 capacity undisclosed. No DRAM-versus-cache
+claim is made without counters.
+
+### Next
+
+Do not retain either prototype and do not continue the internal forward-factory
+axis. Per the predeclared stop rule, request explicit protected-harness/native-
+ABI expansion before piloting vertical convolution/KDA or output norm/gate
+fusion. Keep attempt342 as production baseline, obtain Nsight Compute counter
+access if possible, and do not launch a trainer before a complete fused operator
+reaches the 3.45-ms gate.
