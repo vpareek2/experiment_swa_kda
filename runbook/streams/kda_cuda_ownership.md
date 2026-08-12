@@ -15899,3 +15899,81 @@ ABI expansion before piloting vertical convolution/KDA or output norm/gate
 fusion. Keep attempt342 as production baseline, obtain Nsight Compute counter
 access if possible, and do not launch a trainer before a complete fused operator
 reaches the 3.45-ms gate.
+
+
+## 2026-08-12 [codex] advance exact fused RMSNorm and output-gate candidate
+
+### Context
+
+After the streaming-C64 forward mechanism failed its stop gate, the user
+explicitly authorized prototyping the larger `do less work` boundary-deletion
+paradigm, with 50,000 tok/s as an ambitious eventual trainer objective. The
+expanded candidate was allowed to change `nanochat/mixers/kda.py` and native
+sources under `nanochat/mixers/cuda_kda/`; protected research, evaluation,
+configuration, supervisor, and confirmation code remained unchanged.
+
+### Commands
+
+Measured the exact B2/T4096/H3/D128 BF16 eager RMSNorm-plus-sigmoid-gate
+forward/backward ceiling. Implemented a project-owned native forward kernel and
+VJP with eight row-owning warps per CTA and a deterministic two-stage norm-
+weight reduction. Preserved the current BF16 mixed, BF16 norm-weight cast,
+BF16 normalized value, BF16 sigmoid, final BF16 multiply, and backward handoff
+boundaries. Routed only the exact state-free gradient-enabled project training
+shape through a private custom-autograd boundary; generic, state-bearing,
+decode, and unsupported paths retain their prior composition.
+
+Compared standalone native results to the eager composition across random odd
+row counts, zero inputs, extreme gates, non-unit weights, repeated gradients,
+and a production random-upstream full `KimiDeltaAttention` layer. Ran three
+ordered clean-commit parent/candidate blocks of 20 forward and forward+backward
+samples, cubin resource inspection, all four Compute Sanitizer tools, and the
+full repository suite. A follow-up directly folded norm/gate into the KDA output
+CTA and reused the U backing, but was rejected because moving `g_proj` ahead of
+KDA raised the isolated layer peak without additional speed.
+
+### Artifacts
+
+- Candidate branch `kda-cuda/fused-rmsnorm-gate-345`, commit
+  `eff658ce448fbc8c2f347e13968b3b6bfe009c22`.
+- Raw samples, exact comparison, edge results, resources, sanitizer logs,
+  scripts, rejected producer-integration timings, pytest log, and summary under
+  `runs/kda-do-less-work/20260812-fused-rmsnorm-gate/`.
+- The rejected producer-integrated source remains isolated in worktree
+  `/home/veer/Master/projects/experiment_swa_kda_fused_block` and was not
+  committed or applied to `main`.
+
+### Result
+
+The clean candidate was bitwise equal to the parent for the sampled complete
+layer output, input gradient, and every parameter gradient under random upstream
+gradients. Random/odd, explicit-zero, and extreme-gate direct checks passed the
+protected 0.005/0.02 tolerances and were bitwise equal in the sampled edge
+cases. Memcheck, racecheck, synccheck, and initcheck reported zero errors; the
+repository suite passed with 190 tests passed and 10 skipped.
+
+Across the three clean matched blocks, the median-of-block layer forward moved
+from 1.987952 to 1.890464 ms, saving 0.097488 ms. Forward+backward moved from
+6.317792 to 6.112480 ms, saving **0.205312 ms (3.250%)**. Peak allocation moved
+211,292,672 to 212,341,248 B (**1.004963x**). The candidate therefore narrowly
+clears the predeclared at-least-0.20-ms vertical-fusion gate and the 1.03x memory
+gate. Its kernels compile with REG22/0 shared, REG40/5,120 B shared, and
+REG16/1,056 B shared respectively, all with zero stack/local spill.
+
+The direct producer integration remained bitwise exact and kept the KDA output
+kernel at REG96/33,792 B shared with no spill, but computing `g_proj` before KDA
+raised the isolated peak to about 1.064x and did not improve the ~0.20-ms block
+saving. It is rejected; the standalone fused norm/gate operator is the retained
+candidate mechanism. No trainer or quality evaluation was run, and no 50,000
+tok/s claim is made.
+
+### Next
+
+Use the advanced fused-norm candidate as the foundation for the separately
+bounded convolution/KDA boundary pilot. Preserve the exact width-four halo,
+product/preactivation/SiLU BF16 rounding and random-upstream gradients for all
+three projected inputs and convolution weights. Decide recomputed versus
+retained V with measured evidence. Do not merge to production or launch a
+trainer until the combined complete operator reaches the existing 3.45-ms gate;
+50,000 tok/s remains an aspirational trainer target requiring substantially more
+than this approximately 0.205-ms block saving.
