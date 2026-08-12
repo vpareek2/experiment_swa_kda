@@ -15709,3 +15709,44 @@ Frozen Level 1 advanced attempt342. At T4096, forward+backward improved 5.150608
 ### Next
 
 Accept attempt342 as the fixed-target-matching, fully project-owned CUDA candidate. Attempt266 remains the prior audited baseline and attempt338 remains the performance-bearing parent. Preserve all branches and artifacts. No private confirmation seed was inspected or optimized against. Any future campaign should start from attempt342 only for a separately declared objective; the 43,680 tok/s ownership goal is complete.
+
+
+## 2026-08-12 [codex] document the GB10 architecture and optimization constraints
+
+### Context
+
+Attempt342 was integrated into `main` after clearing the fixed FLA-derived
+target. Before declaring another CUDA campaign, the user requested external
+research on DGX Spark/GB10 architecture to determine whether a defensible
+chip-specific direction exists.
+
+### Commands
+
+Reviewed NVIDIA's DGX Spark hardware and porting guides, current CUDA
+compute-capability and PTX target notes, CUTLASS SM121 documentation, and
+NVIDIA's Spark-versus-B200 tuning article. Queried local PyTorch device
+properties, `lscpu`, and `nvidia-smi` for the exact coordinator host. No kernel,
+training, protected harness, or experiment config was changed or run.
+
+### Artifacts
+
+- `runbook/references/dgx_spark_gb10_architecture.md`
+
+### Result
+
+GB10 is a distinct SM12.1 SoC target rather than a small B200: 48 SMs share a
+273 GB/s LPDDR5X UMA, SM12.x provides 100 KiB shared memory and 64K registers
+per SM, and SM100/SM110 Tensor Memory plus `tcgen05` are unavailable. TMA,
+clusters, DSM, asynchronous copies, and BF16/FP8/FP6/FP4 Tensor Core inputs are
+available. NVIDIA's own cross-platform example selects a much smaller tile and
+higher occupancy for Spark than B200. The most defensible KDA direction is a
+new same-group, byte-minimizing A/T/U/W dataflow that respects register/shared
+residency cliffs; further launch/barrier microvariants are not justified by the
+architecture review alone.
+
+### Next
+
+Build a production-shape GB10 roofline and an attempt342-versus-FLA phase and
+resource profile before designing another kernel. Specify intermediate
+lifetimes and storage levels first, then declare a fixed objective large enough
+to exceed measured machine drift.
