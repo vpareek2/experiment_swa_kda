@@ -615,3 +615,69 @@ uv run --no-sync research doctor --config configs/research/discovery.toml
   inspect or derive their private state in the candidate workspace.
 - Integrate and validate attempt342 on `main`, then retire its final secondary
   worktree. Keep branch/tag pruning as a separately reviewed archival action.
+
+## 2026-08-12 [codex] remove rebuildable run caches
+
+**Context**
+
+- After worktree retirement, the canonical ignored `runs/` tree still occupied
+  156 GiB. The user asked to continue cleanup after confirming that most of the
+  footprint was repeated CUDA/compiler state rather than historical evidence.
+- The retention policy preserved every log, config, metric, ledger, Nsight
+  report, profiler database, source ref, and checkpoint. Private confirmation
+  paths were excluded from selection and not inspected.
+
+**Commands**
+
+```bash
+uv run --no-sync python /tmp/plan_swa_kda_runs_cache_cleanup.py
+find runs -type f \( -name '*.pt' -o -name '*.sqlite' \
+  -o -name '*.nsys-rep' \) ! -path '*/confirmations/*' \
+  -print0 | sort -z | xargs -0 sha256sum \
+  > <archive>/runs-cache-cleanup/retained-heavy-evidence.sha256
+uv run --no-sync python /tmp/delete_swa_kda_runs_cache.py
+sha256sum -c --quiet <archive>/publication-files.sha256
+sha256sum -c --quiet \
+  <archive>/runs-cache-cleanup/retained-heavy-evidence.sha256
+uv run --no-sync research doctor --config configs/research/discovery.toml
+```
+
+**Artifacts**
+
+- Cache-cleanup records under
+  `<Master>/archives/experiment_swa_kda/2026-08-11-worktree-cleanup/runs-cache-cleanup/`.
+- The records include the exact compressed deletion manifest, retention policy,
+  retained-heavy-evidence hashes, deletion result, and post-cleanup residue
+  report.
+
+**Result**
+
+- The pre-delete pass validated all 1,459,034 selected files before unlinking
+  the first file. It proved zero overlap with confirmation paths or the 18,901
+  publication files.
+- Removed 137,586,745,998 bytes of rebuildable CUDA payloads, Python bytecode,
+  objects, shared libraries, Ninja state, and Triton intermediates. Also removed
+  257,437 directories that became empty. `runs/` fell from 156 GiB to 24 GiB,
+  and filesystem free space rose from 43 GiB to 175 GiB.
+- All retained publication checksums passed. Independent heavy-evidence hashes
+  passed for the non-confirmation checkpoints, profiler databases, and Nsight
+  reports. All 638 checkpoints, 448 Nsight reports, and 443 profiler SQLite
+  databases remain, totaling 19,534,127,041, 739,315,511, and 3,587,330,048
+  bytes respectively.
+- All 366 ledger rows remain; all 251 rows with a named artifact still resolve.
+  The cache selector reports zero remaining eligible files and bytes.
+- During verification, rerunning the planner overwrote the uncompressed working
+  deletion manifest with the expected empty residue plan. The untouched
+  compressed manifest restored all 1,459,034 original records; the empty result
+  is retained separately as `post-cleanup-residue.json`. No run evidence was
+  affected.
+- The two private confirmation worktrees and their `runs/` paths were untouched.
+
+**Next**
+
+- Copy the remaining 24 GiB `runs/` evidence tree and preservation archive to
+  independent storage for disaster recovery. A second copy on the same NVMe
+  would not protect against device failure.
+- Keep future run cleanup policy-based: retain conclusion-bearing summaries,
+  metrics, profiles, provenance, and selected checkpoints; remove compiled
+  caches only after a checksummed evidence gate.
