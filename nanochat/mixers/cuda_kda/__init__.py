@@ -11,6 +11,7 @@ _CHUNK_WY_BACKWARD_SOURCE = "nanochat/mixers/cuda_kda/chunk_wy_backward.cu"
 _RECURRENT_SOURCE = "nanochat/mixers/cuda_kda/recurrent_decode.cu"
 _CONVOLUTION_FORWARD_SOURCE = "nanochat/mixers/cuda_kda/causal_convolution_forward.cu"
 _CONVOLUTION_BACKWARD_SOURCE = "nanochat/mixers/cuda_kda/causal_convolution_backward.cu"
+_RMSNORM_GATE_SOURCE = "nanochat/mixers/cuda_kda/rmsnorm_gate.cu"
 _SOURCES = (
     _CHUNK_SOURCE,
     _CHUNK_WY_FORWARD_SOURCE,
@@ -18,6 +19,7 @@ _SOURCES = (
     _RECURRENT_SOURCE,
     _CONVOLUTION_FORWARD_SOURCE,
     _CONVOLUTION_BACKWARD_SOURCE,
+    _RMSNORM_GATE_SOURCE,
 )
 _COMPONENTS = (
     "chunk_forward",

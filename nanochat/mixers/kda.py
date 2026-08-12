@@ -415,6 +415,27 @@ class _ProjectKDAAutograd(torch.autograd.Function):
                 None, None, None)
 
 
+class _ProjectRMSNormGateAutograd(torch.autograd.Function):
+    """Expanded candidate boundary for the exact project training block."""
+
+    @staticmethod
+    def forward(ctx, x, gate, weight, epsilon):
+        output, inverse_rms = torch.ops.nanochat_kda.rmsnorm_gate_forward(
+            x, gate, weight, epsilon
+        )
+        ctx.epsilon = epsilon
+        ctx.save_for_backward(x, gate, weight, inverse_rms)
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        x, gate, weight, inverse_rms = ctx.saved_tensors
+        dx, dgate, dweight = torch.ops.nanochat_kda.rmsnorm_gate_backward(
+            x, gate, weight, inverse_rms, grad_output.contiguous(), ctx.epsilon
+        )
+        return dx, dgate, dweight, None
+
+
 class _ProjectConvolutionAutograd(torch.autograd.Function):
     """Protected convolution autograd boundary with a separately observed native backward."""
 
@@ -753,7 +774,23 @@ class KimiDeltaAttention(nn.Module):
         output_gate = self.g_proj(hidden_states).reshape(
             batch, length, self.num_heads, self.head_dim
         )
-        mixed = self.o_norm(mixed, output_gate)
+        use_project_fused_norm_gate = (
+            requested_mode == "project_chunk"
+            and memory is None
+            and not want_state
+            and mixed.is_cuda
+            and mixed.dtype == torch.bfloat16
+            and mixed.shape == (2, 4096, 3, 128)
+            and self.o_norm.weight.dtype == torch.float32
+            and torch.is_grad_enabled()
+            and mixed.requires_grad
+        )
+        if use_project_fused_norm_gate:
+            mixed = _ProjectRMSNormGateAutograd.apply(
+                mixed, output_gate, self.o_norm.weight, self.o_norm.eps
+            )
+        else:
+            mixed = self.o_norm(mixed, output_gate)
         output = self.o_proj(mixed.reshape(batch, length, self.hidden_size))
         final_state = None
         if want_state:
