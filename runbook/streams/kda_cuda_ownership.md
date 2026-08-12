@@ -15977,3 +15977,61 @@ retained V with measured evidence. Do not merge to production or launch a
 trainer until the combined complete operator reaches the existing 3.45-ms gate;
 50,000 tok/s remains an aspirational trainer target requiring substantially more
 than this approximately 0.205-ms block saving.
+
+
+## 2026-08-12 [codex] stop convolution-to-KDA boundary pilot below phase gate
+
+### Context
+
+The exact standalone fused RMSNorm/output-gate candidate advanced, but its
+approximately 0.205-ms full-layer saving was far short of the aspirational
+50,000 tok/s objective. The next bounded `do less work` pilot tested whether the
+three width-four project-owned causal-convolution forwards could be absorbed
+into the production KDA preprocessing CTA without changing state-bearing,
+decode, generic, or fallback paths.
+
+### Commands
+
+In isolated branch `kda-cuda/fused-convolution-kda-346`, added a private exact-
+shape native ABI taking the q/k/v linear projections and three BF16 [384,4]
+weights. The existing 1,024-thread preprocessing CTA evaluated each causal
+width-four dot product with the production product-BF16, accumulated-
+preactivation-BF16, SiLU, and output-BF16 boundaries before its normal q/k/v
+work. Tested two backward strategies: recompute all three convolution outputs
+before the existing KDA and convolution VJPs, or retain the fused q/k/v outputs
+from forward. Compared each to clean fused-norm commit `eff658c` in three
+ordered B2/T4096/H3/D128 BF16 blocks. Captured a complete-layer random-upstream
+comparison and cubin resources.
+
+### Artifacts
+
+- Prototype branch `kda-cuda/fused-convolution-kda-346`, commit
+  `c9e0ddb1f480bb041a92820cc6b020d8bb311445`.
+- Raw matched timings, exact comparisons, resource output, scripts, Nsight
+  Systems output, commit patch, and summary under
+  `runs/kda-do-less-work/20260812-fused-convolution-kda/`.
+
+### Result
+
+Both strategies were bitwise equal to the fused-norm base for full-layer output,
+input gradient, and every parameter gradient under random upstream gradients.
+The expanded preprocessing kernel remained REG40, 1,024 B static shared, and
+zero stack/local spill. Three standalone convolution forwards cost about
+0.170912 ms; the corresponding native forward-plus-backward calls cost about
+0.484288 ms.
+
+Backward recomputation was rejected: median forward regressed by 0.030448 ms and
+forward+backward regressed by 0.064080 ms. Retaining fused q/k/v was better and
+kept the isolated peak exactly at 212,341,248 B, but saved only 0.031360 ms
+forward and **0.071504 ms forward+backward**. It therefore failed the same
+0.20-ms phase gate and is not advanced. The prototype is preserved as negative
+evidence rather than merged. No trainer or quality run was launched.
+
+### Next
+
+Do not spend another phase on the convolution boundary: its measured complete-
+layer ceiling is too small. Keep `eff658c` as the only advanced implementation
+candidate. Re-profile that base at kernel level and select a backward-internal
+boundary or algorithmic deletion with a credible several-tenths-of-a-millisecond
+ceiling. Require a bounded pilot and complete-layer evidence before combining
+it with the advanced norm/gate change or launching any trainer.
