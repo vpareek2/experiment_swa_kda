@@ -16035,3 +16035,86 @@ candidate. Re-profile that base at kernel level and select a backward-internal
 boundary or algorithmic deletion with a credible several-tenths-of-a-millisecond
 ceiling. Require a bounded pilot and complete-layer evidence before combining
 it with the advanced norm/gate change or launching any trainer.
+
+## 2026-08-13 [codex] recover hardware counters and stop attempts 347-348 below layer gate
+
+### Context
+
+Nsight Compute hardware-counter access became available on the GB10 host after
+all prior internal and vertical-fusion attempts had been reviewed. The only
+advanced implementation foundation remained fused-norm commit
+`eff658ce448fbc8c2f347e13968b3b6bfe009c22`; neither pilot below changed `main`
+or any protected protocol. Candidate edits stayed inside
+`nanochat/mixers/cuda_kda/`.
+
+### Commands
+
+Captured a fresh ten-call Nsight Systems trace, then bounded one-launch Nsight
+Compute full-set reports for the eight dominant production kernels. Repeated the
+complete-VJP profile with hot-cache PM sampling. Built the identical source with
+metadata-only `-lineinfo` in isolated extension/CUDA caches and exported CUDA
+source/SASS correlation. An independent history review checked proposed
+mechanisms against attempts 1--346.
+
+Attempt347, on branch `kda-cuda/dual-key-complete-347`, batched two adjacent key
+strips in each helper/owner stage so the pair could reuse invariant dO/z/dZ WMMA
+operands and reduce full-CTA handoffs from nine to five. Its enlarged 52-KiB
+ping-pong storage used opt-in dynamic shared memory. Attempt348, on branch
+`kda-cuda/coalesced-restored-k-348`, reused the existing preprocess/build union
+as four padded 64x33 BF16 tiles. It preserved the key-major restored-key ABI and
+exact BF16 values while replacing the 64-BF16-strided publication with
+contiguous key-major global stores. Both pilots received independent random-
+upstream complete-layer equality checks, three interleaved timing blocks, and
+fresh Nsight Systems traces. Attempt348 also received a source-correlated
+Nsight Compute replay. Later gates were skipped when the fixed at-least-0.20-ms
+complete-layer forward-plus-backward threshold failed.
+
+### Artifacts
+
+- Counter reports, raw CSV, SASS/source exports, environment receipt, reusable
+  profiling scripts, and consolidated `summary.json` under
+  `runs/kda-hardware-guided/20260812-ncu-counters/`.
+- Attempt347 branch/commit
+  `kda-cuda/dual-key-complete-347` / `21e02d522e4dc1731427421bb90022d3eca19e6f`,
+  with evidence under `dual-key-pilot/`.
+- Attempt348 branch/commit
+  `kda-cuda/coalesced-restored-k-348` / `7e5ad7074043074a79a919a55177e0ac1360fa15`,
+  with evidence under `coalesced-restored-pilot/`.
+
+### Result
+
+The fresh production trace totaled 4.0498624 ms of GPU kernels per KDA call.
+The largest phases were complete VJP at 0.8012192 ms across eight launches and
+preprocess/build/solve at 0.6980704 ms. Preprocess was underutilized rather than
+peak-throughput bound: 26.42% compute, 33.01% memory throughput, 16.44% issue
+slots busy, 83.63% no-eligible-warp cycles, REG40, 96.77-KiB dynamic shared, and
+32.11 barrier-stall cycles per issued instruction. Hot-cache complete-VJP PM
+sampling still observed 25,337 long-scoreboard versus 13,957 barrier samples, so
+its latency diagnosis is not merely cold-cache replay behavior.
+
+Attempt347 was bitwise equal for the complete layer output, input gradient, and
+all parameter gradients. It nevertheless moved complete-VJP from 0.7986336 to
+0.8271040 ms/call and the median-of-three layer forward-plus-backward result
+from 6.124608 to 6.172560 ms. It is rejected.
+
+Source correlation found that the old restored-key store issued 3,145,728
+L1-tag requests and theoretical L2 sectors versus 196,608 ideal sectors: 93.75%
+were excessive. Attempt348 reduced that exact store to 98,304 L1-tag requests,
+196,608 theoretical/ideal L2 sectors, and zero excessive sectors without
+changing REG40, 96.77-KiB dynamic shared, occupancy class, spill behavior, peak
+allocation, or any sampled bit. Native preprocess timing improved from
+0.7165344 to 0.6194016 ms and all-core kernel sum from 4.0163936 to 3.9236768 ms;
+median layer forward improved by 0.074272 ms. The complete-layer
+forward-plus-backward median, however, moved from 6.033456 to 6.078448 ms across
+three blocks. This phase-only win fails the declared layer gate and is not
+advanced. The sector result is transaction-pressure evidence, not a claim of
+saved DRAM bytes. No checker, sanitizer, trainer, quality evaluation, or private
+confirmation was run after either performance stop.
+
+### Next
+
+Keep `eff658c` as the only advanced candidate foundation and preserve attempts
+347-348 as immutable negative/subthreshold evidence. Continue the history-aware
+counter review for one mechanism with a credible at-least-0.20-ms complete-layer
+saving. Do not combine phase-only changes or launch a trainer until that fixed
+gate passes.
