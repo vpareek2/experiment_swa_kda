@@ -681,3 +681,48 @@ uv run --no-sync research doctor --config configs/research/discovery.toml
 - Keep future run cleanup policy-based: retain conclusion-bearing summaries,
   metrics, profiles, provenance, and selected checkpoints; remove compiled
   caches only after a checksummed evidence gate.
+
+## 2026-08-12 [codex] integrate audited CUDA KDA attempt342
+
+**Context**
+
+- Attempt342 had cleared the fixed 43,680 tok/s target, protected ownership and
+  profile audits, all four CUDA sanitizers, and the frozen Level 1/2 gates, but
+  remained in its final secondary worktree rather than on `main`.
+- The user requested integration before selecting another optimization or
+  architecture-quality direction.
+
+**Commands**
+
+```bash
+git merge --no-ff kda-cuda/profile-symbol-compat-342 \
+  -m "Merge audited CUDA KDA attempt 342"
+uv run --no-sync python -m pytest -q
+uv run --no-sync research doctor --config configs/research/discovery.toml
+```
+
+**Artifacts**
+
+- Merge commit `85fcd46` on `main`.
+- Preserved audited candidate lineage ending at attempt342 commit `a237205`.
+- Existing attempt342 evidence remains under
+  `runs/kda-cuda-development/attempt-00342-*`.
+
+**Result**
+
+- Integrated the cumulative project-owned CUDA KDA implementation into `main`
+  without conflicts. The merge changes only eight files under
+  `nanochat/mixers/cuda_kda/` relative to the pre-merge main tree.
+- Full repository validation passed: 190 passed and 10 skipped, with the known
+  GB10/PyTorch SM121 capability warning.
+- Discovery doctor reports a valid environment and `research_ready=true` from
+  the clean merge commit. No new performance or architecture-quality campaign
+  was launched.
+
+**Next**
+
+- Use attempt342 as the implementation baseline for any separately declared
+  CUDA objective or matched SWA+KDA quality campaign.
+- Retire the attempt342 secondary worktree only after confirming no additional
+  worktree-local artifacts need preservation. Leave the two private
+  confirmation worktrees to the supervisor and do not inspect their state.
