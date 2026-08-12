@@ -19,6 +19,7 @@ so no architecture-quality result is claimed yet.
 
 - [Experiment evidence contract](references/experiment_evidence.md)
 - [DGX Spark / GB10 architecture notes](references/dgx_spark_gb10_architecture.md)
+- [GB10-guided KDA optimization plan](references/gb10_kda_hardware_guided_plan.md)
 
 ## Archive
 

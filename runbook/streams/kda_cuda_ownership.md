@@ -15750,3 +15750,83 @@ Build a production-shape GB10 roofline and an attempt342-versus-FLA phase and
 resource profile before designing another kernel. Specify intermediate
 lifetimes and storage levels first, then declare a fixed objective large enough
 to exceed measured machine drift.
+
+
+## 2026-08-12 [codex] complete the GB10-guided attempt342 implementation audit
+
+### Context
+
+The user requested a full implementation pass and either a simple
+hardware-guided improvement or a concrete plan capable of comfortably beating
+pinned FLA on the single GB10 target. The audited parent was clean `main` at
+`801165ac4a20c28d526078fc5ecce37c213c705d`, containing attempt342. This was a
+bounded implementation audit, not an autonomous training campaign.
+
+### Commands
+
+Read the Python dispatcher, exact training specialization, recurrent decoder,
+convolution kernels, all forward/backward CUDA phases, accepted histories, and
+saved resource/profile artifacts. Ran exact B2/T4096/H3/K128/V128 BF16
+forward+backward benchmarks for project CUDA and pinned FLA; captured ten-call
+Nsight Systems profiles; queried kernel resources; and attempted Nsight Compute.
+Ran a corrected exact-shape FLA C32/C64 A/B. In isolated temporary worktrees,
+removed the redundant recurrence-major transient A surface, compared output and
+all seven gradients under an independent random upstream gradient, ran the
+protected runtime/profile checker, and ran frozen CUDA Level 1.
+
+The first protected microbenchmark used its default B1/H1 shape and therefore
+did not enter the exact project specialization; it is retained only as a
+nonrepresentative diagnostic. The first FLA C32 run failed with
+`ptxas fatal: Value 'sm_121a' is not defined` because the repository Triton
+ptxas compatibility setup had not run; rerunning after the normal setup
+succeeded. Nsight Compute failed with `ERR_NVGPUCTRPERM`. The candidate checker
+first rejected the coordinator path, then rejected an unstaged candidate;
+staging the temporary one-file change made the intended checker invocation
+pass. Finally ran `uv run --no-sync python -m pytest -q` on unchanged main. No
+trainer, sanitizer, costly campaign, or private confirmation was run.
+
+### Artifacts
+
+- Baselines, exact paired operator samples, FLA C32/C64 A/B, and Nsight Systems
+  reports under `runs/kda-hardware-guided/20260812-baseline/`.
+- Protected transient-A checker under
+  `runs/kda-hardware-guided/20260812-retained-a-check-v3/`.
+- Frozen Level-1 result and full candidate provenance under
+  `runs/kda-hardware-guided/20260812-retained-a-level1/`.
+- `runbook/references/gb10_kda_hardware_guided_plan.md`.
+
+### Result
+
+The production specialization is already strongly GB10-specific. A fresh
+interleaved diagnostic measured project CUDA at 4.408320 ms and FLA at
+4.970016 ms, but the corresponding all-kernel Nsight sums were effectively tied
+at 4.068733 and 4.056579 ms per call. Project CUDA launched 112.7 total kernels
+per call versus FLA's 37.7, yet the saved history shows that launch-only changes
+do not supply the missing trainer margin. Attempt342's accepted trainer median
+remains 43,840 tok/s, only 0.366% over the fixed 43,680 tok/s FLA-derived target;
+a three-percent target requires approximately 0.8--0.9 ms saved from each of 24
+production KDA calls per update.
+
+The simple transient-A patch was bitwise equal for output and all seven
+gradients. It improved frozen T4096 forward+backward from 4.343440 to 4.303584 ms
+(0.918%) with unchanged 143,002,112-byte peak allocation. It missed the declared
+three-percent Level-1 gate, so the decision was `do_not_advance`; no source
+change was retained on `main`. The full repository suite passed with 190 tests
+passed and 10 skipped; PyTorch emitted its existing SM12.1 support-range warning.
+
+Pinned FLA C32 was 1.50% slower than C64 at the exact production shape
+(4.911248 versus 4.838816 ms) and raised peak allocation 6.18%. The next design
+therefore keeps C64 semantic/checkpoint boundaries while streaming C16 internal
+tiles. Its first gate is a two-resident-CTA, at-most-50-KiB/64-register factory
+that consumes solved T directly into U/W. A later same-group backward pipeline
+and explicitly authorized convolution/KDA plus normalization/gate fusion are the
+only remaining mechanism stack with a plausible 0.8--0.9 ms budget.
+
+### Next
+
+Keep attempt342 as the production baseline. Start only the bounded streaming-C64
+factory milestone, with a hard factory-plus-U/W target of at most 0.60 ms and no
+trainer before the complete operator reaches 3.45 ms. If the prototype cannot
+save roughly 0.25 ms, stop internal-kernel work and request explicit protected
+harness expansion for the fused-block ABI. Enable non-admin GPU performance
+counters before making roofline or DRAM-saturation claims.
