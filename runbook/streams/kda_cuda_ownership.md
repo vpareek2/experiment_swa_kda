@@ -16310,3 +16310,67 @@ memory, drift, training, and confidence result. Retain only if the supervisor
 reports `optimization_retained` eligibility. Only then launch the unchanged
 fifteen-pair `verify-release` gate for the new milestone. Preserve raw failures
 and do not switch the default backend.
+
+## 2026-08-13 [codex] human stop invalidates duplicate naive-anchor attempt 5
+
+### Context
+
+A final objective audit incorrectly treated the CUDA-ownership supervisor's
+empty `release_runs` list as proof that the already completed optimized campaign
+still needed its legacy fixed-anchor procedure. That procedure reruns the
+immutable naive implementation for every paired block. The user immediately
+stopped it and reiterated the standing rule: the naive implementation was run
+once, its evidence is recorded, and it must never be executed again. The valid
+performance baseline is the retained optimized approximately 44--45k tok/s
+implementation, not the intentionally impractical naive educational anchor.
+
+### Commands
+
+Sent SIGTERM to owned controller process group 13840, then audited the full
+process table rather than assuming the controller group covered its workers.
+That audit found detached block-0 naive training PID/PGID 16889, which was also
+terminated with SIGTERM. Neither process required SIGKILL. Deleted agent
+heartbeat `79b44900-131b-44be-8fe0-9f28316cab9d` so it cannot relaunch or advance
+the campaign. Preserved explicit controller/orphan stop receipts under
+`runs/cuda-ownership-supervisor/`. Used protected `recover` only to mark attempt
+5 invalid with the human-stop reason; no further benchmark or training command
+ran.
+
+### Artifacts
+
+- `runs/cuda-ownership-supervisor/attempt-00005-human-stop.json`
+- `runs/cuda-ownership-supervisor/attempt-00005-human-stop-orphan.json`
+- Preserved partial attempt directory
+  `runs/cuda-ownership-supervisor/6fdb0ec11d7e/attempt-00005/`
+- Preserved candidate branch `kda-cuda/ownership-release-350` at
+  `095186b840d50c5c427d33e9dc7ec5cc11cc5b08`; its source is byte-identical to
+  integrated attempt342, but it is not a retained supervisor milestone.
+
+### Result
+
+Attempt 5 is `invalid`, not scored. Its protected correctness, ownership,
+profile, and sanitizer preflight completed, and kernel diagnostics completed,
+but block 0 was interrupted while rerunning the naive baseline. There is no
+paired measurement, retention, release verification, or new performance claim.
+All controller, microbenchmark, and training processes are stopped, and the
+agent heartbeat is cancelled.
+
+There was no valid need to rerun the naive implementation. It is an immutable
+Python-to-FLA-to-naive-CUDA educational and ownership milestone whose one-time
+measurements already serve their purpose. Repeating it is prohibitively slow,
+does not answer whether the current optimized implementation improves on the
+retained approximately 44--45k tok/s baseline, and violates the user's explicit
+constraint. The legacy supervisor's naive-parent paired procedure is therefore
+incompatible with the current campaign and must not be used again. Any future
+release comparison must use saved naive evidence for historical reporting and a
+current optimized/FLA fixed anchor for performance, under an explicitly approved
+protocol that never executes naive code.
+
+### Next
+
+Do not run, calibrate, profile, benchmark, or train the naive implementation
+again. Do not resume attempt 5 or use `verify-release` from the current legacy
+supervisor, because both require naive execution. Stop autonomous CUDA campaign
+execution here. Further performance work requires a user-approved objective and
+protocol anchored to the retained optimized approximately 44--45k tok/s
+baseline, while the naive milestone remains saved evidence only.
