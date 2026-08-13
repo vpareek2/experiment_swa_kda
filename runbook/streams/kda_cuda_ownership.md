@@ -17332,3 +17332,62 @@ than the local-path surrogate and must not be described as equivalent KDA
 training, architecture-quality evidence, or promotion-ready. Any quality use
 requires the protected discovery and promotion workflow; do not infer it from
 the first seven losses.
+## 2026-08-13 [codex] reject exact graph/stream pilots and retain weight-cast cache as subthreshold
+
+### Context
+
+The user reopened the clean exact KDA training-throughput objective at 45,500
+tok/s from the approximately 44.5--44.7k fused-norm baseline. Frozen parameters,
+surrogate gradients, altered recurrent adjoints, and approximate KDA equations
+were explicitly disallowed. The retained 44,542 tok/s evidence requires a
+15.489-ms update saving; even the user's 44.7k reference requires roughly
+11.7 ms/update. All work remained isolated from `main` candidate source.
+
+### Commands
+
+Built bounded production-shape B2/T4096/H3/D128 BF16 pilots with isolated CUDA
+and Torch-extension caches. Tested whole-model CUDA Graph replay, independent
+128-thread named preprocess barriers, concurrent and backward-oriented KDA
+projection streams, and a parameter-versioned BF16 shadow of KDA linear weights
+across four accumulation microsteps. Each advancing Python mechanism received
+fixed-input output and random-upstream-gradient comparisons. No trainer,
+quality campaign, FLA runtime, naive CUDA path, or private confirmation ran.
+
+### Artifacts
+
+- Consolidated machine-readable result:
+  `runs/kda-speed-45500/20260813-exact-reopen/summary.json`.
+- Isolated branches: `kda-speed/named-preprocess-366`,
+  `kda-speed/multistream-367`, and `kda-speed/kda-weight-cache-368`.
+- Full-model graph pilot was evaluated from the exact retained source; its
+  generated production result records the 32,768-vocabulary workload.
+
+### Result
+
+Whole-model graph replay was bitwise equal for loss and all 103 parameter
+gradients but saved only 1.507 ms/update (694.869 to 693.362 ms). Replacing two
+full-CTA preprocess barriers with independent row-team barriers moved the KDA
+core only 4.333242 to 4.330666 ms/call, which is performance-neutral.
+
+Both projection-stream schedules were bitwise equal for layer output, hidden
+gradient, and all 14 parameter gradients. Six-way forward concurrency regressed
+6.058 to 8.084 ms/layer; serialized forward plus stream-tagged backward
+regressed 6.034 to 8.445 ms/layer. Synchronization and cache/resource contention
+overwhelmed any branch overlap.
+
+The KDA-only weight-cast cache used the FP32 parameter version as its invalidation
+key and attached a fresh cast-gradient edge on every forward, so it changed no
+parameter, equation, or accumulated gradient. Four-call output, hidden gradient,
+and all parameter gradients were bitwise equal. It saved 0.165 ms per four
+layer calls (23.949 to 23.784 ms), projecting to only 0.992 ms/update across six
+layers and about 44,602 tok/s from the conservative retained baseline. This is
+real exact subthreshold evidence, not a 45.5k candidate, and no trainer was run.
+
+### Next
+
+Keep the clean retained implementation. Do not stack the neutral/regressive
+pilots or launch a noisy trainer for the weight-cache microgain. An exact KDA-
+only path to 45.5k still needs a wholesale projection-backward or block ABI that
+accounts for roughly 11--15 ms/update before implementation; generic loss or
+MLP optimization would improve absolute training speed but would not answer the
+declared KDA-only objective.
