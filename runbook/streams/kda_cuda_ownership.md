@@ -17547,3 +17547,77 @@ Do not merge or stack the weight cache. Preserve its exact branch as negative
 translation evidence and keep clean main. No remaining previously measured
 exact-positive scheduling/cache/boundary mechanism has an untested realistic
 stack; another attempt requires a genuinely new target-sized KDA dataflow.
+
+## 2026-08-13 [codex] reject exact four-CTA clustered colored VJP
+
+### Context
+
+The user requested one final full scheduling/dataflow attempt toward the exact
+KDA hardware limit while preserving the current best. The proposed direction
+was a recurrence-owned persistent CTA-cluster backend. Work was isolated from
+clean `main` at `291cc5d4a4594ff60f6c6c931695a50cf03dcf99` in worktree
+`/home/veer/Master/projects/experiment_swa_kda_persistent_cluster`, branch
+`kda-cuda/persistent-cluster-backend-373`. The retained speed baseline tag
+`kda-speed-45500-baseline-20260812` remained unchanged. The first declared gate
+was exact backward complete-plus-colored time no greater than 0.95 ms per KDA
+call; forward persistence and trainer work were conditional on that gate.
+
+### Commands
+
+Compiled and ran a standalone SM121 cluster/DSM probe with `nvcc`, then built
+the candidate with isolated Torch-extension and CUDA caches. Refactored the
+colored-pair VJP into a device routine and launched one four-block cluster per
+local chunk. Each reverse group executes its four exact colors behind cluster
+barriers in one cluster launch, replacing four ordinary kernel launches. Ran a
+production B2/T4096/H3/D128 BF16 fixed-input, random-upstream layer comparison;
+three interleaved 30-sample layer blocks per implementation; and matched
+10-call Nsight Systems captures from the correct worktree for each commit. No
+trainer, FLA path, naive CUDA path, surrogate gradient, frozen parameter,
+quality campaign, or private confirmation ran.
+
+The first correctness capture completed but failed while saving to an incorrect
+artifact path. It was rerun with the corrected absolute path. The first
+baseline Nsight invocation ran from the candidate worktree and therefore
+imported candidate source; `baseline-profile.{nsys-rep,sqlite}` is preserved but
+invalid and excluded. The corrected trace is `baseline-profile-v2`.
+
+### Artifacts
+
+- Candidate commit `afd5ff90345ab7e32126b7aa46d910ee438bfef7`.
+- Consolidated result and layer JSON:
+  `runs/kda-persistent-cluster/20260813-attempt373/`.
+- Corrected matched traces and SQLite exports:
+  `baseline-profile-v2` and `candidate-profile-v2` in that directory.
+- Corrected production random-gradient capture: `candidate-random.pt`.
+- Hardware probe source retained on the candidate branch at
+  `nanochat/mixers/cuda_kda/cluster_probe.cu` and intentionally excluded from
+  the extension source list.
+
+### Result
+
+The GB10 reports cluster launch support, maximum cluster size eight, twelve
+active clusters for the 256-thread/40-KiB probe, and correct distributed shared
+memory exchange. The candidate is production-bitwise equal to exact main for
+layer output, hidden-state gradient, and all 14 named parameter gradients under
+random upstream gradients. Peak allocation is unchanged at 212,341,248 bytes.
+
+Performance fails the declared first gate. Median-of-run-medians layer
+forward+backward regresses from 6.074640 to 6.308608 ms, +0.233968 ms or 3.85%.
+The forward path is unchanged; its 1.914288 versus 1.898928 ms difference is
+noise. In corrected matched traces, complete-plus-colored rises from 1.266045
+to 1.534717 ms per KDA call, +0.268672 ms or 21.22%. The clustered colored phase
+alone rises from 0.490774 to 0.736470 ms. Launch count falls from 32 ordinary
+colored launches to eight cluster launches per call, but each cluster keeps
+four blocks resident while colors one through three have only two active pair
+blocks. Idle residency and cluster barriers dominate the saved launches.
+
+### Next
+
+Reject and do not merge attempt373. Preserve its clean branch as exact negative
+evidence and retain clean `main` as the best result. Do not extend this backend
+into forward persistence or run a trainer: the backward phase missed its
+0.95-ms gate by 0.584717 ms and is already slower than main at layer scope. A
+unified complete/colored DSM kernel would also assign the complete kernel's high
+register/shared-memory footprint to every clustered block and cannot be
+justified from this residency result without a new, independently quantified
+mechanism.
