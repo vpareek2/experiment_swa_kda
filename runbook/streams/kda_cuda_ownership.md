@@ -17190,9 +17190,10 @@ tests with 30 CUDA skips.
 Across-run medians were 44,689 tok/s for exact clean main and 48,788 tok/s for
 the candidate: +4,099 tok/s or +9.17%, and 3,288 tok/s above the 45,500 target.
 Every warmed candidate step was at least 48,645 tok/s. Peak allocation fell
-from 5,743.093 to 5,725.915 MiB. All seven short-run loss values matched, but
-this is expected to be weak early evidence because KDA output projections are
-zero-initialized and is explicitly not a quality conclusion.
+from 5,743.093 to 5,725.915 MiB. The first three loss values were exactly equal;
+the deterministic candidate then diverged from the deterministic baseline by
+at most 2.7732e-7 through step six. This tiny early difference is explicitly
+not a quality conclusion.
 
 The trace contains 48 local-path kernels averaging 201.671 microseconds and no
 exact WY-backward kernel. This proves the speed mechanism actually executed.
