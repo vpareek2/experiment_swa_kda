@@ -16921,3 +16921,78 @@ branch as negative evidence and keep clean `main`/the baseline tag as the best
 backup. Proceed to the separately scoped complete C16 forward+backward backend,
 which is the remaining mechanism with a credible native-core budget large
 enough to approach 45,500 tok/s.
+
+
+## 2026-08-12 [codex] reject C16 and zero-copy packed-projection pivots
+
+### Context
+
+The 45,500 tok/s objective requires 15.489 ms/update, or 0.645 ms across each
+of the 24 production KDA layer invocations. A source and upstream-history audit
+first tested whether a complete semantic-C16 training backend remained a
+credible wholesale mechanism. Current FlashKDA is forward/inference-only, while
+current FLA training uses semantic C64/C32 with internal C16 MMA tiles. FLA's
+recent producer-fusion experiment reported only 1.001--1.002x D128 forward plus
+backward improvement and was closed; the exact project-shaped FLA C32 pilot was
+also slower than C64. The old project C16 preparation attempt regressed because
+the recurrence and backward still scanned four times as many semantic chunks.
+
+The remaining projection hypothesis was materially different from the earlier
+copied pack: teach the project convolution and fused RMSNorm/gate consumers to
+read split views with a wide token stride, return dense logical gradients, and
+therefore eliminate all forward activation materializations. QKVG and QKV-only
+forms were tested as bounded lower bounds before any clean commit or trainer.
+The immutable naive CUDA implementation was not loaded or executed.
+
+### Commands
+
+Built the stride-aware project convolution forward/backward and fused
+RMSNorm/gate operators in the isolated
+`kda-speed/packed-qkvg-359` worktree. Ran the retained full-layer capture and
+positional comparison, then three independent 40-sample CUDA-event blocks for
+copy-based QKVG, zero-copy QKVG, zero-copy QKV, and clean `d516ab1` parent
+processes with isolated extension/Inductor caches. No trainer, sanitizer,
+quality evaluation, FLA execution, or legacy supervisor was launched.
+
+### Artifacts
+
+- Isolated worktree evidence:
+  `runs/kda-speed-45500/20260813-packed-qkvg/`.
+- Primary upstream review:
+  `https://github.com/fla-org/flash-linear-attention/pull/1054` and
+  `https://github.com/MoonshotAI/FlashKDA/blob/master/docs/20260420-flashkda-v1-deep-dive.md`.
+- Best backup remains tag `kda-speed-45500-baseline-20260812` and clean pushed
+  `main` at `d516ab1`.
+
+### Result
+
+The zero-copy ABI compiled and the QKVG full-layer output was bitwise identical
+to the clean parent. All convolution, KDA, norm, and output-projection gradients
+were bitwise identical. Changing four independent projection GEMMs into one
+wider GEMM changed only their expected BF16 reduction order: hidden-input
+gradient maximum absolute difference was 0.00390625.
+
+The copy-based QKVG median was 6.214784 ms versus 6.169152 ms for its parent;
+forward alone regressed by 0.268288 ms. Eliminating all four copies recovered
+that cost but did not create a useful complete-layer gain: zero-copy QKVG was
+6.043232 versus 6.048800 ms, only 0.005568 ms faster, while forward remained
+0.041840 ms slower and peak allocation increased by 5,734,400 bytes. QKV-only
+was 6.148416 versus 6.048800 ms and therefore regressed by 0.099616 ms despite
+reducing peak allocation by 524,288 bytes. Both are far below the 0.645-ms
+mechanism gate; no clean commit or trainer is justified.
+
+This closes semantic C16, ordinary packed projections, and packed projections
+with a zero-copy consumer ABI as routes to the current target. The Nsight
+Compute evidence still shows room: the preprocess kernel achieved only 26.42%
+compute and 33.01% memory throughput, with 83.63% no-eligible-warp cycles and
+issue/barrier stalls. The end-to-end KDA layer is not compute-bound, but the
+remaining opportunity is scheduling/latency work inside the native KDA core,
+not another horizontal GEMM pack.
+
+### Next
+
+Keep `main` unchanged. Any further 45.5k candidate must account for at least
+0.645 ms per production layer invocation by removing native KDA-core stalls or
+intermediate traffic. Do not reopen QKV/QKVG/five-projection packing or a
+semantic-C16 chunk-size switch. Re-profile only after a new native schedule has
+a quantified mechanism at that scale.
