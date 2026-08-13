@@ -17203,3 +17203,44 @@ Retain the tagged branch as the fastest speed result. Do not promote it or
 claim equivalent KDA quality until the declared discovery and promotion gates
 evaluate the biased gradient. One bounded speed follow-up may stack the already
 positive exact per-mixer CUDA Graph replay; preserve this tag before doing so.
+
+
+## 2026-08-13 [codex] CUDA Graph stack lowers memory but not local-surrogate speed
+
+### Context
+
+The exact mixer-only CUDA Graph candidate had previously added 0.177% matched
+throughput. After tagging the 48,788 tok/s local-path result, the same clean
+graph commit was stacked to test whether its launch reduction remained useful
+after the exact recurrent backward had been replaced by one local kernel.
+
+### Commands
+
+Created an isolated branch from `9999d08`, cherry-picked the reviewed graph
+commit, and ran a clean three-step production trainer smoke with isolated
+caches. No quality evaluation, FLA, naive implementation, discovery, promotion,
+or protected confirmation was invoked.
+
+### Artifacts
+
+- Branch: `kda-speed/local-surrogate-graph-364` at `9de2310`.
+- Smoke evidence in the isolated worktree:
+  `runs/kda-speed-45500/20260813-local-surrogate-graph/`.
+- Main-worktree synthesis:
+  `runs/kda-speed-45500/20260813-local-surrogate-graph/summary.json`.
+
+### Result
+
+The stack completed with the same first three losses and reduced peak allocation
+from 5,725.915 to 5,222.505 MiB. Its two warmed steps were only 48,433 and
+48,364 tok/s, both below the retained ungraphed candidate's 48.6--49.0k matched
+regime. Once the recurrent VJP is a single native local kernel, mixer graph
+replay no longer improves speed. It is rejected without matched escalation.
+
+### Next
+
+Keep `kda-speed-48788-local-path-20260813` as the speed winner and exact clean
+main as the quality-safe baseline. The 45,500 tok/s objective is exceeded by
+3,288 tok/s with clean matched evidence. Any future work should first evaluate
+the biased-gradient candidate's discovery quality rather than stack more launch
+micro-optimizations.
