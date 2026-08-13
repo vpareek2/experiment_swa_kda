@@ -17391,3 +17391,57 @@ only path to 45.5k still needs a wholesale projection-backward or block ABI that
 accounts for roughly 11--15 ms/update before implementation; generic loss or
 MLP optimization would improve absolute training speed but would not answer the
 declared KDA-only objective.
+
+## 2026-08-14 [codex] close exact projection-backward ABI and output-gate overlap
+
+### Context
+
+The exact 45.5k reopening identified KDA-associated projection/backward work as
+the only broader boundary not already closed by the native attempts. From the
+fresh 44,799 tok/s profiled step, the absolute target needs about 11.264 ms per
+update. A production-layer backward-hook profile was used to distinguish a real
+target-sized budget from the prior combined 41.8-ms estimate.
+
+### Commands
+
+Profiled 30 complete B2/T4096/D384 KDA layer forward/backward calls with CUDA
+events around every KDA linear and convolution module. Then benchmarked two
+wholesale projection primitives on fixed BF16 tensors: four-way strided batched
+GEMM and a six-input-projection autograd ABI with separate exact forward GEMMs,
+individual weight-gradient GEMMs, and one packed hidden-gradient GEMM. Finally,
+tested a single side-stream output-gate projection against an otherwise
+unchanged KDA layer in seven interleaved 20-call blocks. No trainer, FLA, naive
+CUDA, approximation, frozen parameter, or surrogate backward ran.
+
+### Artifacts
+
+- Consolidated summary:
+  `runs/kda-speed-45500/20260813-exact-reopen/summary.json`.
+- Projection profile and primitive pilots in the same ignored evidence
+  directory.
+- Isolated output-gate branch: `kda-speed/output-gate-overlap-369`.
+
+### Result
+
+The eight KDA linear backwards sum to 0.754576 ms per layer call, or 18.110
+ms/update across the 24 calls, so the nominal attribution was large enough to
+test. It was not removable wall-time at the required scale. Four-way batched
+GEMM regressed 1.1873 to 1.6911 ms and changed gradients materially. The
+six-projection ABI kept every forward output and all six weight gradients
+bitwise equal, but changed hidden-gradient rounding by as much as 2.0 on the
+stress input and saved only 0.01624 ms. Thus it fails both numerical and
+mechanism gates.
+
+The single output-gate overlap avoided the six-stream contention hypothesis and
+was bitwise equal for output, hidden gradient, and all 14 parameter gradients.
+It nevertheless moved 6.00218 to 6.04196 ms/layer. Even one independent GEMM
+does not co-reside profitably with the shared-memory-heavy recurrent core on
+this GB10 lane.
+
+### Next
+
+Do not implement or train grouped/packed projection backward, and do not reopen
+projection side-stream overlap. The measured aggregate projection attribution
+cannot supply the 11.264-ms exact target gap. Retain clean `main`; any next exact
+attempt must identify a new target-sized mechanism rather than infer one from
+summed serial regions.
