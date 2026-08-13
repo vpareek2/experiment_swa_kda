@@ -156,24 +156,6 @@ class MLP(nn.Module):
         return x
 
 
-class _GraphedKDATrainingCall(nn.Module):
-    """Tensor-only graph boundary without re-registering the owned mixer."""
-
-    def __init__(self, mixer):
-        super().__init__()
-        object.__setattr__(self, "mixer", mixer)
-        object.__setattr__(self, "trainable", tuple(mixer.parameters()))
-
-    def parameters(self, recurse=True):
-        return iter(self.trainable)
-
-    def buffers(self, recurse=True):
-        return self.mixer.buffers(recurse=recurse)
-
-    def forward(self, x):
-        return self.mixer(x)[0]
-
-
 class Block(nn.Module):
     def __init__(self, config, layer_idx):
         super().__init__()
@@ -207,18 +189,13 @@ class Block(nn.Module):
                 mode = "recurrent" if kv_cache is not None and x.shape[1] == 1 else "chunk"
             else:
                 mode = "reference"
-            graphed_training = getattr(self, "_graphed_kda_training", None)
-            if graphed_training is not None and kv_cache is None:
-                mixed = graphed_training(norm(x))
-                state = None
-            else:
-                mixed, state = self.attn(
-                    norm(x),
-                    state=state,
-                    output_final_state=kv_cache is not None,
-                    mode=mode,
-                    allow_fallback=False,
-                )
+            mixed, state = self.attn(
+                norm(x),
+                state=state,
+                output_final_state=kv_cache is not None,
+                mode=mode,
+                allow_fallback=False,
+            )
             if kv_cache is not None:
                 kv_cache.set_kda_state(self.attn.layer_idx, state)
         else:
@@ -279,47 +256,6 @@ class GPT(nn.Module):
         cos, sin = self._precompute_rotary_embeddings(self.rotary_seq_len, head_dim)
         self.register_buffer("cos", cos, persistent=False) # persistent=False means it's not saved to the checkpoint
         self.register_buffer("sin", sin, persistent=False)
-
-    def _maybe_prepare_graphed_kda_training(self, sample):
-        """Capture the fixed production KDA sequence as ordered graph callables."""
-        if getattr(self, "_graphed_kda_training_ready", False):
-            return
-        eligible = (
-            self.training
-            and torch.is_grad_enabled()
-            and sample.requires_grad
-            and sample.is_cuda
-            and sample.dtype == torch.bfloat16
-            and sample.shape == (2, 4096, 384)
-            and self.config.kda_backend == "project_cuda"
-            and all(mixer_type == "K" for mixer_type in self.mixer_types)
-        )
-        if not eligible:
-            return
-        blocks = tuple(self.transformer.h)
-        # Profiling hooks need eager module boundaries. Leave those explicitly
-        # instrumented calls unchanged instead of capturing the hooks.
-        if any(
-            block.attn._forward_hooks
-            or block.attn._forward_pre_hooks
-            or block.attn._backward_hooks
-            for block in blocks
-        ):
-            return
-        wrappers = tuple(_GraphedKDATrainingCall(block.attn) for block in blocks)
-        samples = tuple(
-            (sample.detach().clone().requires_grad_(True),) for _ in wrappers
-        )
-        graphed = torch.cuda.make_graphed_callables(
-            wrappers,
-            samples,
-            num_warmup_iters=3,
-        )
-        for block, callable_ in zip(blocks, graphed):
-            # Bypass nn.Module registration: parameters remain owned exactly
-            # once by block.attn, preserving state dict and optimizer grouping.
-            object.__setattr__(block, "_graphed_kda_training", callable_)
-        object.__setattr__(self, "_graphed_kda_training_ready", True)
 
     @torch.no_grad()
     def init_weights(self):
@@ -646,8 +582,6 @@ class GPT(nn.Module):
 
         # Forward the trunk of the Transformer
         x0 = x  # save initial normalized embedding for x0 residual
-        if kv_cache is None:
-            self._maybe_prepare_graphed_kda_training(x)
         n_layer = self.config.n_layer
         backout_layer = n_layer // 2  # cache at halfway point
         x_backout = None
