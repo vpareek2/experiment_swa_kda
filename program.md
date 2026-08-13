@@ -1,39 +1,31 @@
-# Autoresearch Program
+# Exact KDA Autoresearch Program
 
-Your job is to discover defensible SWA/KDA architecture improvements, not to
-maximize a single visible number.
+The objective is the highest end-to-end KDA training throughput that preserves
+the complete KDA forward, backward, parameter updates, and numerical behavior.
+The fixed release workload and aggregation are defined in `docs/BENCHMARK.md`.
 
-## Mode selection
+## Optimization loop
 
-The default program below governs architecture-quality research. When a
-supervisor explicitly assigns the completed protected KDA training-speed loop,
-read and follow `program_kda_training_speed.md`. When it assigns the staged KDA
-CUDA-ownership loop, read and follow `program_kda_cuda_ownership.md` instead.
-Those modes have systems-only objectives and do not authorize quality training,
-general evaluation, or direct candidate edits by the supervisor.
+1. Read `AGENTS.md`, the latest KDA runbook entries, the normalized attempt
+   table, and the retained implementation before proposing work.
+2. Identify one profile-supported mechanism. State the expected saved time at
+   layer and trainer scope and a falsifiable phase gate.
+3. Create an isolated candidate from the retained exact baseline. Change one
+   primary scheduling, layout, fusion, or dataflow axis.
+4. Run focused oracle, boundary, random-upstream gradient, and accumulation
+   checks. A crash, timeout, sanitizer finding, fallback, or missing metric is
+   invalid. Any mathematical or optimizer divergence rejects the candidate.
+5. Commit the exact candidate and run production-shape Level 1 measurements.
+   Treat small effects within run-to-run noise as neutral.
+6. Only after a material Level 1 result, run matched end-to-end trainers in an
+   interleaved order. Preserve all runs and use the declared aggregate.
+7. Retain a candidate only when exactness and end-to-end improvement both hold.
+   Never retain a surrogate merely because its throughput is higher.
+8. Append the complete outcome to the ledger and KDA runbook, including negative
+   results and invalid invocations.
 
-1. Read `AGENTS.md`, `runbook/index.md`, and the active architecture/evaluation
-   streams. Verify `research doctor` and the current frontier artifacts.
-2. State one hypothesis and predicted observables. Change only one primary
-   architecture axis and only candidate-allowed paths.
-3. Run focused correctness tests. A masking, state, boundary, NaN, OOM, crash,
-   or artifact failure invalidates the candidate.
-4. Commit the candidate so the run has immutable provenance. Run the discovery
-   config; do not alter the protected config, probe, evaluator, data, tokenizer,
-   decision logic, or supervisor.
-5. Confirm the registered probe calibration matches the current protected-code
-   and protocol hashes; an absent or stale calibration makes the run invalid.
-6. Inspect BPB, memory AUC, update accuracy, worst slice, throughput, peak
-   memory, and state bytes. Keep a change only when its Pareto classification
-   and raw evidence justify it. `retest` is unresolved, not success.
-7. Record the hypothesis, commit, config, artifact path, complete metrics,
-   failure modes, and next decision in the runbook. Never cherry-pick only a
-   favorable seed or hide failed runs.
-8. Request promotion only after discovery correctness and frontier gates pass.
-   Promotion uses the fixed-token config and three declared seeds. Private
-   confirmation uses five supervisor-derived seeds in a separate restricted
-   environment and may not be inspected or tuned against by candidate agents.
-
-Do not change evaluation code to accommodate a candidate. If a legitimate new
-mixer needs a protocol extension, stop and ask a human to update and re-freeze
-the protected suite before comparing results.
+The detailed historical supervisor protocol remains in
+`program_kda_cuda_ownership.md`. It explains ownership auditing, native ABI,
+sanitizers, staged gates, and artifact capture. Current development starts from
+the exact retained `main` implementation; it does not restart the old migration
+or optimize against its fixed historical FLA target.

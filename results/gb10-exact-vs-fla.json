@@ -1,0 +1,96 @@
+{
+  "schema_version": 1,
+  "status": "complete",
+  "date": "2026-08-13",
+  "objective": "Three-pair same-session throughput confirmation of exact project KDA against pinned FLA",
+  "source": {
+    "measurement_commit": "ddb996a4d27390f1ca320835bc0578ad972e4c1f",
+    "performance_source_commit": "3bf680014ddf3a9d350c9e6fd0038aa6c6645d7e",
+    "source_equivalence": "No changes under nanochat, configs, scripts, tests, pyproject.toml, or uv.lock between commits; intervening commits are runbook-only"
+  },
+  "environment": {
+    "gpu": "NVIDIA GB10",
+    "compute_capability": "12.1",
+    "torch": "2.9.1+cu130",
+    "cuda": "13.0",
+    "fla_core": "0.5.2"
+  },
+  "protocol": {
+    "order": ["project-1", "fla-1", "fla-2", "project-2", "project-3", "fla-3"],
+    "seed": 42,
+    "precision": "bfloat16",
+    "execution": "eager",
+    "device_batch": 2,
+    "sequence_length": 4096,
+    "heads": 3,
+    "head_dimension": 128,
+    "layers": 6,
+    "accumulation_steps": 4,
+    "tokens_per_update": 32768,
+    "iterations_per_run": 7,
+    "scored_steps": [2, 3, 4, 5, 6],
+    "flash_kda": false,
+    "tilelang": false
+  },
+  "project": {
+    "backend": "project_cuda",
+    "run_medians_tokens_per_second": [45058, 44942, 44842],
+    "median_of_run_medians_tokens_per_second": 44942,
+    "run_median_step_ms": [727.2365093231201, 729.1123867034912, 730.7424545288086],
+    "peak_memory_mib": 5743.0927734375,
+    "repeat_loss_sequences_identical": true,
+    "stable_step_tokens_per_second": {
+      "project-1": [45122, 45058, 45079, 44326, 44786],
+      "project-2": [44824, 44954, 44980, 44912, 44942],
+      "project-3": [44854, 44702, 44842, 44838, 44873]
+    }
+  },
+  "fla": {
+    "backend": "fla_triton",
+    "run_medians_tokens_per_second": [43958, 43898, 43937],
+    "median_of_run_medians_tokens_per_second": 43937,
+    "run_median_step_ms": [745.4338073730469, 746.4568614959717, 745.7942962646484],
+    "peak_memory_mib": 5550.470703125,
+    "repeat_loss_sequences_identical": true,
+    "stable_step_tokens_per_second": {
+      "fla-1": [44092, 43956, 43807, 43958, 44147],
+      "fla-2": [43826, 43898, 43900, 43988, 43780],
+      "fla-3": [44011, 43937, 43777, 43931, 44014]
+    }
+  },
+  "comparison": {
+    "aggregate_delta_tokens_per_second": 1005,
+    "aggregate_relative_gain": 0.02287366001320068,
+    "positional_pair_deltas_tokens_per_second": [1100, 1044, 905],
+    "positional_pair_relative_gains": [0.025023886437053555, 0.023782404665360524, 0.02059767394223555],
+    "median_paired_delta_tokens_per_second": 1044,
+    "median_paired_relative_gain": 0.023782404665360524,
+    "all_pairs_favor_project": true
+  },
+  "release_framing": {
+    "strongest_observed_exact_tokens_per_second": 45058,
+    "confirmed_three_run_median_tokens_per_second": 44942,
+    "matched_fla_three_run_median_tokens_per_second": 43937,
+    "reporting_rule": "Always label 45,058 as the strongest observed run median and 44,942 as the aggregate three-run median"
+  },
+  "integrity": {
+    "all_runs_complete": true,
+    "all_backends_resolved_as_requested": true,
+    "fallback_allowed": false,
+    "parameters_frozen": 0,
+    "surrogate_backward_used": false,
+    "kda_equations_changed": false,
+    "naive_cuda_executed": false,
+    "quality_evaluated": false,
+    "correctness_basis": "Independent-oracle gradients, accumulated gradients, optimizer equivalence, backend audit, and sanitizer evidence from the source-equivalent audited implementation"
+  },
+  "raw_summary_sha256": "f8f6800f07df675e33b6e24e091963dfac64f38a0b13fe68e0c23e7d931bc25c",
+  "log_sha256": {
+    "project-1.log": "8e234faa46326a677357c49c581669c6ba31b272d57ecda6fe9853ebb4f44d82",
+    "fla-1.log": "fda64ce984a12e76cd66a3c6b7616828d98c54e2d69e3005e6cbe9096e7bea0b",
+    "fla-2.log": "d92ff433ef40a1fc596371c13d379edbc58f7d7b8b5ee4d40f6b8f4a0a02031b",
+    "project-2.log": "b49e496f0982f868a208e5265cab50cc675a2f73ca617e5bd8fc4840a8e31ad1",
+    "project-3.log": "395dd22051ce57a59cda4b5794780f74eb2ff40e505f429617ba2403c385fa34",
+    "fla-3.log": "2a65010fc911dddd222dea53f1a8559cfe294cab1bb5abe6e52bf3490e22bd0b"
+  }
+}

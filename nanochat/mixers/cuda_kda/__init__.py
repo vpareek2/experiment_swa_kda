@@ -1,4 +1,4 @@
-"""Minimal loader and provenance for the complete naive project CUDA backend."""
+"""Build loader and audited provenance for the complete project CUDA backend."""
 from __future__ import annotations
 
 import os

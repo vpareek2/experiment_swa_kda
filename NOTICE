@@ -1,0 +1,20 @@
+KDA Autoresearch attribution notice
+===================================
+
+This repository is derived from karpathy/nanochat, used under the MIT License.
+The upstream revision is recorded in UPSTREAM.md. The repository LICENSE retains
+the upstream MIT terms and copyright notice.
+
+The research process consulted these separately licensed, pinned references:
+
+- MoonshotAI/FlashKDA, commit 1ce47ea3bb22c84eb9cc665028399cf35e8ffb0b,
+  MIT License, Copyright (c) 2026 Moonshot AI.
+- fla-org/flash-linear-attention, commit
+  a3edffc39eb5a3d45e9deab5ff9ec4f14f88474d, MIT License,
+  Copyright (c) 2023-2026 Songlin Yang, Yu Zhang, Zhiyuan Li.
+- RishiShah99/lethe, commit e3ed0ccb5f8146f96dff8c507b915afdd696f96a,
+  MIT License, Copyright (c) 2026 Rishi Shah and Rishav Shrestha.
+
+Reference repositories live under the ignored local ref/ directory and are not
+vendored or imported by the retained project CUDA runtime. Pinned FLA is an
+optional benchmark comparator installed through the GPU dependency extra.

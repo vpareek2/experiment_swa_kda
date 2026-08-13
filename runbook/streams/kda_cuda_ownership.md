@@ -17689,3 +17689,53 @@ tok/s versus 43,937 tok/s for pinned FLA" as the release framing. Always label
 44,991.5 as a prior same-source observation, not as a separately optimized
 branch or a value to be combined statistically. Continue the planned repository
 reframe without changing the retained exact implementation.
+
+## 2026-08-13 [codex] prepare exact-KDA public release surface
+
+### Context
+
+The user chose to reframe the existing public research fork as
+`kda-autoresearch` for a blog-linked code-evidence release. The default branch
+still led with an obsolete SWA architecture program and said KDA had not yet
+been integrated, while the retained implementation and 366-event KDA campaign
+were already complete.
+
+### Commands
+
+Created the annotated archive tag `archive/swa-kda-research-20260813` at
+`267776eee4380dbd667c178e8915a2567fb20a46` and a verified full Git bundle
+outside the repository. Rewrote the release README, operating contract,
+autoresearch program, provenance, and runbook index around exact KDA. Added a
+frozen GB10 benchmark contract, numerical-integrity explanation, campaign
+guide, attribution notice, canonical sanitized result, and deterministic export
+script. Generated the normalized attempt CSV and campaign summary from the
+tracked append-only JSONL ledger. Removed SWA-only narrative streams from the
+default branch; retained nanochat attention/config substrate where runtime or
+tests still depend on it.
+
+### Artifacts
+
+- Archive tag: `archive/swa-kda-research-20260813`.
+- Local verified sibling bundle: `../experiment_swa_kda-archive-20260813.bundle`.
+- Bundle SHA-256:
+  `1dc376727f293185c8581b4417bd83c27f451932701446fe333463b0840dc311`.
+- Release evidence: `results/gb10-exact-vs-fla.json`,
+  `results/attempts.csv`, and `results/campaign-summary.json`.
+- Release documentation: `docs/BENCHMARK.md`,
+  `docs/NUMERICAL_INTEGRITY.md`, and `docs/CAMPAIGN.md`.
+
+### Result
+
+The release surface now leads with the strongest observed exact run median of
+45,058 tok/s and immediately discloses the confirmed 44,942 tok/s three-run
+median versus 43,937 tok/s FLA. It explicitly excludes the 48k--50k frozen-
+parameter/value-only surrogate from exact results. Published log hashes match
+the saved raw evidence. The pre-release history is recoverable from both the
+tag and verified 814-ref bundle; ignored local raw evidence was not removed.
+
+### Next
+
+Run export freshness, documentation/integrity checks, and the complete test
+suite. Commit the release surface from a clean result, push `main` and the
+archive tag, rename the GitHub repository to `kda-autoresearch`, then audit the
+exact remote branch retention set before deleting any historical branch.

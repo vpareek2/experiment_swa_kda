@@ -1,7 +1,7 @@
 [project]
-name = "nanochat"
+name = "kda-autoresearch"
 version = "0.1.0"
-description = "A reproducible research harness for SWA and recurrent linear-attention language models"
+description = "Evidence-first optimization of numerically exact KDA training on NVIDIA GB10"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
