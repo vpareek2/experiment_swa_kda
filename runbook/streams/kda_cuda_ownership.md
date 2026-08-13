@@ -17445,3 +17445,64 @@ projection side-stream overlap. The measured aggregate projection attribution
 cannot supply the 11.264-ms exact target gap. Retain clean `main`; any next exact
 attempt must identify a new target-sized mechanism rather than infer one from
 summed serial regions.
+## 2026-08-13 [codex] reject exact graph plus convolution-backward stack
+
+### Context
+
+The user resumed the exact KDA-throughput objective after asking whether a
+producer megakernel could close the remaining 45,500 tok/s gap. Audit first
+found that the proposed 1,024-thread producer/T-to-U/W megakernel and its
+512-thread residency variant had already been implemented as attempt343. Both
+were exact but far below their phase gate. Semantic C16 and C16-tiled local-VJP
+histories likewise left no new target-sized rewrite. The strongest nominally
+additive exact mechanisms were therefore the per-mixer CUDA Graph and the
+training-only fused KDA-to-three-convolution backward boundary.
+
+### Commands
+
+Created clean isolated branches `kda-speed/exact-graph-conv-stack-370` and
+`kda-speed/exact-conv-eager-371` from current `main` `3bf6800`. Composed the
+previously audited graph and fused-backward commits without changing their
+math. Ran a production B2/T4096/D384 random-upstream full-layer comparison,
+the complete repository pytest suite, then short matched seven-step exact
+trainers for clean main, eager fused backward, and the combined graph stack.
+Compared final checkpoints tensor by tensor. No FLA, naive CUDA, frozen
+parameter, surrogate gradient, quality campaign, or private confirmation ran.
+
+### Artifacts
+
+- Consolidated result:
+  `runs/kda-speed-45500/20260813-exact-graph-conv-stack/summary.json`.
+- Candidate branches/commits: `kda-speed/exact-graph-conv-stack-370` at
+  `d1af916` and `kda-speed/exact-conv-eager-371` at `5bfaa91`.
+- Production-layer captures and isolated extension/CUDA caches are preserved
+  under the same ignored evidence directory.
+
+### Result
+
+The combined source was bitwise equal to exact main for the production-layer
+output, hidden gradient, and every named parameter gradient under random
+upstream gradients. The suite passed with 190 tests and 10 skips. This narrow
+gate did not prove graph-replay accumulation correctness.
+
+Eager fused convolution/KDA backward preserved all seven trainer losses and
+the final values of every model tensor bitwise. Its warmed median was
+44,986.5 tok/s versus 44,991.5 tok/s for the contemporaneous exact baseline,
+so the earlier 0.119936-ms isolated layer saving did not translate.
+
+The graph-plus-fused stack was invalid for the user's numerical requirement.
+Its loss first diverged after the first optimizer update, and all 103 final
+model tensors differed from both exact baseline and exact eager fused
+backward; the largest maximum absolute difference was 0.0625 in the token
+embedding. It also regressed to 44,829.5 tok/s. Graph replay and the composite
+custom backward are therefore not composable merely because each isolated
+candidate passed its own narrower gate.
+
+### Next
+
+Do not merge, train further, or describe either stack as progress toward
+45,500 tok/s. Keep exact clean `main`. The producer megakernel, semantic/internal
+C16 rewrite, eager convolution boundary, and graph-plus-boundary stack are now
+closed by direct evidence. Any further exact KDA work requires a genuinely new
+wholesale ABI/dataflow with a quantified target-sized budget; do not stack the
+remaining subthreshold pilots.
