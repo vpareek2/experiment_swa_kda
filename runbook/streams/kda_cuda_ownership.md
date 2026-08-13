@@ -17654,7 +17654,7 @@ one-time Triton compile was excluded before scored execution.
 - Summary and six complete logs:
   `runs/kda-release/20260813-exact-vs-fla/`.
 - Summary SHA-256:
-  `f5999aec57a7c86a44d36032d6e0732d5559aa3e1f3f68517838247238bf4eb7`.
+  `f8f6800f07df675e33b6e24e091963dfac64f38a0b13fe68e0c23e7d931bc25c`.
 - The summary records each scored step, run median, positional pair, peak
   memory, environment, backend resolution, log hash, and invalid warm-up.
 
@@ -17676,14 +17676,16 @@ evidence. No parameter was frozen, no surrogate backward ran, no equation or
 source changed, and no quality evaluation ran.
 
 The new matched result confirms that the historical 44,991.5 observation was
-the same exact implementation in a slightly faster machine state rather than a
-forgotten candidate. It should remain historical context; **44,942 tok/s** is
-the stronger release headline because it is the new three-run matched result.
+the same exact implementation in a similar machine state rather than a
+forgotten candidate. The strongest observed exact run median is **45,058
+tok/s**. Release material may lead with that result as "up to 45,058 tok/s,"
+provided it immediately discloses the **44,942 tok/s three-run median**.
 
 ### Next
 
-Use 44,942 project versus 43,937 FLA as the release's primary exact throughput
-comparison and disclose the three run medians. Preserve 44,991.5 as a prior
-same-source observation, not as a separately optimized branch or a value to be
-combined statistically. Continue the planned repository reframe without
-changing the retained exact implementation.
+Use "exact KDA reaches up to 45,058 tok/s on GB10; three-run median 44,942
+tok/s versus 43,937 tok/s for pinned FLA" as the release framing. Always label
+45,058 as the strongest observed run median rather than the aggregate. Preserve
+44,991.5 as a prior same-source observation, not as a separately optimized
+branch or a value to be combined statistically. Continue the planned repository
+reframe without changing the retained exact implementation.
