@@ -16625,3 +16625,38 @@ consumer boundary: preserve forward and the virtual BF16 KDA-gradient boundary
 while avoiding publication and reread of full dq/dk/dv. Prototype it in an
 isolated candidate and require direct attempt342-derived correctness plus a
 clean `eff658c` layer F+B gate before any further trainer run.
+
+
+## 2026-08-13 [codex] fused-norm foundation promoted to main
+
+### Context
+
+The exact fused RMSNorm/output-gate candidate passed its saved layer gates and
+the project-only matched trainer comparison, so it was eligible to replace the
+integrated attempt342 layer boundary as the working source foundation.
+
+### Commands
+
+Cherry-picked the already-reviewed `eff658c` three-file candidate onto clean
+`main`, then ran the CPU/reference KDA layer, operator, and integration tests
+with CUDA hidden and compile disabled. No CUDA implementation, FLA runtime, or
+naive implementation was executed by this integration check.
+
+### Artifacts
+
+- Integrated commit: `2ef956a` (`Fuse production RMSNorm and output gate`).
+- Trainer evidence and summary hash remain:
+  `runs/kda-full-layer-campaign/20260813-project-fused-norm-trainer/` /
+  `6e77a73649356f53a8f806d03ebdaa249703c703f6fe563a26de6c37c893876a`.
+
+### Result
+
+`main` now contains the faster project-owned fused norm/gate training boundary.
+The focused CPU/reference suite passed 37 tests. Named parameters, checkpoint
+schema, optimizer grouping, and generic/state/decode routes are unchanged.
+
+### Next
+
+Continue the isolated composite KDA-backward/convolution-VJP candidate from the
+same source content. Require exact direct comparison and the declared layer
+performance gate before considering another main integration.
