@@ -16451,3 +16451,83 @@ scaling and projection packing are closed under the exact current equations.
 Quantify the remaining 50k update-time budget against production Nsight timing
 and obtain independent terminal review before either closing the optimized-only
 campaign or proposing a separately authorized wholesale algorithm/model change.
+
+
+## 2026-08-13 [codex] exact bounded 50k campaign reaches terminal budget
+
+### Context
+
+After the projection and batch-scaling gates failed, the remaining question was
+whether any untried bounded, equation-preserving change inside the candidate
+mixer could credibly reach 50,000 tok/s. This review is deliberately narrower
+than a claim that every possible CUDA program, KDA algorithm, or model
+architecture is impossible. It covers the exact current KDA equations, shape,
+training protocol, and candidate-owned mixer boundary.
+
+Attempt342's matched median is 43,840 tok/s for 32,768 tokens/update, or
+747.445255 ms/update. The 50k target is 655.360 ms/update, requiring 92.085255
+ms or 12.32% of the complete update. Production Nsight Systems measured all
+custom KDA forward/backward kernels at 4.0498624 ms per layer invocation. Six
+layers and four accumulation microsteps make 24 invocations, or only 97.196698
+ms/update of measured custom-KDA time.
+
+### Commands
+
+Performed a ledger/artifact budget synthesis only; no candidate, trainer,
+profile, sanitizer, calibration, ownership flow, or naive implementation was
+executed. Cross-checked the budget against attempt342's saved matched trainer
+summary, the ten-call production Nsight trace, attempts347--349, the advanced
+fused norm/gate result, projection feasibility, and clean B4/B8 complete-layer
+blocks. Requested an independent read-only terminal review; it recomputed the
+budget and agreed with the bounded terminal classification.
+
+### Artifacts
+
+- Terminal budget:
+  `runs/kda-50k-terminal/20260813-exact-budget/summary.json`, SHA-256
+  `becfe7f5b888a8f445ead233d1a17a5eeb1b23a8a4e4054d9562f418b6f68562`.
+- Production counter synthesis:
+  `runs/kda-hardware-guided/20260812-ncu-counters/summary.json`.
+- Advanced exact fused norm/gate:
+  `runs/kda-do-less-work/20260812-fused-rmsnorm-gate/summary.json`.
+- Projection, B4, and B8 summary SHA-256 values respectively:
+  `43fd545b8848b83751fc845a65830d19727b88f474e05cbb25695f4e0cc072ba`,
+  `ca5eb7ee3959243d96f3f7e468b4dd1e535c2d24f2d77c1bd3aea099c420edab`,
+  and `beb8b6c5c72d6dd74a4b9e9dbb35a751b3f723a34995e0f2e30d71df7a7f5ca0`.
+
+### Result
+
+Without any broader-boundary saving, an exact cuda_kda-only result would need
+to remove 94.74% of all measured native KDA time and leave about 0.213 ms for
+the complete layer KDA forward/backward kernels. Even granting the strongest
+advanced exact result, `eff658c` saves 0.205312 ms/invocation or 4.927494
+ms/update and projects only approximately 44.13k tok/s if perfectly additive.
+The remaining 50k budget still demands an 89.67% reduction of custom KDA time,
+leaving only 0.418289 ms/invocation.
+
+That is not a credible bounded optimization after attempts1--349: the complete
+VJP alone measures 0.801219 ms/invocation, the counter-guided exact rewrites
+regressed or failed complete-layer translation, restored-key coalescing removed
+93.75% excessive theoretical sectors without passing the layer gate, and the
+remaining source-correlated phases are individually too small or closed by the
+append-only history. Projection packing cannot span the budget, while B4 and B8
+made the complete layer slower. Reaching 50k now requires a wholesale
+algorithm/program/model intervention nearly equivalent, in wall-time budget,
+to deleting the current KDA operator—not another bounded native-kernel attempt.
+
+The exact bounded optimized-only campaign therefore stops honestly below the
+requested target. Attempt342 remains the integrated production baseline;
+`eff658c` remains an advanced, exact, modest fusion candidate without a trainer
+or quality claim. Attempts347--349 and 351--352 remain immutable negative or
+subthreshold evidence. No default backend, tag, protected protocol, or trainer
+result changed, and the naive implementation was never executed.
+
+### Next
+
+Do not launch another exact bounded candidate or trainer merely to continue an
+attempt count. A future 50k campaign requires explicit authorization and a new
+protocol for a much larger intervention: whole-block/model ABI fusion,
+replacement or approximation of the recurrent algorithm, altered precision,
+or an architecture/trainer change with parameter accounting and full quality
+evaluation. Such work is outside this closed exact CUDA optimization campaign.
+The permanent prohibition on executing naive CUDA remains unchanged.
