@@ -17094,3 +17094,112 @@ this lane. Keep exact fused-norm main as the foundation. The profile still says
 the KDA path is not compute-bound, but exploitable room must come from fewer
 native launches/intermediates or a materially different block algorithm—not
 oversubscribing the existing kernels across streams.
+
+
+## 2026-08-13 [codex] chunk-local KDA backpropagation is subthreshold
+
+### Context
+
+The failed 512-token group-parallel experiment still executed almost the full
+exact backward. A stronger TBPTT candidate retained the exact forward but
+detached the recurrent-state adjoint at every semantic C64 boundary, deleting
+the inter-chunk `dH`, `kg*dH`, `dE`, `dD`, and decay-boundary gradient terms.
+The predeclared trainer gate remained 0.645 ms per production-layer call.
+
+### Commands
+
+Implemented the candidate in an isolated worktree, rebuilt the project CUDA
+extension, compared two independent candidate captures against clean main, and
+measured 40 production-layer samples. No trainer, FLA, naive implementation,
+quality evaluation, or private confirmation was invoked.
+
+### Artifacts
+
+- Branch: `kda-speed/chunk-local-bptt-362` at `29ecca0`.
+- Evidence: `runs/kda-speed-45500/20260813-chunk-local-bptt/`.
+- Bias reference:
+  `https://proceedings.mlr.press/v115/aicher20a.html`.
+
+### Result
+
+Forward remained bitwise identical and two candidate processes reproduced all
+surrogate gradients bitwise. Forward+backward improved only from 6.120432 to
+6.037568 ms, a 0.082864-ms saving, because the dominant within-chunk WY VJP
+remained. This is only 12.8% of the required layer mechanism and is rejected
+without a trainer.
+
+### Next
+
+Do not revisit a shorter truncation while retaining the full within-chunk VJP.
+A logical rewrite must replace that VJP itself to expose a target-scale speed
+mechanism.
+
+
+## 2026-08-13 [codex] local-path KDA surrogate exceeds 45.5k
+
+### Context
+
+The exact forward contains a direct current-token contribution
+`beta * scale * <normalize(q), normalize(k)> * v`. The candidate preserves the
+complete exact recurrent forward but replaces its backward with the analytical
+VJP of only that direct term. One warp owns one token/head record and emits
+local gradients for Q, K, V, and beta in one CUDA kernel. Recurrent-state and
+decay/raw-gate credit paths are deliberately omitted. `A_log`, `dt_bias`, and
+the two raw-gate projection matrices remain in the state dict and forward but
+are frozen and excluded from optimizer groups: 592,146 frozen parameters in
+the six-layer target model.
+
+This is related to synthetic/local-gradient methods, which replace unavailable
+or expensive downstream gradients with locally available estimates, and to
+TBPTT's explicit compute-versus-bias tradeoff. It is not exact backpropagation.
+
+### Commands
+
+Implemented the native local-path VJP and explicit `kda_backward_mode` in an
+isolated candidate worktree. Compared the native kernel against its FP32
+analytical PyTorch expression, captured two independent full layers, ran the
+complete CPU/reference suite, and performed a dirty four-step optimizer smoke.
+Committed and pushed before conclusion-bearing work. Then ran six clean
+seven-step trainers in candidate/base/base/candidate/candidate/base order with
+isolated caches. Finally captured a clean two-step Nsight Systems trace and
+exported it to SQLite. No FLA, naive backend, protected confirmation, discovery,
+promotion, or quality evaluation was invoked.
+
+### Artifacts
+
+- Candidate branch/commit: `kda-speed/local-surrogate-363` at `9999d08`.
+- Best backup tag: `kda-speed-48788-local-path-20260813`.
+- Candidate declaration: `configs/candidates/kda_only_local_path.toml`.
+- Matched evidence and trace:
+  `runs/kda-speed-45500/20260813-local-surrogate-matched/`.
+- Local/synthetic-gradient inspiration:
+  `https://proceedings.mlr.press/v70/jaderberg17a.html` and
+  `https://proceedings.mlr.press/v70/czarnecki17a.html`.
+- Truncation-bias reference:
+  `https://proceedings.mlr.press/v115/aicher20a.html`.
+
+### Result
+
+The forward is bitwise identical to exact main. The native surrogate agrees
+with its FP32 analytical expression within BF16 rounding; two independent
+full-layer runs reproduce output, hidden-input gradient, and every trainable
+parameter gradient bitwise. All were finite. Frozen parameters are exactly the
+four declared tensors per KDA layer. The full CPU/reference suite passed 170
+tests with 30 CUDA skips.
+
+Across-run medians were 44,689 tok/s for exact clean main and 48,788 tok/s for
+the candidate: +4,099 tok/s or +9.17%, and 3,288 tok/s above the 45,500 target.
+Every warmed candidate step was at least 48,645 tok/s. Peak allocation fell
+from 5,743.093 to 5,725.915 MiB. All seven short-run loss values matched, but
+this is expected to be weak early evidence because KDA output projections are
+zero-initialized and is explicitly not a quality conclusion.
+
+The trace contains 48 local-path kernels averaging 201.671 microseconds and no
+exact WY-backward kernel. This proves the speed mechanism actually executed.
+
+### Next
+
+Retain the tagged branch as the fastest speed result. Do not promote it or
+claim equivalent KDA quality until the declared discovery and promotion gates
+evaluate the biased gradient. One bounded speed follow-up may stack the already
+positive exact per-mixer CUDA Graph replay; preserve this tag before doing so.
