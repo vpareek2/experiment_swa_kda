@@ -16660,3 +16660,65 @@ schema, optimizer grouping, and generic/state/decode routes are unchanged.
 Continue the isolated composite KDA-backward/convolution-VJP candidate from the
 same source content. Require exact direct comparison and the declared layer
 performance gate before considering another main integration.
+
+
+## 2026-08-13 [codex] exact KDA-to-convolution backward fusion is subthreshold
+
+### Context
+
+After the forward convolution/KDA fusion failed trainer translation, the last
+bounded complete-layer boundary with a measured >=0.20-ms ceiling was the
+reverse consumer between project KDA and the three width-4 convolution VJPs.
+The candidate keeps every forward operation unchanged, retains the virtual
+BF16 dq/dk/dv boundary, and consumes 512-token group-local virtual gradients
+with a three-row future halo rather than materializing three full-sequence KDA
+gradient tensors for later standalone convolution backward calls.
+
+### Commands
+
+Implemented the candidate in an isolated worktree from `eff658c`, restricted to
+`nanochat/mixers/kda.py` and `nanochat/mixers/cuda_kda/`. Built and loaded only
+the project-owned extension, ran 37 CPU/reference tests, and compared the full
+B2 x T4096 layer against `eff658c` under random, zero-upstream, and zero-input
+cases. An independent source review found and prompted fixes for W!=4 dispatch,
+visible-only sidecar safety, and provenance; the final commit was rebuilt and
+rechecked. Committed and pushed before timing. Ran three interleaved 20-sample
+blocks per side in base/candidate/candidate/base/base/candidate order with
+isolated caches. No FLA, naive implementation, legacy supervisor, sanitizer,
+trainer, or quality evaluation was invoked.
+
+### Artifacts
+
+- Candidate branch: `kda-cuda/fused-kda-conv-backward-356`.
+- Final candidate commit: `8eeb6893371049d62babb9ed5ec43f1b449ce28b`.
+- Evidence:
+  `runs/kda-full-layer-campaign/20260813-fused-kda-conv-backward/`.
+- Summary SHA-256:
+  `af98217b257587e34e47b9db51793f8a99ddebb6f421aa79c4ebb4fbd07266f3`.
+
+### Result
+
+The final candidate is bitwise identical to `eff658c` for full-layer output,
+hidden input gradient, and every named parameter gradient in all three edge
+cases. State-dict/parameter schema is identical; the generic width-three route
+remains finite and avoids the composite; a visible-only ordinary output is
+rejected before sidecar access. Runtime evidence contains only three project
+convolution forwards, project chunk forward/backward, and the actual project
+composite backward.
+
+Baseline F+B block medians were 6.004624, 6.219424, and 6.152416 ms; candidate
+medians were 6.032480, 6.015456, and 6.105840 ms. Medians across blocks were
+6.152416 versus 6.032480 ms, a 0.119936-ms or 1.95% saving. Forward improved by
+0.015696 ms. Peak allocation changed from 212,341,248 to 216,703,488 bytes, a
+1.02054x ratio. The candidate passes correctness, forward, and <=1.03x memory
+gates but fails both the predeclared >=0.20-ms saving and <=5.912480-ms absolute
+F+B gates. It is rejected; no trainer or sanitizer escalation is allowed.
+
+### Next
+
+Preserve the exact branch as negative/subthreshold evidence and keep `main` on
+the integrated fused-norm foundation. Do not stack or tune this boundary
+without a newly quantified mechanism. Obtain one final independent audit of
+whether any other bounded exact complete-layer mechanism remains; classify a
+wholesale C16 forward+backward backend redesign separately from an actionable
+bounded candidate.
