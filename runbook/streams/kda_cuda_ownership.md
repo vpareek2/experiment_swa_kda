@@ -16872,3 +16872,52 @@ before any trainer run. Do not reopen packed projections, rejected convolution
 boundaries, subthreshold stacking, or naive execution. If no block-fusion
 design has that mechanism budget, select the separately scoped complete C16
 forward/backward backend instead.
+
+
+## 2026-08-12 [codex] reject approximate fused output gate below the 45.5k gate
+
+### Context
+
+Primary-source FlashKDA uses `tanh.approx` to implement sigmoid cheaply. The
+retained project fused RMSNorm/output-gate kernels still used `expf`, making
+this a small, previously untested approximation axis. The candidate changed
+only the fused output-gate forward and backward sigmoid and retained the exact
+implementation under `NANOCHAT_DISABLE_SELECTIVE_PTX=1`. The immutable naive
+CUDA implementation remained prohibited and was not loaded or executed.
+
+### Commands
+
+Built the isolated worktree with separate Torch-extension and CUDA caches, ran
+the retained native odd-row/zero/extreme correctness cases, captured matched
+full-layer outputs and gradients, and measured three 40-sample production-layer
+blocks for candidate and clean parent. No trainer, sanitizer, quality campaign,
+FLA comparison, or legacy ownership-supervisor flow was launched.
+
+### Artifacts
+
+- Isolated branch: `kda-speed/rmsnorm-tanh-357` at `3d93254`.
+- Evidence: `runs/kda-speed-45500/20260812-rmsnorm-tanh/` in the isolated
+  worktree.
+- Machine-readable synthesis: `summary.json`.
+
+### Result
+
+Native edge tolerances, finiteness, determinism, and noncontiguous rejection
+passed. The approximate path was not bitwise equivalent at full-layer scale:
+maximum output and hidden-input-gradient differences were 0.0009765625 and
+0.001953125 respectively.
+
+The native forward median improved from 0.054912 to 0.043968 ms (19.93%), but
+native forward+backward regressed from 0.225968 to 0.228768 ms. Median complete-
+layer F+B across three process blocks was 6.095424 ms for clean parent and
+6.050720 ms for the candidate, a noisy 0.044704-ms or 0.73% saving. That is
+only 6.9% of the predeclared 0.645-ms-per-invocation target mechanism and does
+not justify trainer variance or accepting an approximation.
+
+### Next
+
+Do not stack, train, or promote the approximate gate. Preserve its isolated
+branch as negative evidence and keep clean `main`/the baseline tag as the best
+backup. Proceed to the separately scoped complete C16 forward+backward backend,
+which is the remaining mechanism with a credible native-core budget large
+enough to approach 45,500 tok/s.
