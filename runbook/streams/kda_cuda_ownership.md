@@ -16531,3 +16531,97 @@ replacement or approximation of the recurrent algorithm, altered precision,
 or an architecture/trainer change with parameter accounting and full quality
 evaluation. Such work is outside this closed exact CUDA optimization campaign.
 The permanent prohibition on executing naive CUDA remains unchanged.
+
+
+## 2026-08-13 [codex] project-only fused-norm trainer gain retained
+
+### Context
+
+The broader complete-layer campaign reopened end-to-end validation of the exact
+fused RMSNorm/output-gate candidate. The comparator was the integrated
+project-owned attempt342 implementation on clean `main`; FLA and the immutable
+naive implementation were excluded from loading and execution. The declared
+trainer lane is eager (`TORCH_COMPILE_DISABLE=1`), BF16, B2 x T4096, four
+accumulation microsteps, six all-KDA layers, and seven iterations.
+
+### Commands
+
+An initial baseline setup invocation accidentally omitted the frozen eager
+setting. It failed before step zero in the rank-polymorphic compiled AdamW path
+with `torch._dynamo.exc.FailOnRecompileLimitHit`; it is preserved and marked
+invalid/unscored. After correcting only that environment mismatch, ran the
+predeclared interleaved base/candidate/candidate/base/base/candidate order with
+isolated extension and CUDA caches. Every valid run resolved
+`kda_backend=project_cuda`, completed all seven steps, and produced the same
+final loss. No FLA, legacy ownership supervisor, naive CUDA, profile, sanitizer,
+or quality evaluation was invoked.
+
+### Artifacts
+
+- Matched evidence:
+  `runs/kda-full-layer-campaign/20260813-project-fused-norm-trainer/`.
+- Summary SHA-256:
+  `6e77a73649356f53a8f806d03ebdaa249703c703f6fe563a26de6c37c893876a`.
+- Baseline: clean `main` at `e24161b71687ac72f06e49460cd7fbea5bdd85f2`,
+  with integrated attempt342 CUDA source.
+- Candidate: `eff658ce448fbc8c2f347e13968b3b6bfe009c22` on
+  `kda-cuda/fused-rmsnorm-gate-345`.
+
+### Result
+
+The three baseline run medians were 44,339, 44,145, and 44,261 tok/s; the
+three candidate medians were 44,514, 44,604, and 44,542 tok/s. Medians across
+runs were therefore 44,261 versus 44,542 tok/s, a 0.6349% improvement. All
+three positional pairs favored the candidate by 0.3947%, 1.0398%, and 0.6349%.
+Peak allocation fell from 5,780.596 to 5,743.093 MiB. This establishes
+`eff658c` as the fastest measured exact project-owned working foundation, not a
+quality, inference, FlashKDA, or 50k claim.
+
+### Next
+
+Continue exact boundary optimization from `eff658c`. Retain smaller
+reproducible complete-trainer gains; do not require the old 2--3% historical
+promotion threshold merely to keep a faster working foundation. Any eventual
+architecture promotion still requires the protected quality protocol.
+
+
+## 2026-08-13 [codex] forward convolution fusion fails trainer translation
+
+### Context
+
+The earlier exact retained-QKV convolution/KDA forward fusion saved only
+0.071504 ms in isolated complete-layer F+B. It was tested end-to-end only after
+fused norm became the working foundation, again with project-owned CUDA on both
+sides and no FLA or naive runtime.
+
+### Commands
+
+Ran three interleaved seven-step trainer blocks per side in the same frozen
+eager B2 x T4096 lane. The baseline was `eff658c`; the candidate was
+`c9e0ddb1f480bb041a92820cc6b020d8bb311445`, which already includes the fused
+norm parent and changes only the project convolution/KDA forward boundary.
+Used isolated caches and required backend provenance plus identical final loss.
+
+### Artifacts
+
+- Matched evidence:
+  `runs/kda-full-layer-campaign/20260813-project-fused-conv-trainer/`.
+- Summary SHA-256:
+  `e7028ab2f687e3ee20ed4a81b8b41ddab32396849511357843399846786f48b4`.
+
+### Result
+
+Baseline run medians were 44,650, 44,597, and 44,683 tok/s; candidate medians
+were 44,638, 44,628, and 44,626 tok/s. The medians across runs were 44,650 and
+44,628 tok/s, a 0.0493% regression. Peak allocation was unchanged at
+5,743.093 MiB. The tiny forward-only boundary saving did not translate; the
+candidate is rejected and must not be stacked.
+
+### Next
+
+Keep `eff658c`. The only newly audited exact boundary with a credible >=0.20-ms
+layer ceiling is the training-only KDA-backward-to-three-convolution-VJP
+consumer boundary: preserve forward and the virtual BF16 KDA-gradient boundary
+while avoiding publication and reread of full dq/dk/dv. Prototype it in an
+isolated candidate and require direct attempt342-derived correctness plus a
+clean `eff658c` layer F+B gate before any further trainer run.
