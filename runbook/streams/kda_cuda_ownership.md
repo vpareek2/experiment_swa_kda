@@ -16722,3 +16722,58 @@ without a newly quantified mechanism. Obtain one final independent audit of
 whether any other bounded exact complete-layer mechanism remains; classify a
 wholesale C16 forward+backward backend redesign separately from an actionable
 bounded candidate.
+
+
+## 2026-08-13 [codex] bounded exact complete-layer campaign reaches terminal review
+
+### Context
+
+The exact reverse convolution consumer was the final bounded complete-layer
+mechanism with a predeclared >=0.20-ms ceiling. After it passed bitwise gates
+but saved only 0.119936 ms, an independent final review rechecked all retained
+and rejected boundary, convolution, projection, batch, forward, and KDA-internal
+histories for another concrete exact candidate.
+
+### Commands
+
+Synthesized existing clean-commit evidence only and requested an independent
+read-only terminal mechanism review. No build, CUDA kernel, profile, sanitizer,
+trainer, FLA, naive implementation, or legacy supervisor was invoked for the
+terminal synthesis.
+
+### Artifacts
+
+- Terminal synthesis:
+  `runs/kda-full-layer-campaign/20260813-exact-full-layer-terminal/summary.json`.
+- Summary SHA-256:
+  `36afbb511c6f40787ef31a580b4ec46877d10a4ff01da3eee5905e447a11a2ee`.
+- Retained source integration: `2ef956a`; retained exact candidate source:
+  `eff658ce448fbc8c2f347e13968b3b6bfe009c22`.
+
+### Result
+
+No still-untried bounded mechanism has a credible >=0.20-ms complete-layer
+saving under the exact equations, protected BF16 boundaries, named parameters,
+checkpoint/optimizer semantics, and fixed GB10 lane. Even over-generously
+stacking the rejected 0.119936-ms reverse boundary with the 0.071504-ms forward
+convolution boundary totals only 0.191440 ms and projects 5.960976 ms, still
+above the fixed 5.912480-ms gate; the forward candidate also already regressed
+matched trainer throughput. Projection packing's impossible copy-free ceiling
+is only 0.176688 ms and changes gradient reduction order, while known
+convolution retunes are negative or approximately 0.006-ms scale.
+
+The bounded exact complete-layer campaign therefore stops with fused norm/gate
+on `main`. Its project-only matched trainer median is 44,542 tok/s versus
+44,261 tok/s for integrated attempt342 in the fresh lane, with lower peak
+allocation. This is a training result only and carries no FlashKDA, inference,
+or quality claim.
+
+### Next
+
+Do not stack, sanitize, train, or promote `8eeb689`; preserve it as exact
+subthreshold evidence. Reopen performance work only under an explicitly new
+protocol for a wholesale project-owned backend/ABI redesign, such as a complete
+C16 forward+backward training backend or linear-GEMM/block fusion, with new
+correctness and performance gates. This terminal decision is not proof that
+such a wholesale redesign is impossible; it states only that no bounded exact
+candidate remains. The permanent naive-CUDA prohibition remains unchanged.
