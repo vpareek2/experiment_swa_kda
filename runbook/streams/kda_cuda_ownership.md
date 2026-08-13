@@ -16374,3 +16374,80 @@ supervisor, because both require naive execution. Stop autonomous CUDA campaign
 execution here. Further performance work requires a user-approved objective and
 protocol anchored to the retained optimized approximately 44--45k tok/s
 baseline, while the naive milestone remains saved evidence only.
+
+
+## 2026-08-13 [codex] optimized-only projection and batch-scaling pilots
+
+### Context
+
+The user clarified that the preceding stop applied only to the immutable naive
+CUDA implementation and authorized optimization from the retained approximately
+44--45k tok/s project-owned implementation toward 50k tok/s. The naive
+implementation remained saved evidence only and was never loaded or executed.
+The clean optimized foundation was integrated attempt342, with the already
+qualified fused RMSNorm/output-gate candidate `eff658c` used for broader block
+pilots.
+
+A history and source audit closed the proposed projection pack before a source
+candidate. Only q, k, v, f_a, beta, and output-gate projections share the layer
+input; f_b depends on the BF16-rounded f_a result. Preserving parameter names,
+state dicts, and independent Muon updates requires an ephemeral runtime weight
+concatenation. Its split activations are noncontiguous and cannot enter the
+project causal-convolution/fused-gate operators without materialization. The
+prior QKV-only pack `782b932` had already produced only +0.53% trainer
+throughput and was rejected.
+
+The larger tested intervention was device-batch scaling at fixed 32,768 tokens
+per optimizer update: one native B4 or B8 optimized call versus respectively
+two or four B2 calls. Candidate sources changed only the optimized WY batch
+constant and exact production dispatch guards. The generic token recurrence was
+never benchmarked, and no discovery/promotion config or legacy ownership
+supervisor was invoked.
+
+### Commands
+
+Created isolated B4 and B8 worktrees from `eff658c`, compiled with isolated
+extension/CUDA caches, and ran direct optimized-KDA correctness captures against
+concatenated B2 calls. Committed and pushed each source snapshot before the
+conclusion-bearing complete-layer rerun. Executed three ordered clean-commit
+blocks per side with 20 CUDA-event samples per block on
+`KimiDeltaAttention(384,3,128)`, BF16, T=4096, equal total rows, random upstream
+gradients, and recorded peak allocation. No trainer was launched because both
+candidates failed the complete-layer gate.
+
+### Artifacts
+
+- Projection feasibility:
+  `runs/kda-packed-projection/20260813-pilot/summary.json`.
+- B4 branch/commit: `kda-cuda/batch4-training-351` /
+  `7dcc436e575c031220eb1156c05055f4ec25939a`.
+- B4 evidence: `runs/kda-batch-scaling/20260813-batch4-pilot/`.
+- B8 branch/commit: `kda-cuda/batch8-training-352` /
+  `482d575330c147900f8587cb5f8360eeb5430137`.
+- B8 evidence: `runs/kda-batch-scaling/20260813-batch8-pilot/`.
+
+### Result
+
+The diagnostic five-projection aligned pack kept BF16 outputs bitwise equal but
+changed gradient reduction order. Its impossible view-only boundary saved only
+about 0.177 ms F+B and slightly regressed forward before required production
+copies. The feasible broader pack therefore has no credible complete-layer or
+50k ceiling and was closed without editing candidate source.
+
+Native B4 direct KDA was faster, but the clean equivalent-token complete layer
+regressed F+B from 12.479648 to 12.701520 ms; forward was effectively flat
+(3.852592 to 3.842192 ms), and peak rose from 345,145,344 to 399,314,432 bytes.
+Native B8 likewise accelerated direct KDA, but its clean complete layer
+regressed F+B from 25.670928 to 29.897744 ms; forward changed from 7.783664 to
+7.712144 ms, and peak rose from 610,622,464 to 774,243,840 bytes. Direct KDA
+rowwise outputs and activation gradients were exact; shared FP32 reductions
+showed only reduction-order differences. Neither result supports a trainer or
+quality claim.
+
+### Next
+
+Preserve both rejected branches as evidence and do not stack them. Device-batch
+scaling and projection packing are closed under the exact current equations.
+Quantify the remaining 50k update-time budget against production Nsight timing
+and obtain independent terminal review before either closing the optimized-only
+campaign or proposing a separately authorized wholesale algorithm/model change.
