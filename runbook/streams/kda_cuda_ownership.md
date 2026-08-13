@@ -17245,3 +17245,90 @@ main as the quality-safe baseline. The 45,500 tok/s objective is exceeded by
 3,288 tok/s with clean matched evidence. Any future work should first evaluate
 the biased-gradient candidate's discovery quality rather than stack more launch
 micro-optimizations.
+
+
+## 2026-08-13 [codex] value-only KDA surrogate exceeds 50k
+
+### Context
+
+The tagged local-path surrogate reached 48,788 tok/s but required another
+16.281 ms/update, or 0.678 ms per KDA-layer invocation, to reach 50,000. The
+previous exact KDA-to-convolution backward fusion had saved only 0.120 ms/layer,
+and the entire measured local-VJP plus convolution-backward kernel budget was
+only about 0.537 ms/layer. That ruled out the proposed fusion as a sufficient
+standalone mechanism. The next explicit speed-only candidate preserves the
+exact recurrent forward while retaining only the direct current-token value
+adjoint. It treats q, k, beta, and decay branches as forward constants and
+keeps all parameter/state-dict keys.
+
+### Commands
+
+Created isolated branch `kda-speed/value-path-365` from clean local-path commit
+`9999d08`. Added a one-warp-per-token/head native value VJP, explicit
+`value_path` dispatch/provenance, and config declaration. Ran the complete
+CPU/reference suite with CUDA hidden, native-versus-FP32 analytical checks,
+two-mode full-layer equality/determinism checks, compiled-resource inspection,
+and six interleaved isolated layer timing blocks. Committed and pushed before
+running three clean seven-step trainers per side in
+candidate/base/base/candidate/candidate/base order with isolated extension
+caches. Captured a clean two-step Nsight Systems trace and exported SQLite. No
+FLA, naive backend, discovery, promotion, confirmation, or quality evaluation
+ran.
+
+The first CPU command accidentally selected a newly created empty worktree
+virtualenv and stopped before running tests because `pytest` was unavailable;
+the established `uv` environment then passed. The initial long multi-run shell
+ended at the start of baseline-2 with an empty log and no metrics. That empty
+invocation is invalid and excluded; baseline-2 was rerun as its own complete
+process before continuing the declared order.
+
+### Artifacts
+
+- Candidate branch/commit: `kda-speed/value-path-365` at `2539406`, pushed.
+- Backup tag: `kda-speed-50542-value-path-20260813`, pushed.
+- Candidate declaration: `configs/candidates/kda_only_value_path.toml`.
+- Matched trainers, summary, and clean trace:
+  `runs/kda-speed-50000/20260813-value-path-matched/`.
+- Isolated pilot evidence:
+  `runs/kda-speed-50000/20260813-value-path-pilot/` in the candidate worktree.
+
+### Result
+
+The native value VJP is finite and deterministic and differs from its FP32
+analytical expression by at most 6.103516e-5 after BF16 publication. The full
+layer forward is bitwise identical to the local-path parent; the retained
+v-projection/convolution, output-gate, output-norm, and output-projection
+gradients are also bitwise identical. The candidate is deterministic and has
+no missing trainable or unexpected frozen gradients. The final CPU/reference
+suite passed 170 tests with 30 CUDA skips. The kernel is REG26, STACK0, LOCAL0.
+
+The isolated layer median improved 3.632880 to 2.771552 ms, saving 0.861328
+ms/layer or 23.71%, above the 0.678357-ms gate. The six-layer model freezes
+2,386,962 KDA parameters: A_log, dt_bias, q/k projections, q/k convolution
+weights, both raw-gate projections, and beta projection. These parameters still
+participate in the exact forward and remain checkpoint-compatible.
+
+Baseline run medians were 48,636, 48,029.5, and 48,922.5 tok/s. Candidate run
+medians were 50,511.5, 50,561.5, and 50,541.5 tok/s. Medians across runs were
+48,636 versus **50,541.5 tok/s**, a 1,905.5 tok/s or 3.918% improvement and
+541.5 tok/s above the target. Every one of 18 warmed candidate steps exceeded
+50k; the minimum was 50,254. Peak allocation fell 5,725.915 to 5,634.950 MiB.
+Candidate losses were mutually deterministic and differed from deterministic
+local-path losses by at most 6.63382e-7 through step six. This short-run loss
+proximity is not quality evidence.
+
+The clean trace contains 48 value-path kernels averaging 125.347 microseconds,
+zero local-path or exact WY backward kernels, and only one convolution-backward
+branch per mixer. Custom mixer launches fall 17 to 13 per call, while complete
+trainer launches fall 3,846 to 3,090 per update. The measured mechanism is
+therefore the intended deletion of q/k/beta gradient branches, not an
+unobserved backend or graph change.
+
+### Next
+
+Retain `kda-speed-50542-value-path-20260813` as the 50k speed result and keep
+exact clean `main` as the quality-safe source. This candidate is more biased
+than the local-path surrogate and must not be described as equivalent KDA
+training, architecture-quality evidence, or promotion-ready. Any quality use
+requires the protected discovery and promotion workflow; do not infer it from
+the first seven losses.
