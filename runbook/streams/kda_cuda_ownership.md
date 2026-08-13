@@ -17506,3 +17506,44 @@ C16 rewrite, eager convolution boundary, and graph-plus-boundary stack are now
 closed by direct evidence. Any further exact KDA work requires a genuinely new
 wholesale ABI/dataflow with a quantified target-sized budget; do not stack the
 remaining subthreshold pilots.
+
+## 2026-08-13 [codex] reject exact KDA weight cache as trainer-neutral
+
+### Context
+
+After the graph/composite-backward stack failed, the KDA-only BF16 linear-weight
+cache was the last independently exact eager mechanism with positive microbench
+evidence. Its parameter-version guard refreshes the detached BF16 value after
+each optimizer update while a custom autograd edge returns the ordinary FP32
+master-weight gradient on every accumulation microstep.
+
+### Commands
+
+Created clean isolated branch `kda-speed/exact-weight-cache-372` from documented
+main, applied the previously bitwise-audited cache source unchanged, ran 30
+focused integration/CUDA tests, committed the candidate, and ran a matched
+seven-step trainer against the immediately preceding clean-main baseline.
+Compared all final model tensors. No graph replay, fused convolution boundary,
+FLA, naive CUDA, surrogate gradient, frozen parameter, or quality campaign ran.
+
+### Artifacts
+
+- Candidate commit `640a7967c9d9b6d0d865044595af9856f11a64c2`.
+- Machine-readable result:
+  `runs/kda-speed-45500/20260813-exact-weight-cache-trainer/summary.json`.
+
+### Result
+
+All seven losses and all 103 final model tensors were bitwise equal to exact
+main. Focused tests passed 30/30. The candidate warmed median was 44,995.5
+tok/s versus 44,991.5 tok/s for baseline, a 4 tok/s difference that is
+performance-neutral and far below the 45,500 tok/s target. The earlier
+0.992-ms/update projection from a four-call microbenchmark does not translate
+into measurable trainer throughput.
+
+### Next
+
+Do not merge or stack the weight cache. Preserve its exact branch as negative
+translation evidence and keep clean main. No remaining previously measured
+exact-positive scheduling/cache/boundary mechanism has an untested realistic
+stack; another attempt requires a genuinely new target-sized KDA dataflow.
