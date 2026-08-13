@@ -17134,7 +17134,6 @@ Do not revisit a shorter truncation while retaining the full within-chunk VJP.
 A logical rewrite must replace that VJP itself to expose a target-scale speed
 mechanism.
 
-
 ## 2026-08-13 [codex] local-path KDA surrogate exceeds 45.5k
 
 ### Context
@@ -17621,3 +17620,70 @@ unified complete/colored DSM kernel would also assign the complete kernel's high
 register/shared-memory footprint to every clustered block and cannot be
 justified from this residency result without a new, independently quantified
 mechanism.
+
+## 2026-08-13 [codex] confirm exact main at 44,942 tok/s against pinned FLA
+
+### Context
+
+Before reframing the public repository for the KDA autoresearch release, the
+user requested evidence for the later 44,991.5 tok/s exact observation at the
+same depth as the earlier three-run 44,542 result. Source inspection established
+that the observation's commit `3bf6800` and current `main` at `ddb996a` are
+identical under `nanochat/`, `configs/`, `scripts/`, `tests/`, `pyproject.toml`,
+and `uv.lock`; the intervening commits change only this runbook. The requested
+comparison was three same-session pairs against pinned FLA rather than a quality
+campaign.
+
+### Commands
+
+Warm-built project CUDA and `fla-core==0.5.2` into fixed separate caches, then
+ran six seven-step trainers in the predeclared order project/FLA/FLA/project/
+project/FLA. Every run used seed 42, eager BF16, B2 x T4096, six all-KDA layers,
+four accumulation microsteps, 32,768 tokens/update, and identical data/model/
+optimizer settings. Project runs selected `project_cuda`; FLA runs selected
+`fla_triton`; `FLA_FLASH_KDA=0` and `FLA_TILELANG=0`. Scoring used the median of
+steps 2--6 in each run, then the median of three run medians.
+
+The first two warm-up invocations used an obsolete extra `--` separator and
+were rejected by the current argument parser before training. They are
+preserved as invalid/unscored. Corrected warm-ups completed; FLA's 105-second
+one-time Triton compile was excluded before scored execution.
+
+### Artifacts
+
+- Summary and six complete logs:
+  `runs/kda-release/20260813-exact-vs-fla/`.
+- Summary SHA-256:
+  `f5999aec57a7c86a44d36032d6e0732d5559aa3e1f3f68517838247238bf4eb7`.
+- The summary records each scored step, run median, positional pair, peak
+  memory, environment, backend resolution, log hash, and invalid warm-up.
+
+### Result
+
+Project run medians were **45,058, 44,942, and 44,842 tok/s**, giving a
+median-of-run-medians of **44,942 tok/s**. FLA run medians were **43,958,
+43,898, and 43,937 tok/s**, giving **43,937 tok/s**. The aggregate difference
+is +1,005 tok/s or +2.287%. All three positional pairs favored project by
++1,100, +1,044, and +905 tok/s; the median paired gain is +2.378%.
+
+All six runs completed, resolved the requested backend without fallback, and
+had finite losses. Loss sequences were identical across all three repeats of
+each backend. Project peak allocation was 5,743.093 MiB versus FLA's 5,550.471
+MiB. FLA is a same-session performance comparator, not the numerical oracle;
+the current project's exactness continues to rest on the already applicable
+independent-oracle gradient, accumulation, optimizer-equivalence, and sanitizer
+evidence. No parameter was frozen, no surrogate backward ran, no equation or
+source changed, and no quality evaluation ran.
+
+The new matched result confirms that the historical 44,991.5 observation was
+the same exact implementation in a slightly faster machine state rather than a
+forgotten candidate. It should remain historical context; **44,942 tok/s** is
+the stronger release headline because it is the new three-run matched result.
+
+### Next
+
+Use 44,942 project versus 43,937 FLA as the release's primary exact throughput
+comparison and disclose the three run medians. Preserve 44,991.5 as a prior
+same-source observation, not as a separately optimized branch or a value to be
+combined statistically. Continue the planned repository reframe without
+changing the retained exact implementation.
