@@ -16996,3 +16996,101 @@ Keep `main` unchanged. Any further 45.5k candidate must account for at least
 intermediate traffic. Do not reopen QKV/QKVG/five-projection packing or a
 semantic-C16 chunk-size switch. Re-profile only after a new native schedule has
 a quantified mechanism at that scale.
+
+
+## 2026-08-13 [codex] exact per-mixer CUDA Graph replay is positive but subthreshold
+
+### Context
+
+The fresh fused-norm profile showed substantial launch and scheduling latency,
+so the next exact candidate captured each fixed B2 x T4096 x D384 KDA mixer as
+a PyTorch graphed callable. The graph guard is training-only and refuses active
+module hooks. It does not change equations, parameters, optimizer semantics, or
+the ordinary eager path.
+
+### Commands
+
+Implemented the candidate in an isolated worktree, ran 24 CPU/reference tests,
+performed a one-layer output/gradient capture and CUDA-event pilot, then ran a
+clean-commit six-process matched trainer comparison in
+candidate/base/base/candidate/candidate/base order. No FLA, naive backend,
+quality evaluation, or protected confirmation was invoked. Attempts to capture
+the entire trunk or whole Block were invalid: backward capture failed with
+`cudaErrorStreamCaptureImplicit` from a legacy-stream dependency.
+
+### Artifacts
+
+- Branch: `kda-speed/kda-cudagraph-360` at `f95c5d4`.
+- Matched evidence:
+  `runs/kda-speed-45500/20260813-kda-cudagraph-matched/`.
+- Primary API references:
+  `https://docs.pytorch.org/docs/main/generated/torch.cuda.make_graphed_callables.html`
+  and
+  `https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/cuda-graphs.html`.
+
+### Result
+
+The one-layer pilot was bitwise identical for output, hidden-input gradient,
+and every named parameter gradient, and improved 6.064 to 5.678 ms. All six
+matched trainer runs reproduced the same seven loss values. Median across the
+three run medians was 44,589 tok/s for clean main and 44,668 tok/s for the
+candidate, a +79 tok/s or +0.177% change; all three positional pairs favored
+the candidate. Peak allocation was unchanged at 5,743.093 MiB. The exact gain
+is real but far below 45,500 tok/s, so it remains an isolated incremental
+backup rather than the new main foundation.
+
+### Next
+
+Do not treat mixer-only graph replay as the target solution or stack it with
+rejected micro-optimizations. A further candidate still needs approximately
+1.86% matched end-to-end throughput after this result, and must target native
+KDA scheduling or a wholesale KDA-block rewrite.
+
+
+## 2026-08-13 [codex] reject group-parallel truncated KDA backpropagation
+
+### Context
+
+To test a logical training rewrite rather than another exact micro-fusion, the
+candidate detached the recurrent-state adjoint at every 512-token boundary.
+Forward execution remained unchanged. This makes the eight reverse groups
+independent, allowing them to be submitted concurrently, but produces the
+standard biased truncated-BPTT gradient. The predeclared gate remained a
+0.645-ms production-layer saving before any trainer run.
+
+### Commands
+
+Implemented the schedule only in the project CUDA backward source, compiled it
+with isolated caches, captured the clean parent and two independent candidate
+runs, ran 24 CPU/reference tests, and measured 40 production-layer samples per
+side. A bounded four-stream follow-up was also compiled and attempted after the
+eight-stream result. No trainer, FLA, naive implementation, quality evaluation,
+or private confirmation was invoked.
+
+### Artifacts
+
+- Branch: `kda-speed/tbptt-group-parallel-361` at `03e3a97`.
+- Evidence and synthesis:
+  `runs/kda-speed-45500/20260813-tbptt-group-parallel/`.
+- TBPTT bias reference:
+  `https://proceedings.mlr.press/v115/aicher20a.html`.
+
+### Result
+
+Forward output remained bitwise identical. Two independent candidate captures
+were bitwise identical for hidden-input and all parameter gradients. Relative
+to exact main, only gradients containing cross-group state paths changed, as
+intended, and all were finite. The valid eight-stream schedule regressed
+forward+backward from 6.120432 to 8.194496 ms and increased peak allocation from
+212,341,248 to 300,065,280 bytes; forward alone was unchanged. The four-stream
+reuse follow-up was invalid, failing backward with
+`cudaErrorContextIsDestroyed`. The valid form is about 34% slower, so the
+candidate is rejected without a trainer.
+
+### Next
+
+Do not pursue concurrent reverse groups or claim TBPTT as a speed mechanism on
+this lane. Keep exact fused-norm main as the foundation. The profile still says
+the KDA path is not compute-bound, but exploitable room must come from fewer
+native launches/intermediates or a materially different block algorithm—not
+oversubscribing the existing kernels across streams.
