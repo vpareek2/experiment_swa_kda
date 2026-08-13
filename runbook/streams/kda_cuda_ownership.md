@@ -17732,10 +17732,17 @@ median versus 43,937 tok/s FLA. It explicitly excludes the 48k--50k frozen-
 parameter/value-only surrogate from exact results. Published log hashes match
 the saved raw evidence. The pre-release history is recoverable from both the
 tag and verified 814-ref bundle; ignored local raw evidence was not removed.
+The public repository was renamed to `vpareek2/kda-autoresearch`, its release
+description/topics were set, and the verified 2,795,578-byte bundle was attached
+to the archive release with its SHA-256. Every one of 362 historical remote
+branch tips and 15 superseded campaign tags was verified present in that bundle
+before deletion. The public ref surface now contains only `main` and the archive
+release tag; notably, rejected 48k/50k surrogate tags no longer compete with the
+exact result in the GitHub UI.
 
 ### Next
 
-Run export freshness, documentation/integrity checks, and the complete test
-suite. Commit the release surface from a clean result, push `main` and the
-archive tag, rename the GitHub repository to `kda-autoresearch`, then audit the
-exact remote branch retention set before deleting any historical branch.
+Tag the tested release commit, publish concise release notes, and verify the
+public repository/ref/release state. Future changes should start from exact
+`main`; recover historical candidate refs from the archive bundle rather than
+repopulating the default GitHub branch list.

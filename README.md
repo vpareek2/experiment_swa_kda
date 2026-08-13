@@ -82,9 +82,10 @@ and deliberately rejected surrogates. [docs/CAMPAIGN.md](docs/CAMPAIGN.md)
 explains how to read the record; [results/attempts.csv](results/attempts.csv)
 is the normalized public index.
 
-This release preserves the original research history at the annotated tag
-`archive/swa-kda-research-20260813`. The default branch is intentionally focused
-on the exact-KDA systems campaign.
+This release preserves the original research history in the
+[`archive/swa-kda-research-20260813`](https://github.com/vpareek2/kda-autoresearch/releases/tag/archive/swa-kda-research-20260813)
+release, including a verified full-history Git bundle. The default branch is
+intentionally focused on the exact-KDA systems campaign.
 
 ## Provenance and license
 
