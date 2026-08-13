@@ -16777,3 +16777,98 @@ C16 forward+backward training backend or linear-GEMM/block fusion, with new
 correctness and performance gates. This terminal decision is not proof that
 such a wholesale redesign is impossible; it states only that no bounded exact
 candidate remains. The permanent naive-CUDA prohibition remains unchanged.
+
+
+## 2026-08-12 [codex] profile fused-norm main against the 45.5k objective
+
+### Context
+
+The user narrowed the active objective to KDA training-speed optimization and
+set a 45,500 tok/s target. The retained working foundation is clean `main` at
+`30b845c`, containing the exact fused RMSNorm/output-gate implementation. The
+most recent Nsight traces predated that integration, so they could not attribute
+the remaining target gap. The immutable naive CUDA implementation remained
+prohibited and was not loaded or executed.
+
+At 32,768 tokens/update, the retained 44,542 tok/s matched median corresponds to
+735.665 ms/update. Reaching 45,500 tok/s requires 720.176 ms/update, a 15.489-ms
+or 2.151% saving. Across six KDA layers and four accumulation microsteps, that
+is 0.645 ms per production layer invocation.
+
+### Commands
+
+```bash
+TORCH_COMPILE_DISABLE=1 NANOCHAT_DTYPE=bfloat16 \
+  FLA_FLASH_KDA=0 FLA_TILELANG=0 \
+  nsys profile --trace=cuda,nvtx,osrt --sample=none --cpuctxsw=none \
+  --output runs/kda-speed-45500/20260812-current-main-profile/current-main \
+  uv run --no-sync python -m scripts.base_train \
+  --seed 42 --depth 6 --head-dim 128 --window-pattern K \
+  --kda-backend project_cuda --no-force-final-full --max-seq-len 4096 \
+  --device-batch-size 2 --total-batch-size 32768 --num-iterations 7 \
+  --eval-every -1 --core-metric-every -1 --sample-every -1 --save-every -1 \
+  --model-tag kda45500-current-main-profile --run dummy
+
+TORCH_COMPILE_DISABLE=1 NANOCHAT_DTYPE=bfloat16 \
+  FLA_FLASH_KDA=0 FLA_TILELANG=0 \
+  uv run --no-sync python -m scripts.base_train \
+  --seed 42 --depth 6 --head-dim 128 --window-pattern K \
+  --kda-backend project_cuda --no-force-final-full --max-seq-len 4096 \
+  --device-batch-size 2 --total-batch-size 32768 --num-iterations 2 \
+  --eval-every -1 --core-metric-every -1 --sample-every -1 --save-every -1 \
+  --model-tag kda45500-current-main-region-profile --run dummy \
+  --speed-profile-output runs/kda-speed-45500/20260812-current-main-profile/region-profile/profile.json \
+  --speed-profile-warmup-steps 1 --speed-profile-max-bytes 262144 \
+  --speed-profile-operator-rows 30
+```
+
+Exported the Nsight report to SQLite and used the fourteen paired
+`cudaDeviceSynchronize` calls around seven training updates to exclude the cold
+first step and aggregate the six warmed updates. No source candidate, FLA
+comparison, sanitizer, quality evaluation, or legacy ownership-supervisor flow
+was launched.
+
+### Artifacts
+
+- Fresh profile and synthesis:
+  `runs/kda-speed-45500/20260812-current-main-profile/`.
+- Nsight report/SQLite/log: `current-main.{nsys-rep,sqlite,log}`.
+- Protected bounded region profile:
+  `region-profile/{profile.json,profile.log}`.
+- Machine-readable conclusion: `summary.json`.
+
+### Result
+
+The six warmed Nsight steps measured 44,363--44,573 tok/s with 5,743.093 MiB
+peak allocation, reproducing the retained 44.5k regime. Stable per-update
+kernel sums were 98.903 ms for all model/optimizer GEMMs, 89.226 ms for the
+project KDA core, 10.618 ms for project causal convolution, and 4.219 ms for
+the project fused RMSNorm/gate. These sums are attribution, not automatically
+additive wall-time ceilings under stream overlap.
+
+The bounded region profile measured 47.807 ms across the six KDA-layer forward
+regions and 98.060 ms across their backward regions. Combining the same-clean-
+foundation region and kernel captures leaves approximately 41.8 ms/update for
+KDA-associated linear operations and boundary overhead. The 15.489-ms target
+gap is therefore about 37% of that entire budget. This is much larger than the
+earlier impossible copy-free five-projection pack's 4.24-ms/update saving, and
+the feasible copied pack already had no positive ceiling.
+
+The trace supports GEMM work only as a wholesale block-level ABI/backend
+redesign that removes several forward and backward producer-consumer
+boundaries. It does not support a collection of ordinary horizontal projection
+packs or a standalone RMSNorm/`o_proj` epilogue fusion as a credible 45.5k
+mechanism. The alternative wholesale direction is a complete C16
+forward/backward KDA backend, whose measured native-core budget is larger.
+
+### Next
+
+Keep clean fused-norm `main` as the 45.5k foundation. Before implementation,
+write the proposed GEMM/block-fusion dataflow and account for at least 15.489
+ms/update of removable work while preserving BF16 boundaries, named parameters,
+state dicts, independent optimizer updates, and exact gradient accumulation.
+Require an isolated production-layer saving of at least 0.645 ms/invocation
+before any trainer run. Do not reopen packed projections, rejected convolution
+boundaries, subthreshold stacking, or naive execution. If no block-fusion
+design has that mechanism budget, select the separately scoped complete C16
+forward/backward backend instead.
